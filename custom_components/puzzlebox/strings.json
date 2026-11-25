@@ -1,0 +1,44 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to the Puzzlebox app",
+        "description": "Enter the address of the Puzzlebox app and its bridge token (shown on the app's Settings page).",
+        "data": {
+          "url": "App URL",
+          "token": "Bridge token"
+        }
+      },
+      "hassio_confirm": {
+        "title": "Puzzlebox app found",
+        "description": "Connect Home Assistant to the Puzzlebox app? Programs appear as entities and integrations can add their own blocks."
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not connect to the app.",
+      "invalid_auth": "The bridge token was rejected."
+    },
+    "abort": {
+      "already_configured": "Already connected to the Puzzlebox app."
+    }
+  },
+  "services": {
+    "run_program": {
+      "name": "Run program",
+      "description": "Runs a Puzzlebox program now.",
+      "fields": {
+        "program": { "name": "Program", "description": "Program name or id." },
+        "variables": { "name": "Variables", "description": "Data available to the program as trigger variables." }
+      }
+    },
+    "set_variable": {
+      "name": "Set stored variable",
+      "description": "Sets a stored variable that programs can read.",
+      "fields": {
+        "name": { "name": "Name", "description": "Variable name." },
+        "value": { "name": "Value", "description": "New value." },
+        "program": { "name": "Program", "description": "Program name or id. Leave empty for a global variable." }
+      }
+    }
+  }
+}

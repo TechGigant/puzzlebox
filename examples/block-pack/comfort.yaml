@@ -1,0 +1,45 @@
+# Example declarative block pack. Copy to the app's packs/ folder.
+pack: comfort
+name: Comfort
+version: 1.0.0
+blocks:
+  - id: set_room_temperature
+    kind: action
+    title: Set room temperature
+    target: {domains: [climate], required: true}
+    params:
+      - {name: temperature, label: to, required: true, input: number, min: 5, max: 30, step: 0.5, unit: "°C", default: 21}
+    lowering:
+      type: ha_action
+      sequence:
+        - action: climate.set_temperature
+          target: {"$arg": target}
+          data: {temperature: {"$arg": temperature}}
+
+  - id: sun_down
+    kind: condition
+    title: sun is down
+    lowering:
+      type: ha_condition
+      config: {condition: state, entity_id: sun.sun, state: below_horizon}
+
+  - id: door_left_open
+    kind: trigger
+    title: door left open
+    params:
+      - {name: door, label: door, required: true, input: entity, domains: [binary_sensor], default: binary_sensor.front_door}
+      - {name: minutes, label: for (min), required: true, input: number, default: 5}
+    lowering:
+      type: ha_trigger
+      config:
+        trigger: state
+        entity_id: {"$arg": door}
+        to: "on"
+        for: {minutes: {"$arg": minutes}}
+
+  - id: feels_like
+    kind: value
+    title: feels-like temperature
+    lowering:
+      type: template
+      template: "{{ state_attr('weather.home', 'apparent_temperature') | float(0) }}"

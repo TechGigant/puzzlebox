@@ -1,0 +1,31 @@
+name: Puzzlebox
+version: "0.1.0"
+slug: puzzlebox
+url: https://github.com/TechGigant/puzzlebox
+image: ghcr.io/techgigant/puzzlebox-{arch}
+description: Build automations visually with blocks, backed by a programmable engine.
+arch:
+  - amd64
+  - aarch64
+init: false
+startup: application
+boot: auto
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:puzzle
+panel_title: Puzzlebox
+homeassistant_api: true
+hassio_api: true
+# Announces the app to the Puzzlebox companion integration.
+discovery:
+  - puzzlebox
+# Uses the Mosquitto broker app for MQTT blocks when it is installed.
+services:
+  - mqtt:want
+# /config in the container: packs/ and plugins/ for block packs and WASM plugins.
+map:
+  - addon_config:rw
+options:
+  log_level: info
+schema:
+  log_level: list(trace|debug|info|warn|error)

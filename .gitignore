@@ -1,0 +1,14 @@
+/target
+/data
+node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+.env
+
+# Standalone (wasm) crates
+examples/wasm-plugin/target
+sdk/rust-pdk/target
+examples/wasm-plugin/Cargo.lock
+sdk/rust-pdk/Cargo.lock
+frontend/public/blockly-media/

@@ -1,0 +1,15 @@
+[package]
+name = "puzzlebox-example-plugin"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+puzzlebox-pdk = { path = "../../sdk/rust-pdk" }
+extism-pdk = "1"

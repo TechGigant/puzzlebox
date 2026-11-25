@@ -1,0 +1,23 @@
+pack: example_wasm
+name: Example WASM
+version: 0.1.0
+description: Dew point calculation and a dark-aware light action.
+wasm: plugin.wasm
+capabilities:
+  states: true
+  kv: true
+  services: [light.turn_on]
+blocks:
+  - id: dew_point
+    kind: value
+    title: dew point
+    params:
+      - {name: temperature, label: temperature (°C), required: true, input: number, default: 21}
+      - {name: humidity, label: humidity (%), required: true, input: number, default: 55}
+    lowering: {type: plugin, plugin: example_wasm, function: dew_point}
+  - id: light_when_dark
+    kind: action
+    title: turn on light if dark
+    params:
+      - {name: light, label: light, required: true, input: entity, domains: [light], default: light.porch}
+    lowering: {type: plugin, plugin: example_wasm, function: light_when_dark}

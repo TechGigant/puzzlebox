@@ -1,0 +1,11 @@
+[package]
+name = "puzzlebox-ir"
+description = "puzzlebox intermediate representation and Blockly workspace compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true

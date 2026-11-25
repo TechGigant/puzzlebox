@@ -1,0 +1,179 @@
+import * as Blockly from 'blockly/core';
+
+type Item = Blockly.utils.toolbox.ToolboxItemInfo;
+type Def = Blockly.utils.toolbox.ToolboxDefinition;
+
+const num = (n: number) => ({ shadow: { type: 'math_number', fields: { NUM: n } } });
+const txt = (s: string) => ({ shadow: { type: 'text', fields: { TEXT: s } } });
+const entity = (e: string) => ({ block: { type: 'ha_entity', fields: { ENTITY: e } } });
+
+const block = (type: string, inputs?: Record<string, unknown>, extra: Record<string, unknown> = {}): Item =>
+  ({ kind: 'block', type, ...(inputs ? { inputs } : {}), ...extra }) as Item;
+
+const cat = (name: string, style: string, contents: Item[], extra: Record<string, unknown> = {}): Item =>
+  ({ kind: 'category', name, categorystyle: `${style}_category`, contents, ...extra }) as Item;
+
+/** Categories contributed at runtime (autogen + plugins); merged in by buildToolbox. */
+export interface ExtraCategory {
+  name: string;
+  style: string;
+  blocks: Item[];
+  subcategories?: ExtraCategory[];
+}
+
+
+function extraToItem(c: ExtraCategory): Item {
+  const contents: Item[] = [...(c.subcategories ?? []).map(extraToItem), ...c.blocks];
+  return cat(c.name, c.style, contents);
+}
+
+export function buildToolbox(extra: ExtraCategory[] = []): Def {
+  return {
+    kind: 'categoryToolbox',
+    contents: [
+      cat('Triggers', 'trigger', [
+        block('ha_when'),
+        block('ha_on_start'),
+        block('ha_on_run'),
+        block('ha_trigger_state'),
+        block('ha_trigger_numeric'),
+        block('ha_trigger_time'),
+        block('ha_trigger_sun'),
+        block('ha_trigger_event'),
+        block('ha_trigger_ha_start'),
+        block('engine_trigger_cron'),
+        block('engine_trigger_webhook'),
+        block('engine_trigger_mqtt'),
+        block('ha_trigger_raw'),
+        block('ha_trigger_data'),
+      ]),
+      cat('State', 'condition', [
+        block('ha_entity'),
+        block('ha_state'),
+        block('ha_attribute'),
+        block('ha_is_state'),
+        block('ha_template'),
+        block('ha_condition_raw'),
+      ]),
+      cat('Actions', 'action', [
+        block('ha_call_service', {
+          TARGET: entity('light.kitchen'),
+          DATA: { block: { type: 'dict_create', inputs: { ITEMS: { block: { type: 'dict_pair', fields: { KEY: 'brightness_pct' }, inputs: { VALUE: num(80) } } } } } },
+        }),
+        block('ha_wait', { SECONDS: num(5) }),
+        block('ha_wait_for_trigger', { TIMEOUT: num(60) }),
+        block('ha_log', { MESSAGE: txt('Hello') }),
+        block('ha_fire_event', { EVENT_TYPE: txt('my_event') }),
+        block('ha_action_raw'),
+      ]),
+      ...extra.map(extraToItem),
+      { kind: 'sep' } as Item,
+      cat('Flow', 'flow', [
+        block('controls_if'),
+        block('control_try'),
+        block('control_throw', { MESSAGE: txt('Something went wrong') }),
+        block('control_stop'),
+        block('control_parallel', {
+          BRANCHES: { block: { type: 'control_branch', next: { block: { type: 'control_branch' } } } },
+        }),
+        block('control_branch'),
+      ]),
+      cat('Logic', 'logic', [
+        block('logic_compare'),
+        block('logic_operation'),
+        block('logic_negate'),
+        block('logic_boolean'),
+        block('logic_null'),
+        block('logic_ternary'),
+      ]),
+      cat('Loops', 'loop', [
+        block('controls_repeat_ext', { TIMES: num(3) }),
+        block('controls_whileUntil'),
+        block('controls_for', { FROM: num(1), TO: num(10), BY: num(1) }),
+        block('controls_forEach'),
+        block('controls_flow_statements'),
+      ]),
+      cat('Math', 'math', [
+        block('math_number'),
+        block('math_arithmetic', { A: num(1), B: num(1) }),
+        block('math_single', { NUM: num(9) }),
+        block('math_round', { NUM: num(3.1) }),
+        block('math_modulo', { DIVIDEND: num(64), DIVISOR: num(10) }),
+        block('math_constrain', { VALUE: num(50), LOW: num(1), HIGH: num(100) }),
+        block('math_random_int', { FROM: num(1), TO: num(100) }),
+        block('math_on_list'),
+        block('math_number_property', { NUMBER_TO_CHECK: num(0) }),
+      ]),
+      cat('Text', 'text', [
+        block('text'),
+        block('text_join'),
+        block('text_length', { VALUE: txt('abc') }),
+        block('text_isEmpty', { VALUE: txt('') }),
+        block('text_contains', { FIND: txt('a') }),
+        block('text_changeCase', { TEXT: txt('abc') }),
+        block('text_trim', { TEXT: txt(' abc ') }),
+        block('text_to_number', { TEXT: txt('42') }),
+        block('to_text'),
+        block('text_append', { TEXT: txt('') }),
+      ]),
+      cat('Lists', 'list', [
+        block('lists_create_with'),
+        block('lists_length'),
+        block('lists_isEmpty'),
+        block('lists_getIndex'),
+        block('lists_setIndex'),
+        block('lists_indexOf'),
+        block('lists_sort'),
+        block('lists_split', { DELIM: txt(',') }),
+        block('lists_reverse'),
+        block('lists_repeat', { NUM: num(5) }),
+      ]),
+      cat('Dictionaries', 'dict', [
+        block('dict_create', { ITEMS: { block: { type: 'dict_pair' } } }),
+        block('dict_pair'),
+        block('dict_get', { KEY: txt('key') }),
+        block('dict_set', { KEY: txt('key') }),
+        block('dict_has', { KEY: txt('key') }),
+        block('dict_keys'),
+        block('dict_values'),
+        block('json_parse'),
+        block('json_stringify'),
+      ]),
+      cat('Time', 'time', [block('time_now'), block('time_part')]),
+      cat('Network', 'http', [
+        block('http_request', { URL: txt('https://example.com/api') }),
+        block('mqtt_publish', { TOPIC: txt('home/test'), PAYLOAD: txt('hello') }),
+      ]),
+      { kind: 'sep' } as Item,
+      cat('Variables', 'variable', [], { custom: 'VARIABLE' }),
+      cat('Stored', 'stored', [], { custom: 'STORED_VARIABLES' }),
+      cat('Functions', 'procedure', [], { custom: 'PROCEDURE' }),
+    ],
+  };
+}
+
+/** Flyout for persistent variables (typed 'Program' or 'Global'). */
+export function registerStoredVariablesCategory(ws: Blockly.WorkspaceSvg): void {
+  const create = (type: 'Program' | 'Global') => (button: Blockly.FlyoutButton) =>
+    Blockly.Variables.createVariableButtonHandler(button.getTargetWorkspace(), undefined, type);
+  ws.registerButtonCallback('CREATE_PROGRAM_VAR', create('Program'));
+  ws.registerButtonCallback('CREATE_GLOBAL_VAR', create('Global'));
+
+  ws.registerToolboxCategoryCallback('STORED_VARIABLES', (workspace) => {
+    const items: Blockly.utils.toolbox.FlyoutItemInfo[] = [
+      { kind: 'label', text: 'Kept across restarts' },
+      { kind: 'button', text: 'New program variable…', callbackkey: 'CREATE_PROGRAM_VAR' },
+      { kind: 'button', text: 'New global variable (shared)…', callbackkey: 'CREATE_GLOBAL_VAR' },
+    ];
+    const vars = [
+      ...workspace.getVariableMap().getVariablesOfType('Program'),
+      ...workspace.getVariableMap().getVariablesOfType('Global'),
+    ];
+    for (const v of vars) {
+      const ref = { id: v.getId() };
+      items.push({ kind: 'block', type: 'variables_set', fields: { VAR: ref } } as Blockly.utils.toolbox.FlyoutItemInfo);
+      items.push({ kind: 'block', type: 'variables_get', fields: { VAR: ref } } as Blockly.utils.toolbox.FlyoutItemInfo);
+    }
+    return items;
+  });
+}

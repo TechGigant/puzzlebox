@@ -1,0 +1,14 @@
+{
+  "domain": "puzzlebox",
+  "name": "Puzzlebox",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": ["webhook"],
+  "documentation": "https://github.com/TechGigant/puzzlebox",
+  "integration_type": "service",
+  "iot_class": "local_push",
+  "issue_tracker": "https://github.com/TechGigant/puzzlebox/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}

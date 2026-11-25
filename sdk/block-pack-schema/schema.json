@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/TechGigant/puzzlebox/sdk/block-pack-schema/schema.json",
+  "title": "puzzlebox block pack",
+  "description": "Schema version 1. Used by declarative packs, Python integrations (puzzlebox.api) and WASM plugins (plugin.yaml).",
+  "type": "object",
+  "required": ["pack", "name", "blocks"],
+  "properties": {
+    "pack": { "type": "string", "pattern": "^[a-z0-9_]+$", "description": "Unique pack id." },
+    "name": { "type": "string", "description": "Shown as the toolbox category (default for blocks)." },
+    "version": { "type": "string" },
+    "description": { "type": "string" },
+    "schema": { "type": "integer", "const": 1 },
+    "wasm": { "type": "string", "description": "WASM plugins only: module file next to plugin.yaml." },
+    "capabilities": {
+      "type": "object",
+      "description": "WASM plugins only: what the plugin may do.",
+      "properties": {
+        "http": { "type": "array", "items": { "type": "string" }, "description": "Allowed hosts, e.g. api.example.com or *.example.com." },
+        "services": { "type": "array", "items": { "type": "string" }, "description": "Allowed actions, e.g. light.turn_on or notify.*." },
+        "states": { "type": "boolean", "description": "May read entity states." },
+        "kv": { "type": "boolean", "description": "May use a private key/value store." },
+        "timeout_ms": { "type": "integer", "minimum": 1 },
+        "memory_mb": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "blocks": { "type": "array", "items": { "$ref": "#/$defs/block" } }
+  },
+  "$defs": {
+    "block": {
+      "type": "object",
+      "required": ["id", "kind", "title", "lowering"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9_]+$" },
+        "kind": { "enum": ["action", "trigger", "condition", "value"] },
+        "title": { "type": "string" },
+        "tooltip": { "type": "string" },
+        "help_url": { "type": "string" },
+        "category": { "type": "array", "items": { "type": "string" } },
+        "style": { "type": "string", "description": "trigger, condition, action, logic, … or any name (gets a stable colour)." },
+        "target": {
+          "type": "object",
+          "properties": {
+            "domains": { "type": "array", "items": { "type": "string" } },
+            "required": { "type": "boolean" }
+          }
+        },
+        "params": { "type": "array", "items": { "$ref": "#/$defs/param" } },
+        "lowering": { "$ref": "#/$defs/lowering" }
+      }
+    },
+    "param": {
+      "type": "object",
+      "required": ["name", "label", "input"],
+      "properties": {
+        "name": { "type": "string", "not": { "const": "target" } },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "required": { "type": "boolean" },
+        "default": {},
+        "input": { "enum": ["number", "text", "boolean", "select", "entity", "duration", "time", "color", "any"] },
+        "min": { "type": "number" },
+        "max": { "type": "number" },
+        "step": { "type": "number" },
+        "unit": { "type": "string" },
+        "multiline": { "type": "boolean" },
+        "domains": { "type": "array", "items": { "type": "string" } },
+        "options": {
+          "type": "array",
+          "items": { "type": "object", "required": ["label", "value"], "properties": { "label": { "type": "string" }, "value": { "type": "string" } } }
+        }
+      }
+    },
+    "lowering": {
+      "oneOf": [
+        { "type": "object", "required": ["type", "service"], "properties": { "type": { "const": "service" }, "service": { "type": "string" }, "response": { "type": "boolean" } } },
+        { "type": "object", "required": ["type", "config"], "properties": { "type": { "const": "ha_trigger" }, "config": { "type": "object" } } },
+        { "type": "object", "required": ["type", "config"], "properties": { "type": { "const": "ha_condition" }, "config": { "type": "object" } } },
+        { "type": "object", "required": ["type", "sequence"], "properties": { "type": { "const": "ha_action" }, "sequence": {} } },
+        { "type": "object", "required": ["type", "trigger"], "properties": { "type": { "const": "ha_trigger_platform" }, "trigger": { "type": "string" } } },
+        { "type": "object", "required": ["type", "condition"], "properties": { "type": { "const": "ha_condition_platform" }, "condition": { "type": "string" } } },
+        { "type": "object", "required": ["type", "template"], "properties": { "type": { "const": "template" }, "template": { "type": "string" } } },
+        { "type": "object", "required": ["type", "plugin", "function"], "properties": { "type": { "const": "plugin" }, "plugin": { "type": "string" }, "function": { "type": "string" } } }
+      ]
+    }
+  }
+}

@@ -1,0 +1,12 @@
+[package]
+name = "puzzlebox-registry"
+description = "puzzlebox block registry: HA autogen, declarative packs, plugin blocks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+puzzlebox-ir.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true

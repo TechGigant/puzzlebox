@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  image:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-latest
+          - arch: aarch64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Lowercase owner (GHCR names must be lowercase)
+        run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: addon/puzzlebox/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: |
+            ghcr.io/${{ env.OWNER }}/puzzlebox-${{ matrix.arch }}:${{ github.ref_name }}
+            ghcr.io/${{ env.OWNER }}/puzzlebox-${{ matrix.arch }}:latest
+          labels: |
+            io.hass.type=addon
+            io.hass.arch=${{ matrix.arch }}
+            io.hass.version=${{ github.ref_name }}
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+  github-release:
+    runs-on: ubuntu-latest
+    needs: image
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package companion integration
+        run: cd custom_components && zip -r ../puzzlebox.zip puzzlebox
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: puzzlebox.zip
+          generate_release_notes: true

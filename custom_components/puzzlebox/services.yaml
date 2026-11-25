@@ -1,0 +1,24 @@
+run_program:
+  fields:
+    program:
+      required: true
+      example: "Motion light"
+      selector:
+        text:
+    variables:
+      selector:
+        object:
+set_variable:
+  fields:
+    name:
+      required: true
+      example: "away_mode"
+      selector:
+        text:
+    value:
+      required: true
+      selector:
+        object:
+    program:
+      selector:
+        text:

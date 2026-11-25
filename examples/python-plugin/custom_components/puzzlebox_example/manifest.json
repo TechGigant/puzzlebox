@@ -1,0 +1,10 @@
+{
+  "domain": "puzzlebox_example",
+  "name": "Puzzlebox example blocks",
+  "after_dependencies": ["puzzlebox"],
+  "codeowners": [],
+  "documentation": "https://github.com/TechGigant/puzzlebox/tree/main/examples/python-plugin",
+  "iot_class": "calculated",
+  "requirements": [],
+  "version": "0.1.0"
+}

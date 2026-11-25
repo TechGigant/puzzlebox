@@ -1,0 +1,32 @@
+{
+  "name": "puzzlebox-frontend",
+  "private": true,
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "predev": "node scripts/copy-blockly-media.mjs",
+    "dev": "vite",
+    "prebuild": "node scripts/copy-blockly-media.mjs",
+    "build": "vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.2",
+    "@tsconfig/svelte": "^5.0.9",
+    "svelte": "^5.59.2",
+    "svelte-check": "^4.7.8",
+    "typescript": "^6.0.3",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.2"
+  },
+  "dependencies": {
+    "@blockly/block-plus-minus": "^13.5.0",
+    "@blockly/field-colour": "^13.5.0",
+    "@blockly/field-multilineinput": "^13.5.0",
+    "@blockly/plugin-workspace-search": "^13.5.0",
+    "@blockly/workspace-minimap": "^13.5.0",
+    "blockly": "^13.5.0"
+  }
+}

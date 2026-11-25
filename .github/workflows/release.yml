@@ -23,8 +23,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
-      - name: Lowercase owner (GHCR names must be lowercase)
-        run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - name: Image name and version
+        run: |
+          # GHCR names must be lowercase; the Supervisor pulls the tag that equals
+          # the app version in config.yaml (no "v" prefix).
+          echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+          VERSION="${GITHUB_REF_NAME#v}"
+          APP_VERSION=$(sed -n 's/^version: *"\{0,1\}\([^"]*\)"\{0,1\}$/\1/p' addon/puzzlebox/config.yaml)
+          if [ "$VERSION" != "$APP_VERSION" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match version $APP_VERSION in addon/puzzlebox/config.yaml"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -37,12 +47,12 @@ jobs:
           platforms: ${{ matrix.platform }}
           push: true
           tags: |
-            ghcr.io/${{ env.OWNER }}/puzzlebox-${{ matrix.arch }}:${{ github.ref_name }}
+            ghcr.io/${{ env.OWNER }}/puzzlebox-${{ matrix.arch }}:${{ env.VERSION }}
             ghcr.io/${{ env.OWNER }}/puzzlebox-${{ matrix.arch }}:latest
           labels: |
             io.hass.type=addon
             io.hass.arch=${{ matrix.arch }}
-            io.hass.version=${{ github.ref_name }}
+            io.hass.version=${{ env.VERSION }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 

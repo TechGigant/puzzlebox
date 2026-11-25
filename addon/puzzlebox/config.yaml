@@ -24,7 +24,7 @@ services:
   - mqtt:want
 # /config in the container: packs/ and plugins/ for block packs and WASM plugins.
 map:
-  - addon_config:rw
+  - app_config:rw
 options:
   log_level: info
 schema:

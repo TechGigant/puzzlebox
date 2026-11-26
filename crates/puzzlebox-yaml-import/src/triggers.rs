@@ -322,17 +322,6 @@ impl Builder {
         cfg.insert(key.into(), item.clone());
         self.raw_trigger(&Value::Object(cfg))
     }
-
-    /// A `duration` shadow in the largest unit that keeps the number whole.
-    fn duration(&mut self, seconds: f64) -> Value {
-        let (n, unit) = match seconds {
-            s if s != 0.0 && s % 3600.0 == 0.0 => (s / 3600.0, "hours"),
-            s if s != 0.0 && s % 60.0 == 0.0 => (s / 60.0, "minutes"),
-            s => (s, "seconds"),
-        };
-        let number = json!({"type": "math_number", "id": self.id(), "fields": {"NUM": num(n)}});
-        json!({"type": "duration", "id": self.id(), "fields": {"UNIT": unit}, "inputs": {"N": {"shadow": number}}})
-    }
 }
 
 fn shadow(block: &mut Value, input: &str, s: Value) {
@@ -340,10 +329,6 @@ fn shadow(block: &mut Value, input: &str, s: Value) {
         block["inputs"] = json!({});
     }
     block["inputs"][input] = json!({"shadow": s});
-}
-
-fn num(f: f64) -> Value {
-    if f.fract() == 0.0 && f.abs() < 9.0e15 { json!(f as i64) } else { json!(f) }
 }
 
 /// `- triggers: [...]` entries are spliced into the list, as HA does.

@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 fn import(conditions: &str) -> Imported {
     let indented: String = conditions.lines().map(|l| format!("  {l}\n")).collect();
     let text = format!(
-        "triggers:\n  - trigger: state\n    entity_id: binary_sensor.door\nconditions:\n{indented}actions:\n  - action: light.turn_on\n    target: {{entity_id: light.a}}\n"
+        "triggers:\n  - trigger: state\n    entity_id: binary_sensor.door\n    to: \"on\"\nconditions:\n{indented}actions:\n  - action: light.turn_on\n    target: {{entity_id: light.a}}\n"
     );
     let mut out = import_yaml(&text).unwrap();
     out.remove(0)

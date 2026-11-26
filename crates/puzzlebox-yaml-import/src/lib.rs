@@ -267,6 +267,19 @@ impl Builder {
         self.block("dict_create", json!({}), vec![("ITEMS", chain(pairs))], None)
     }
 
+    /// A "5 minutes" block for a number of seconds, in the largest unit that fits exactly.
+    pub(crate) fn duration(&mut self, secs: f64) -> Value {
+        let (n, unit) = [(86400.0, "days"), (3600.0, "hours"), (60.0, "minutes")]
+            .into_iter()
+            .find(|(f, _)| secs != 0.0 && secs % f == 0.0)
+            .map_or((secs, "seconds"), |(f, u)| (secs / f, u));
+        let n = if n.fract() == 0.0 && n.abs() < 1e15 { json!(n as i64) } else { json!(n) };
+        let num = self.block("math_number", json!({"NUM": n}), vec![], None);
+        let mut b = self.block("duration", json!({"UNIT": unit}), vec![], None);
+        b["inputs"] = json!({"N": {"shadow": num}});
+        b
+    }
+
     pub(crate) fn variables(&mut self, vars: &Map<String, Value>) -> Vec<Value> {
         vars.iter()
             .map(|(name, v)| {

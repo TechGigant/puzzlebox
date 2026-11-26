@@ -488,18 +488,6 @@ impl Builder {
         self.block("ha_entity", json!({"ENTITY": ids}), vec![], None)
     }
 
-    fn duration(&mut self, secs: f64) -> Value {
-        let (n, unit) = [(86400.0, "days"), (3600.0, "hours"), (60.0, "minutes")]
-            .into_iter()
-            .find(|(f, _)| secs > 0.0 && secs % f == 0.0)
-            .map_or((secs, "seconds"), |(f, u)| (secs / f, u));
-        let n = if n.fract() == 0.0 && n.abs() < 1e15 { json!(n as i64) } else { json!(n) };
-        let num = self.block("math_number", json!({"NUM": n}), vec![], None);
-        let mut b = self.block("duration", json!({"UNIT": unit}), vec![], None);
-        b["inputs"] = json!({"N": {"shadow": num}});
-        b
-    }
-
     fn boolean(&mut self, b: bool) -> Value {
         self.block("logic_boolean", json!({"BOOL": if b { "TRUE" } else { "FALSE" }}), vec![], None)
     }

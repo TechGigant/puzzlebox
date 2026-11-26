@@ -19,6 +19,8 @@ pub(crate) enum E {
     Not(Box<E>),
     Bin(Op, Box<E>, Box<E>),
     Cmp(Cmp, Box<E>, Box<E>),
+    /// `x is none`.
+    IsNone(Box<E>),
     /// `then if cond else otherwise`.
     Cond {
         cond: Box<E>,
@@ -447,9 +449,25 @@ impl Parser {
                 self.pos += 1;
                 let args = if self.eat_op("(") { self.args()? } else { Args::default() };
                 node = E::Filter(Box::new(node), name, args);
-            } else if self.is_name("is") {
-                // Tests (`is defined`, `is number`…) aren't translated.
-                return None;
+            } else if self.eat_name("is") {
+                // Of the tests only `is none` / `is not none` are translated.
+                let negated = self.eat_name("not");
+                if !(self.eat_name("none") || self.eat_name("None")) {
+                    return None;
+                }
+                // A test can take an argument without parentheses, so anything that could
+                // start one is left alone.
+                match self.peek() {
+                    Some(Tok::Name(n)) if !matches!(n.as_str(), "and" | "or" | "else") => return None,
+                    Some(Tok::Str(_) | Tok::Int(_) | Tok::Float(_) | Tok::Op("(" | "[" | "{")) => {
+                        return None;
+                    }
+                    _ => {}
+                }
+                node = E::IsNone(Box::new(node));
+                if negated {
+                    node = E::Not(Box::new(node));
+                }
             } else {
                 return Some(node);
             }

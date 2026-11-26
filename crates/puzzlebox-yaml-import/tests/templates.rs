@@ -26,11 +26,13 @@ fn templates_become_blocks_and_compile() {
         assert!(matches!(&e.kind, ExprKind::Builtin { name, .. } if name == "text_join"), "{e:?}");
     }
     assert!(matches!(&data(&body[4].kind)[0].1.kind, ExprKind::Var { name, .. } if name == "target"));
-    // round() rounds half to even in HA, so it stays a template.
+    // round() rounds half to even in HA, like the "round … like Home Assistant" block.
+    let ExprKind::Builtin { name, args } = &data(&body[5].kind)[0].1.kind else { panic!() };
+    assert_eq!(name, "py_round");
+    assert!(matches!(&args[0].kind, ExprKind::Builtin { name, .. } if name == "ha:number_state"));
+    // float(0) prints "0" or "21.0", which no block can tell apart, so it stays a template.
     assert_eq!(
-        data(&body[5].kind)[0].1.kind,
-        ExprKind::Template {
-            template: "{{ states('sensor.living_temperature') | float(0) | round(1) }}".into()
-        }
+        data(&body[6].kind)[0].1.kind,
+        ExprKind::Template { template: "{{ states('sensor.living_temperature') | float(0) }} °C".into() }
     );
 }

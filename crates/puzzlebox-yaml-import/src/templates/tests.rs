@@ -180,7 +180,7 @@ fn conditions_translate() {
         ),
         (
             "{{ state_attr('climate.x', 'temperature') | float(0) > 20 }}",
-            "logic_compare[OP=GT](A=logic_or_default(A=text_to_number(TEXT=ha_attribute[ATTRIBUTE=temperature](ENTITY=ha_entity[ENTITY=climate.x])), B=math_number[NUM=0]), B=math_number[NUM=20])".into(),
+            "logic_compare[OP=GT](A=to_number_ha[KIND=float](DEFAULT=math_number[NUM=0], VALUE=ha_attribute[ATTRIBUTE=temperature](ENTITY=ha_entity[ENTITY=climate.x])), B=math_number[NUM=20])".into(),
         ),
         (
             "{{ trigger.to_state.state == 'on' }}",
@@ -192,7 +192,7 @@ fn conditions_translate() {
         ),
         (
             "{{ trigger['to_state']['attributes']['brightness'] | float(0) > 100 }}",
-            "logic_compare[OP=GT](A=logic_or_default(A=text_to_number(TEXT=trigger_info[ATTR=brightness,WHAT=to_attr]), B=math_number[NUM=0]), B=math_number[NUM=100])".into(),
+            "logic_compare[OP=GT](A=to_number_ha[KIND=float](DEFAULT=math_number[NUM=0], VALUE=trigger_info[ATTR=brightness,WHAT=to_attr]), B=math_number[NUM=100])".into(),
         ),
         ("{{ states.sensor.t.state == 'on' }}", st("EQ", "text[TEXT=on]")),
         ("{{ level == 'high' }}", "logic_compare[OP=EQ](A=variables_get[VAR=var_1], B=text[TEXT=high])".into()),
@@ -228,30 +228,29 @@ fn conditions_kept_as_templates() {
         "{{ 1 }}",
         "{{ level }}",
         "{{ is_state('a.b', 'on') }} and {{ is_state('c.d', 'on') }}",
-        // Puzzlebox compares numeric text as numbers, Jinja as text.
-        "{{ is_state('sensor.t', '5') }}",
-        "{{ states('sensor.t') == '5' }}",
-        "{{ states('sensor.t') > '10' }}",
-        "{{ states('sensor.a') == states('sensor.b') }}",
-        // Text against a number: Jinja says false (or raises), Puzzlebox converts.
-        "{{ states('sensor.t') == 5 }}",
+        // Text against a number by size always raises in Jinja.
         "{{ states('sensor.t') > 20 }}",
-        "{{ state_attr('climate.x', 'temperature') > 20 }}",
-        "{{ trigger.to_state.state == 5 }}",
-        "{{ level == 5 }}",
+        "{{ 'a' < 1 }}",
+        "{{ none < 1 }}",
+        // Undefined in Jinja (not none), null in Puzzlebox.
         "{{ level == none }}",
-        "{{ is_state_attr('climate.x', 'temperature', 20) }}",
-        // float/int without a default raise in HA for non-numbers.
-        "{{ states('sensor.t') | float > 20 }}",
-        "{{ states('sensor.t') | int > 20 }}",
-        "{{ float(states('sensor.t')) > 20 }}",
-        // A null attribute is 0 for "number from", the default for float().
-        "{{ state_attr('climate.x', 'temperature') | float(5) > 20 }}",
-        "{{ states('sensor.t') | int(0) == 5 }}",
-        "{{ states('sensor.t') | int(0.5) > 5 }}",
-        // round() rounds half to even.
-        "{{ states('sensor.t') | float(0) | round > 2 }}",
-        "{{ states('sensor.t') | float(0) | round(1) > 2 }}",
+        "{{ level is none }}",
+        "{{ none != level }}",
+        "{{ trigger.to_state.state is none }}",
+        "{{ trigger.to_state.attributes.x is not none }}",
+        "{{ is_state_attr('climate.x', 'temperature', none) }}",
+        // Tests other than none, or what might be a test argument.
+        "{{ state_attr('a.b', 'c') is defined }}",
+        "{{ state_attr('a.b', 'c') is divisibleby 3 }}",
+        "{{ state_attr('a.b', 'c') is none 5 }}",
+        // Locale-dependent or differently written strftime codes.
+        "{{ now().strftime('%c') == 'x' }}",
+        "{{ now().strftime('%f') == '0' }}",
+        "{{ now().strftime('%Z') == 'UTC' }}",
+        "{{ now().strftime(level) == 'x' }}",
+        // round with a negative precision or a default.
+        "{{ states('sensor.t') | round(-1) > 2 }}",
+        "{{ states('sensor.t') | round(1, default=0) > 2 }}",
         // and/or return operands in Jinja.
         "{{ level and is_state('a.b', 'on') }}",
         "{{ states('sensor.t') or 'x' }}",
@@ -267,7 +266,6 @@ fn conditions_kept_as_templates() {
         "{% if is_state('a.b', 'on') %}true{% endif %}",
         "{{ now() > today_at('25:00') }}",
         "{{ now() == today_at('10:00') }}",
-        "{{ now().strftime('%H') == '10' }}",
         "{{ iif(is_state('a.b', 'on'), 1 / 0, 2) == 2 }}",
         "{{ 1 < now().hour < 5 }}",
         "{{ trigger.to_state.items == 'x' }}",
@@ -293,7 +291,7 @@ fn values_translate() {
         ("{{ trigger.entity_id }}", "trigger_entity".into()),
         ("{{ trigger.event.data.button }}", "ha_trigger_data[PATH=event.data.button]".into()),
         ("{{ states('sensor.t') | float(0) * 1.8 + 32 }}", "math_arithmetic[OP=ADD](A=math_arithmetic[OP=MULTIPLY](A=ha_number_state(DEFAULT=math_number[NUM=0], ENTITY=ha_entity[ENTITY=sensor.t]), B=math_number[NUM=1.8]), B=math_number[NUM=32])".into()),
-        ("{{ (level | float(0)) / 2 }}", "math_arithmetic[OP=DIVIDE](A=logic_or_default(A=text_to_number(TEXT=variables_get[VAR=var_1]), B=math_number[NUM=0]), B=math_number[NUM=2])".into()),
+        ("{{ (level | float(0)) / 2 }}", "math_arithmetic[OP=DIVIDE](A=to_number_ha[KIND=float](DEFAULT=math_number[NUM=0], VALUE=variables_get[VAR=var_1]), B=math_number[NUM=2])".into()),
         ("{{ 7 // 2 }}", "math_round[OP=ROUNDDOWN](NUM=math_arithmetic[OP=DIVIDE](A=math_number[NUM=7], B=math_number[NUM=2]))".into()),
         ("{{ now().minute % 15 }}", "math_modulo(DIVIDEND=time_part[PART=minute], DIVISOR=math_number[NUM=15])".into()),
         ("{{ 2 ** 3 }}", "math_arithmetic[OP=POWER](A=math_number[NUM=2], B=math_number[NUM=3])".into()),
@@ -339,19 +337,23 @@ fn values_kept_as_templates() {
         "[{{ level }}]",
         "True {{ level }}",
         "b'{{ level }}'",
-        // Floats and booleans print differently ("20.0", "True").
+        // Printed differently depending on a type only known when it runs: float(0) gives
+        // 0 or a float ("0" / "20.0"), attributes may be tuples or datetimes.
         "Temp {{ states('sensor.t') | float(0) }}",
-        "On: {{ is_state('a.b', 'on') }}",
+        "Lvl {{ 'x' ~ (level | int(0.5)) }}",
         "Attr: {{ state_attr('a.b', 'c') }}",
         "Value: {{ level }}",
         "{{ level }} 5",
+        // Python's timestamps have microseconds, Puzzlebox's milliseconds.
+        "Ts {{ as_timestamp(now()) }}",
+        "Ts {{ now().timestamp() / 2 }}",
+        // UTC instead of local time.
+        "Now {{ now().timestamp() | timestamp_custom('%H:%M', false) }}",
+        "Now {{ states('sensor.t') | timestamp_custom('%H:%M') }}",
+        "Now {{ now().strftime('%x') }}",
         // No exact block.
         "{{ now() }}",
-        "{{ states('sensor.t') | float(0) | round(1) }}",
-        "{{ states('sensor.t') | int(0) }}",
-        "{{ states('sensor.t') | float }}",
-        "{{ states('sensor.t') | int }}",
-        "{{ (states('sensor.t') | float(0)) | int }}",
+        "{{ 2.5 | round(-1) }}",
         "{{ trigger.to_state.state | default('x') }}",
         "{{ level | lower }}",
         "{{ states('sensor.t') + 1 }}",
@@ -368,5 +370,196 @@ fn values_kept_as_templates() {
         let mut b = builder();
         let v = b.template_value(t);
         assert_eq!(v, json!({"type": "ha_template", "id": "imp1", "fields": {"TEMPLATE": t}}), "{t}");
+    }
+}
+
+/// Templates that need the "like Home Assistant" blocks: strict comparisons, `is none`,
+/// float/int without a default, rounding half to even.
+#[test]
+fn ha_like_conditions_translate() {
+    let state = "ha_state(ENTITY=ha_entity[ENTITY=sensor.t])";
+    let temp = "ha_attribute[ATTRIBUTE=temperature](ENTITY=ha_entity[ENTITY=climate.x])";
+    let strict = |op: &str, a: &str, b: &str| format!("logic_compare_strict[OP={op}](A={a}, B={b})");
+    let num = |op: &str, a: &str, n: &str| format!("logic_compare[OP={op}](A={a}, B=math_number[NUM={n}])");
+    let cases: Vec<(&str, String)> = vec![
+        // "5" is text in Jinja, so it isn't equal to 5 and "10" < "9".
+        ("{{ is_state('sensor.t', '5') }}", strict("EQ", state, "text[TEXT=5]")),
+        (
+            "{{ is_state('sensor.t', ['5', 'on']) }}",
+            format!(
+                "logic_operation[OP=OR](A={}, B=logic_compare[OP=EQ](A={state}, B=text[TEXT=on]))",
+                strict("EQ", state, "text[TEXT=5]")
+            ),
+        ),
+        ("{{ states('sensor.t') == '5' }}", strict("EQ", state, "text[TEXT=5]")),
+        ("{{ '5' != states('sensor.t') }}", strict("NEQ", state, "text[TEXT=5]")),
+        ("{{ states('sensor.t') > '10' }}", strict("GT", &exact_state("sensor.t"), "text[TEXT=10]")),
+        (
+            "{{ states('sensor.a') == states('sensor.b') }}",
+            strict("EQ", &exact_state("sensor.a"), &exact_state("sensor.b")),
+        ),
+        ("{{ states('sensor.t') == 5 }}", strict("EQ", &exact_state("sensor.t"), "math_number[NUM=5]")),
+        (
+            "{{ trigger.to_state.state == 5 }}",
+            strict("EQ", "trigger_info[ATTR=,WHAT=to]", "math_number[NUM=5]"),
+        ),
+        ("{{ level == 5 }}", strict("EQ", "variables_get[VAR=var_1]", "math_number[NUM=5]")),
+        // A missing attribute is None, which ordering raises on like the strict block.
+        ("{{ state_attr('climate.x', 'temperature') > 20 }}", strict("GT", temp, "math_number[NUM=20]")),
+        ("{{ is_state_attr('climate.x', 'temperature', 20) }}", strict("EQ", temp, "math_number[NUM=20]")),
+        ("{{ is_state_attr('climate.x', 'temperature', '20') }}", strict("EQ", temp, "text[TEXT=20]")),
+        (
+            "{{ states('sensor.t') in ['5', 'on'] }}",
+            format!(
+                "logic_operation[OP=OR](A={}, B=logic_compare[OP=EQ](A={state}, B=text[TEXT=on]))",
+                strict("EQ", state, "text[TEXT=5]")
+            ),
+        ),
+        (
+            "{{ now().strftime('%H') == '10' }}",
+            strict("EQ", "time_format[FORMAT=%H](DATETIME=time_now)", "text[TEXT=10]"),
+        ),
+        // None, which state_attr gives for a missing attribute.
+        ("{{ state_attr('climate.x', 'temperature') is none }}", format!("logic_is_null(VALUE={temp})")),
+        ("{{ state_attr('climate.x', 'temperature') == none }}", format!("logic_is_null(VALUE={temp})")),
+        (
+            "{{ state_attr('climate.x', 'temperature') is not none }}",
+            format!("logic_negate(BOOL=logic_is_null(VALUE={temp}))"),
+        ),
+        (
+            "{{ not state_attr('climate.x', 'temperature') is none }}",
+            format!("logic_negate(BOOL=logic_is_null(VALUE={temp}))"),
+        ),
+        (
+            "{{ none != state_attr('climate.x', 'temperature') }}",
+            format!("logic_negate(BOOL=logic_is_null(VALUE={temp}))"),
+        ),
+        (
+            "{{ state_attr('climate.x', 'temperature') is none or is_state('sensor.t', 'on') }}",
+            format!(
+                "logic_operation[OP=OR](A=logic_is_null(VALUE={temp}), B=logic_compare[OP=EQ](A={state}, B=text[TEXT=on]))"
+            ),
+        ),
+        // float/int without a default stop with an error for non-numbers, like in HA.
+        (
+            "{{ states('sensor.t') | float > 20 }}",
+            num("GT", &format!("to_number_ha[KIND=float](VALUE={state})"), "20"),
+        ),
+        (
+            "{{ float(states('sensor.t')) > 20 }}",
+            num("GT", &format!("to_number_ha[KIND=float](VALUE={state})"), "20"),
+        ),
+        (
+            "{{ states('sensor.t') | int > 20 }}",
+            num("GT", &format!("to_number_ha[KIND=int](VALUE={state})"), "20"),
+        ),
+        (
+            "{{ int(states('sensor.t')) <= 20 }}",
+            num("LTE", &format!("to_number_ha[KIND=int](VALUE={state})"), "20"),
+        ),
+        (
+            "{{ state_attr('climate.x', 'temperature') | float(5) > 20 }}",
+            num("GT", &format!("to_number_ha[KIND=float](DEFAULT=math_number[NUM=5], VALUE={temp})"), "20"),
+        ),
+        (
+            "{{ states('sensor.t') | int(0) == 5 }}",
+            num("EQ", &format!("to_number_ha[KIND=int](DEFAULT=math_number[NUM=0], VALUE={state})"), "5"),
+        ),
+        (
+            "{{ states('sensor.t') | int(0.5) > 5 }}",
+            num("GT", &format!("to_number_ha[KIND=int](DEFAULT=math_number[NUM=0.5], VALUE={state})"), "5"),
+        ),
+        // round() rounds half to even.
+        (
+            "{{ states('sensor.t') | float(0) | round > 2 }}",
+            num(
+                "GT",
+                "math_round_ha[DECIMALS=0,METHOD=common](NUM=ha_number_state(DEFAULT=math_number[NUM=0], ENTITY=ha_entity[ENTITY=sensor.t]))",
+                "2",
+            ),
+        ),
+        (
+            "{{ states('sensor.t') | round(1) > 2 }}",
+            num("GT", &format!("math_round_ha[DECIMALS=1,METHOD=common](NUM={state})"), "2"),
+        ),
+        (
+            "{{ states('sensor.t') | round(2, 'ceil') > 2 }}",
+            num("GT", &format!("math_round_ha[DECIMALS=2,METHOD=ceil](NUM={state})"), "2"),
+        ),
+        (
+            "{{ states('sensor.t') | round(precision=1, method='half') > 2 }}",
+            num("GT", &format!("math_round_ha[DECIMALS=1,METHOD=half](NUM={state})"), "2"),
+        ),
+        // Any other method is "common" in HA.
+        (
+            "{{ states('sensor.t') | round(0, 'up') > 2 }}",
+            num("GT", &format!("math_round_ha[DECIMALS=0,METHOD=common](NUM={state})"), "2"),
+        ),
+    ];
+    for (t, want) in cases {
+        assert_eq!(condition(t).as_deref(), Some(want.as_str()), "{t}");
+    }
+}
+
+#[test]
+fn ha_like_values_translate() {
+    let state = "ha_state(ENTITY=ha_entity[ENTITY=sensor.t])";
+    let join = |items: &[&str]| {
+        let parts: Vec<String> = items.iter().enumerate().map(|(i, s)| format!("ADD{i}={s}")).collect();
+        format!("text_join({})", parts.join(", "))
+    };
+    let py = |mode: &str, v: &str| format!("to_text_ha[NUMBERS={mode}](VALUE={v})");
+    let float = format!("to_number_ha[KIND=float](VALUE={state})");
+    let cases: Vec<(&str, String)> = vec![
+        ("{{ states('sensor.t') | float }}", float.clone()),
+        ("{{ states('sensor.t') | int }}", format!("to_number_ha[KIND=int](VALUE={state})")),
+        ("{{ states('sensor.t') | int(0) }}", format!("to_number_ha[KIND=int](DEFAULT=math_number[NUM=0], VALUE={state})")),
+        (
+            "{{ (states('sensor.t') | float(0) * 1.5) | int }}",
+            "to_number_ha[KIND=int](VALUE=math_arithmetic[OP=MULTIPLY](A=ha_number_state(DEFAULT=math_number[NUM=0], ENTITY=ha_entity[ENTITY=sensor.t]), B=math_number[NUM=1.5]))".into(),
+        ),
+        (
+            "{{ state_attr('a.b', 'c') | float(state_attr('a.b', 'd')) }}",
+            "to_number_ha[KIND=float](DEFAULT=ha_attribute[ATTRIBUTE=d](ENTITY=ha_entity[ENTITY=a.b]), VALUE=ha_attribute[ATTRIBUTE=c](ENTITY=ha_entity[ENTITY=a.b]))".into(),
+        ),
+        (
+            "{{ states('sensor.t') | float(0) | round(1) }}",
+            "math_round_ha[DECIMALS=1,METHOD=common](NUM=ha_number_state(DEFAULT=math_number[NUM=0], ENTITY=ha_entity[ENTITY=sensor.t]))".into(),
+        ),
+        ("{{ 2.5 | round }}", "math_round_ha[DECIMALS=0,METHOD=common](NUM=math_number[NUM=2.5])".into()),
+        ("{{ now().strftime('%-d.%-m.%Y') }}", "time_format[FORMAT=%-d.%-m.%Y](DATETIME=time_now)".into()),
+        // Text: printed like Python ("True", "None", "21.0").
+        ("On: {{ is_state('a.b', 'on') }}", join(&["text[TEXT=On: ]", &py("auto", "logic_compare[OP=EQ](A=ha_state(ENTITY=ha_entity[ENTITY=a.b]), B=text[TEXT=on])")])),
+        ("Value {{ none }}", join(&["text[TEXT=Value ]", &py("auto", "logic_null")])),
+        ("Temp {{ states('sensor.t') | float }} °C", join(&["text[TEXT=Temp ]", &py("float", &float), "text[TEXT= °C]"])),
+        (
+            "Temp {{ states('sensor.t') | float(0.0) }}",
+            join(&["text[TEXT=Temp ]", &py("float", "ha_number_state(DEFAULT=math_number[NUM=0], ENTITY=ha_entity[ENTITY=sensor.t])")]),
+        ),
+        (
+            "Temp {{ states('sensor.t') | round(1) }} °C",
+            join(&["text[TEXT=Temp ]", &py("float", &format!("math_round_ha[DECIMALS=1,METHOD=common](NUM={state})")), "text[TEXT= °C]"]),
+        ),
+        // Whole numbers print the same either way.
+        ("Temp {{ states('sensor.t') | round }}", join(&["text[TEXT=Temp ]", &format!("math_round_ha[DECIMALS=0,METHOD=common](NUM={state})")])),
+        ("Lvl {{ level | int }}", join(&["text[TEXT=Lvl ]", "to_number_ha[KIND=int](VALUE=variables_get[VAR=var_1])"])),
+        (
+            "Half {{ 7 / 2 }}",
+            join(&["text[TEXT=Half ]", &py("float", "math_arithmetic[OP=DIVIDE](A=math_number[NUM=7], B=math_number[NUM=2])")]),
+        ),
+        ("x: {{ 'a' ~ none }}", join(&["text[TEXT=x: ]", "text[TEXT=a]", &py("auto", "logic_null")])),
+        ("Now {{ now().strftime('%H:%M') }}", join(&["text[TEXT=Now ]", "time_format[FORMAT=%H:%M](DATETIME=time_now)"])),
+        (
+            "Now {{ as_timestamp(now()) | timestamp_custom('%H:%M') }}",
+            join(&["text[TEXT=Now ]", "time_format[FORMAT=%H:%M](DATETIME=time_now)"]),
+        ),
+        (
+            "Now {{ now().timestamp() | timestamp_custom(date_format='%A', local=true) }}",
+            join(&["text[TEXT=Now ]", "time_format[FORMAT=%A](DATETIME=time_now)"]),
+        ),
+        ("{{ as_timestamp(now()) | timestamp_custom }}", "time_format[FORMAT=%Y-%m-%d](DATETIME=time_now)".into()),
+    ];
+    for (t, want) in cases {
+        assert_eq!(value(t), want, "{t}");
     }
 }

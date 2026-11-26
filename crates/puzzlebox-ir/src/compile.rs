@@ -13,6 +13,8 @@ mod conditions;
 mod helpers;
 #[path = "compile_triggers.rs"]
 mod triggers;
+#[path = "compile_values.rs"]
+mod values;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CompileError {
@@ -1569,6 +1571,9 @@ impl<'a> Compiler<'a> {
             },
             _ => {
                 if let Some(k) = self.helper_expr(b) {
+                    return k;
+                }
+                if let Some(k) = self.ha_value_expr(b) {
                     return k;
                 }
                 if let Some(k) = self.condition_expr(b) {

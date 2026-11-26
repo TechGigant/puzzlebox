@@ -706,6 +706,53 @@ export const CORE_BLOCKS: Json[] = [
     'Part of the current local time.',
   ),
 
+  // --- exactly like Home Assistant templates --------------------------------
+  expr(
+    'to_number_ha',
+    '%1 as %2, if not a number %3',
+    [value('VALUE'), dropdown('KIND', [['a decimal number', 'float'], ['a whole number', 'int']]), value('DEFAULT')],
+    'Number',
+    'math_blocks',
+    'Reads a number like Home Assistant templates do (float / int): " 7 ", "1e3" and "1_000" are numbers, "unknown" and "abc" aren\'t. A whole number drops the decimals (2.7 → 2, -2.7 → -2). If it isn\'t a number you get the last value, or the run stops with an error when that slot is empty.',
+  ),
+  expr(
+    'math_round_ha',
+    'round %1 to %2 decimals, %3',
+    [
+      value('NUM'),
+      number('DECIMALS', 0, { min: 0, max: 15, precision: 1 }),
+      dropdown('METHOD', [['halves to even', 'common'], ['up', 'ceil'], ['down', 'floor'], ['to the nearest half', 'half']]),
+    ],
+    'Number',
+    'math_blocks',
+    'Rounds like Home Assistant\'s round filter: an exact half goes to the even neighbour (2.5 → 2, 3.5 → 4). "To the nearest half" ignores the decimals (2.3 → 2.5) and then, with 0 decimals, drops the half. Text that is a number works too; anything else stops the run with an error.',
+  ),
+  expr(
+    'to_text_ha',
+    'text of %1 like Home Assistant, numbers %2',
+    [value('VALUE'), dropdown('NUMBERS', [['as they are', 'auto'], ['always with decimals', 'float']])],
+    'String',
+    'text_blocks',
+    'Text the way Home Assistant templates print values: True / False, None for nothing, lists like [1, \'a\'] and 20.0 for decimal numbers. Puzzlebox doesn\'t remember whether a calculated number had decimals, so choose "always with decimals" to print 20 as 20.0.',
+  ),
+  expr(
+    'logic_compare_strict',
+    '%1 %2 %3, text stays text',
+    [value('A'), dropdown('OP', [['=', 'EQ'], ['≠', 'NEQ'], ['<', 'LT'], ['≤', 'LTE'], ['>', 'GT'], ['≥', 'GTE']]), value('B')],
+    'Boolean',
+    'logic_blocks',
+    'Compares like Home Assistant templates: text is never read as a number, so "5" ≠ 5 and "10" < "9" (text goes letter by letter). Comparing text with a number by size stops the run with an error.',
+  ),
+  expr('logic_is_null', '%1 is nothing', [value('VALUE')], 'Boolean', 'logic_blocks', 'True only if the value is nothing (not set), like "is none" in templates. Unlike "= nothing", 0 doesn\'t count.'),
+  expr(
+    'time_format',
+    'format %1 as %2',
+    [value('DATETIME'), text('FORMAT', '%H:%M')],
+    'String',
+    'time_blocks',
+    'Writes a date and time with a pattern, like strftime in templates: %H:%M → 07:30, %d.%m.%Y → 26.11.2026, %A → Thursday, %-d → day without a leading zero.',
+  ),
+
   // --- network --------------------------------------------------------------
   expr(
     'http_request',

@@ -183,6 +183,9 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
     if let Some(r) = crate::colour::builtin(name, args) {
         return r;
     }
+    if let Some(r) = crate::python::builtin(name, args) {
+        return r;
+    }
     let a = |i: usize| args.get(i).unwrap_or(&Value::Null);
     let n = |i: usize| to_num(a(i));
     Ok(match name {
@@ -599,10 +602,12 @@ pub fn ha_builtin(name: &str, a: &[Value], lookup: &dyn Fn(&str) -> Option<Value
                 None => Value::Null,
             }
         }
-        "ha:number_state" => match state_of(&to_text(&arg(0))).and_then(|s| s.trim().parse::<f64>().ok()) {
-            Some(f) if f.is_finite() => num(f),
-            _ => arg(1),
-        },
+        "ha:number_state" => {
+            match state_of(&to_text(&arg(0))).and_then(|s| crate::python::py_float(&json!(s))) {
+                Some(f) => num(f),
+                None => arg(1),
+            }
+        }
         "ha:state_check" => {
             let ids = entity_list(&arg(0));
             let (mode, negate, want) = (to_text(&arg(1)), to_text(&arg(2)) == "is_not", to_text(&arg(3)));

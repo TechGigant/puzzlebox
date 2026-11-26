@@ -21,3 +21,8 @@ actions:
       entity_id: input_text.note
     data:
       value: "{{ states('sensor.living_temperature') | float(0) | round(1) }}"
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.note
+    data:
+      value: "{{ states('sensor.living_temperature') | float(0) }} °C"

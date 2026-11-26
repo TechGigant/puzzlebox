@@ -520,3 +520,21 @@ async fn throttle_wait_until_and_triggered_by() {
     assert_eq!(vars["wait"], json!({"completed": false}));
     assert_eq!(vars["hit"], json!(true));
 }
+
+#[tokio::test]
+async fn setting_a_global_announces_it() {
+    let (engine, _ha) = setup().await;
+    let mut events = engine.subscribe();
+    let set = b("variables_set", "s", json!({"VAR": {"id": "g"}}), json!({"VALUE": blk(num("n", 7.0))}));
+    let ws = workspace(vec![on_run(set)], json!([{"name": "shared", "id": "g", "type": "Global"}]));
+    engine.save(program("glob", ws, "single")).await.unwrap();
+    assert!(engine.run_now("glob", None, None));
+    let changed = loop {
+        let ev = timeout(Duration::from_secs(5), events.recv()).await.expect("timed out").unwrap();
+        if let EngineEvent::GlobalChanged { name, value } = ev {
+            break (name, value);
+        }
+    };
+    assert_eq!(changed, ("shared".to_owned(), json!(7)));
+    assert_eq!(engine.globals()["shared"], json!(7));
+}

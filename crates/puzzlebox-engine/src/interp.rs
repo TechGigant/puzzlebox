@@ -80,6 +80,7 @@ pub struct Trace {
 pub trait RunHooks: Send + Sync {
     async fn on_step(&self, _ctx: &RunCtx, _block: &str) {}
     fn on_log(&self, _ctx: &RunCtx, _level: LogLevel, _message: &str) {}
+    fn on_global(&self, _name: &str, _value: &Value) {}
     /// Starts (or restarts/keeps) a program timer that runs the handler `handler` later.
     fn timer_start(
         &self,
@@ -218,6 +219,9 @@ impl RunCtx {
                     (&self.globals, "global".to_owned())
                 };
                 lock(map).insert(name.to_owned(), v.clone());
+                if scope == VarScope::Global {
+                    self.hooks.on_global(name, &v);
+                }
                 if let Some(store) = &self.store
                     && let Err(e) = store.kv_set(&kv_scope, name, &v).await
                 {

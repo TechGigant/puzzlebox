@@ -97,6 +97,11 @@ pub enum EngineEvent {
         program_id: String,
     },
     RegistryChanged,
+    /// A global (shared, persistent) variable was set.
+    GlobalChanged {
+        name: String,
+        value: Value,
+    },
 }
 
 struct RunningProgram {
@@ -295,10 +300,16 @@ impl Engine {
             }
             None => {
                 self.inner.store.kv_set("global", name, &value).await?;
-                lock(&self.inner.globals).insert(name.to_owned(), value);
+                lock(&self.inner.globals).insert(name.to_owned(), value.clone());
+                let _ = self.inner.events.send(EngineEvent::GlobalChanged { name: name.to_owned(), value });
             }
         }
         Ok(())
+    }
+
+    /// Current global variables.
+    pub fn globals(&self) -> Map<String, Value> {
+        lock(&self.inner.globals).iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
     /// Persistent variables: `{"global": {...}, "programs": {id: {...}}}`.
@@ -721,6 +732,14 @@ impl RunHooks for EngineHooks {
             });
         }
         inner.debugger.maybe_pause(ctx, block, &inner.events).await;
+    }
+
+    fn on_global(&self, name: &str, value: &Value) {
+        let _ = self
+            .engine
+            .inner
+            .events
+            .send(EngineEvent::GlobalChanged { name: name.to_owned(), value: value.clone() });
     }
 
     fn on_log(&self, ctx: &RunCtx, level: LogLevel, message: &str) {

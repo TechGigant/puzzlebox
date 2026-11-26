@@ -320,6 +320,7 @@ async fn session(mut socket: WebSocket, bridge: Arc<Bridge>) {
     );
     let _ = tx.send(bridge.programs_snapshot().await);
     let _ = tx.send(json!({"type": "webhooks", "webhooks": bridge.webhooks.ids()}));
+    let _ = tx.send(json!({"type": "variables", "variables": bridge.engine.globals()}));
 
     let mut events = bridge.engine.subscribe();
     let mut hooks_changed = bridge.webhooks.watch();
@@ -341,6 +342,9 @@ async fn session(mut socket: WebSocket, bridge: Arc<Bridge>) {
                     }
                     EngineEvent::RunStarted { .. } | EngineEvent::RunFinished { .. } => {
                         let _ = tx.send(serde_json::to_value(&ev).unwrap_or_default());
+                    }
+                    EngineEvent::GlobalChanged { name, value } => {
+                        let _ = tx.send(json!({"type": "variable", "name": name, "value": value}));
                     }
                     _ => {}
                 }

@@ -23,6 +23,7 @@ from .const import (
     EVENT_RUN_STARTED,
     SIGNAL_CONNECTION,
     SIGNAL_PROGRAMS,
+    SIGNAL_VARIABLES,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -38,6 +39,7 @@ class BridgeClient:
         self.url = url.rstrip("/")
         self.token = token
         self.programs: dict[str, dict[str, Any]] = {}
+        self.variables: dict[str, Any] = {}
         self.connected = False
         self._packs: dict[str, tuple[dict[str, Any], dict[str, Handler]]] = {}
         self._ws = None
@@ -120,6 +122,12 @@ class BridgeClient:
         if kind == "programs":
             self.programs = {p["id"]: p for p in msg.get("programs", [])}
             async_dispatcher_send(self.hass, SIGNAL_PROGRAMS)
+        elif kind == "variables":
+            self.variables = dict(msg.get("variables") or {})
+            async_dispatcher_send(self.hass, SIGNAL_VARIABLES)
+        elif kind == "variable":
+            self.variables[msg["name"]] = msg.get("value")
+            async_dispatcher_send(self.hass, SIGNAL_VARIABLES)
         elif kind == "run_started":
             self._fire(EVENT_RUN_STARTED, msg, ("program_id", "run_id"))
         elif kind == "run_finished":

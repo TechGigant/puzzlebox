@@ -18,7 +18,7 @@ from .bridge import BridgeClient
 from .const import CONF_TOKEN, CONF_URL, DOMAIN, PENDING_PACKS
 from .supervisor import async_find_app
 
-PLATFORMS = [Platform.SWITCH, Platform.BUTTON]
+PLATFORMS = [Platform.SWITCH, Platform.BUTTON, Platform.SENSOR]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 

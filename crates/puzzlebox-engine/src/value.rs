@@ -207,7 +207,7 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
             } else {
                 v.sort_by(|x, y| x.total_cmp(y));
                 let m = v.len() / 2;
-                num(if v.len() % 2 == 0 { (v[m - 1] + v[m]) / 2.0 } else { v[m] })
+                num(if v.len().is_multiple_of(2) { (v[m - 1] + v[m]) / 2.0 } else { v[m] })
             }
         }
         "list_std_dev" => {
@@ -486,7 +486,7 @@ pub fn ha_builtin(name: &str, a: &[Value], lookup: &dyn Fn(&str) -> Option<Value
                     let mut v = vals;
                     v.sort_by(f64::total_cmp);
                     let m = v.len() / 2;
-                    num(if v.len() % 2 == 0 { (v[m - 1] + v[m]) / 2.0 } else { v[m] })
+                    num(if v.len().is_multiple_of(2) { (v[m - 1] + v[m]) / 2.0 } else { v[m] })
                 }
                 _ => num(vals.iter().sum::<f64>() / vals.len() as f64),
             }

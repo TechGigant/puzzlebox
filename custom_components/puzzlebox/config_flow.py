@@ -60,6 +60,8 @@ class PuzzleboxConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is None and (found := await async_find_app(self.hass)):
             # On Home Assistant OS the app announces its address and token: nothing to ask.
             return await self._async_create(found)
+        if self._async_current_entries():
+            return self.async_abort(reason="already_configured")
         if user_input is not None:
             error = await _validate(self.hass, user_input[CONF_URL], user_input[CONF_TOKEN])
             if error is None:

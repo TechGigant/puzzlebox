@@ -14,24 +14,6 @@ const BASE: [&str; 4] = ["condition", "alias", "enabled", "note"];
 
 const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
-/// Blocks that always evaluate to true/false, so they match a template condition's
-/// "rendered `true`" check exactly.
-const BOOLEAN_BLOCKS: [&str; 13] = [
-    "logic_boolean",
-    "logic_compare",
-    "logic_operation",
-    "logic_negate",
-    "ha_is_state",
-    "ha_state_for",
-    "ha_has_value",
-    "time_is_between",
-    "weekday_is",
-    "sun_is",
-    "person_is_home",
-    "triggered_by",
-    "text_regex_test",
-];
-
 /// HA skips disabled conditions (they return neither true nor false), so one counts as true
 /// in an AND and as false in an OR (or a NOT, which is a NOR).
 #[derive(Clone, Copy, PartialEq)]
@@ -223,7 +205,7 @@ impl Builder {
     fn condition_in(&mut self, c: &Value, ctx: Ctx) -> Option<Value> {
         let Some(m) = c.as_object() else {
             return Some(match c {
-                Value::String(t) => self.template_condition(c, t),
+                Value::String(t) => self.template_cond(c, t),
                 _ => self.raw_condition(c),
             });
         };
@@ -261,7 +243,7 @@ impl Builder {
                 "device" => self.device_condition(c, m),
                 "template" => match m.get("value_template") {
                     Some(Value::String(t)) if only_keys(m, &with(&["value_template"])) => {
-                        self.template_condition(c, t)
+                        self.template_cond(c, t)
                     }
                     _ => self.raw_condition(c),
                 },
@@ -271,7 +253,7 @@ impl Builder {
                     cfg.insert("condition".into(), json!("template"));
                     cfg.insert("value_template".into(), json!(t));
                     if only_keys(m, &BASE) {
-                        self.template_condition(&Value::Object(cfg), t)
+                        self.template_cond(&Value::Object(cfg), t)
                     } else {
                         self.raw_condition(&Value::Object(cfg))
                     }
@@ -474,14 +456,11 @@ impl Builder {
 
     /// Native when the template converts to a block that is always true or false (HA's check is
     /// "renders `true`"), otherwise a raw template condition.
-    fn template_condition(&mut self, raw: &Value, template: &str) -> Value {
-        let snap = self.snapshot();
-        let b = self.template_value(template);
-        if b["type"].as_str().is_some_and(|t| BOOLEAN_BLOCKS.contains(&t)) {
-            return b;
+    fn template_cond(&mut self, raw: &Value, template: &str) -> Value {
+        match self.template_condition(template) {
+            Some(b) => b,
+            None => self.raw_condition(raw),
         }
-        self.restore(snap);
-        self.raw_condition(raw)
     }
 
     fn entity(&mut self, ids: &str) -> Value {

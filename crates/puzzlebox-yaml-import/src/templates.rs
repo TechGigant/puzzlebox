@@ -123,8 +123,6 @@ impl Builder {
     /// this translates templates that are one expression of certainly boolean type
     /// (comparisons, `is_state(…)`, `and`/`or`/`not` of those…). Templates that would raise
     /// an error in HA either fail the same way as blocks or aren't translated.
-    // Not called until the conditions module adopts it.
-    #[allow(dead_code)]
     pub(crate) fn template_condition(&mut self, s: &str) -> Option<Value> {
         let saved = self.next_id;
         let out = parse_template(s).and_then(|parts| {

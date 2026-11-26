@@ -60,8 +60,8 @@ fn imports_and_compiles_automation() {
     let imp = &out[0];
     assert_eq!(imp.name, "Hallway motion light");
     assert_eq!(imp.mode, "restart");
-    // The template condition and repeat-until stay raw.
-    assert_eq!(imp.raw_blocks, 2);
+    // Only the repeat-until stays raw.
+    assert_eq!(imp.raw_blocks, 1);
 
     let program = compile(&imp.workspace, &NoExternals).expect("imported workspace compiles");
     let h = &program.handlers[0];
@@ -85,7 +85,7 @@ fn imports_and_compiles_automation() {
     assert_eq!(service, "light.turn_on");
     assert_eq!(t.kind, ExprKind::Lit { value: json!("light.hallway,light.stairs") });
     let ExprKind::Dict { entries } = &d.kind else { panic!() };
-    assert!(matches!(&entries[0].1.kind, ExprKind::Template { template } if template == "{{ brightness }}"));
+    assert!(matches!(&entries[0].1.kind, ExprKind::Var { name, .. } if name == "brightness"));
     assert!(
         matches!(&actions[2].kind, StmtKind::Wait { seconds } if seconds.kind == ExprKind::Lit { value: json!(300) })
     );

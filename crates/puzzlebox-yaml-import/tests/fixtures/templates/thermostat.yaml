@@ -1,0 +1,23 @@
+alias: Thermostat report
+triggers:
+  - trigger: state
+    entity_id: sensor.living_temperature
+variables:
+  target: "{{ state_attr('climate.living', 'temperature') }}"
+  hot: "{{ states('sensor.living_temperature') | float(0) > 24 }}"
+  label: "{{ 'warm' if is_state('climate.living', 'heat') else 'cool' }}"
+actions:
+  - action: notify.notify
+    data:
+      title: "Temperature is {{ states('sensor.living_temperature') }} °C"
+      message: "{{ trigger.to_state.state }} °C"
+  - action: climate.set_temperature
+    target:
+      entity_id: climate.living
+    data:
+      temperature: "{{ target }}"
+  - action: input_text.set_value
+    target:
+      entity_id: input_text.note
+    data:
+      value: "{{ states('sensor.living_temperature') | float(0) | round(1) }}"

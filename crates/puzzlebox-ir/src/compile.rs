@@ -79,10 +79,18 @@ pub struct Compiler<'a> {
     errors: Vec<CompileError>,
     ext: &'a dyn BlockLowerer,
     persistent: Vec<String>,
+    /// Timer bodies, compiled into their own handlers.
+    timer_handlers: Vec<Handler>,
 }
 
 pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec<CompileError>> {
-    let mut c = Compiler { vars: HashMap::new(), errors: Vec::new(), ext, persistent: Vec::new() };
+    let mut c = Compiler {
+        vars: HashMap::new(),
+        errors: Vec::new(),
+        ext,
+        persistent: Vec::new(),
+        timer_handlers: Vec::new(),
+    };
     for v in workspace.get("variables").and_then(Value::as_array).into_iter().flatten() {
         let (Some(id), Some(name)) =
             (v.get("id").and_then(Value::as_str), v.get("name").and_then(Value::as_str))
@@ -160,6 +168,17 @@ pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec
         }
     }
     program.persistent = std::mem::take(&mut c.persistent);
+    program.handlers.append(&mut c.timer_handlers);
+    // Every HA trigger reports its block id as `trigger.id`, for "triggered by".
+    for h in &mut program.handlers {
+        if let HandlerKind::Triggers { triggers } = &mut h.kind {
+            for t in triggers {
+                if let Trigger::Ha { id, config: Value::Object(cfg) } = t {
+                    cfg.entry("id").or_insert_with(|| json!(id.clone()));
+                }
+            }
+        }
+    }
 
     for h in &program.handlers {
         check_calls(&h.body, &program.functions, &mut c);
@@ -515,6 +534,43 @@ impl<'a> Compiler<'a> {
                 StmtKind::Parallel { branches }
             }
             "control_stop" => StmtKind::Stop,
+            "timer_start" => {
+                let name = self.required_str(&b, "NAME");
+                let body = self.stmt_chain(b.input("DO"));
+                self.timer_handlers.push(Handler {
+                    id: b.id().into(),
+                    kind: HandlerKind::Timer { name: name.clone() },
+                    body,
+                });
+                StmtKind::TimerStart {
+                    name,
+                    seconds: self.value(&b, "SECONDS"),
+                    if_running: if b.field_str("MODE") == Some("keep") {
+                        TimerMode::Keep
+                    } else {
+                        TimerMode::Restart
+                    },
+                    handler: b.id().into(),
+                }
+            }
+            "timer_cancel" => StmtKind::TimerCancel { name: self.required_str(&b, "NAME") },
+            "wait_until" => StmtKind::WaitUntil {
+                cond: self.value(&b, "COND"),
+                hold: self.value_opt(&b, "HOLD"),
+                timeout: self.value_opt(&b, "TIMEOUT"),
+            },
+            "ha_scene_next" => {
+                let scenes = self.value(&b, "SCENES");
+                let dir = Expr::lit(b.id(), json!(b.field_str("DIRECTION").unwrap_or("next")));
+                let target =
+                    Expr { id: b.id().into(), kind: self.builtin("ha:next_scene", vec![scenes, dir]) };
+                StmtKind::CallService {
+                    service: "scene.turn_on".into(),
+                    target: Some(target),
+                    data: None,
+                    response_var: None,
+                }
+            }
             "ha_call_service" => {
                 let service = self.required_str(&b, "SERVICE");
                 if !service.is_empty() && !service.contains('.') {
@@ -839,6 +895,169 @@ impl<'a> Compiler<'a> {
             }
             "ha_trigger_data" => ExprKind::TriggerData { path: b.field_str("PATH").unwrap_or("").to_owned() },
             "ha_entity" => lit(json!(self.required_str(b, "ENTITY"))),
+            "yaml_value" => match parse_config(b.field_str("CONFIG").unwrap_or("")) {
+                Ok(v) => lit(v),
+                Err(e) => {
+                    self.err(b, e);
+                    lit(Value::Null)
+                }
+            },
+            "duration" => {
+                let factor = match b.field_str("UNIT") {
+                    Some("minutes") => 60.0,
+                    Some("hours") => 3600.0,
+                    Some("days") => 86400.0,
+                    _ => 1.0,
+                };
+                let n = self.value(b, "N");
+                match &n.kind {
+                    ExprKind::Lit { value } if value.is_number() => {
+                        lit(number(value.as_f64().unwrap_or(0.0) * factor))
+                    }
+                    _ => ExprKind::Binary {
+                        bin: BinOp::Mul,
+                        left: Box::new(n),
+                        right: Box::new(Expr::lit(b.id(), number(factor))),
+                    },
+                }
+            }
+            "timer_running" => {
+                let name = Expr::lit(b.id(), json!(self.required_str(b, "NAME")));
+                self.builtin("engine:timer_running", vec![name])
+            }
+            "throttle" => {
+                let key = Expr::lit(b.id(), json!(b.field_str("KEY").unwrap_or("").trim().to_owned()));
+                let secs = self.value(b, "SECONDS");
+                self.builtin("engine:throttle", vec![key, secs])
+            }
+            "ha_state_for" => {
+                let entity = self.required_str(b, "ENTITY");
+                let state = b.field_str("STATE").unwrap_or("").to_owned();
+                let mut args = BTreeMap::new();
+                args.insert("for".to_owned(), self.value(b, "SECONDS"));
+                ExprKind::Condition {
+                    config: json!({"condition": "state", "entity_id": entity, "state": state,
+                        "for": {"seconds": arg_placeholder("for")}}),
+                    args,
+                }
+            }
+            "time_is_between" => {
+                let mut cfg = json!({"condition": "time"});
+                for (field, key) in [("AFTER", "after"), ("BEFORE", "before")] {
+                    if let Some(v) = b.field_str(field).map(str::trim).filter(|v| !v.is_empty()) {
+                        cfg[key] = json!(v);
+                    }
+                }
+                let days: Vec<&str> = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+                    .into_iter()
+                    .filter(|d| b.field_str(&d.to_uppercase()) == Some("TRUE"))
+                    .collect();
+                if !days.is_empty() && days.len() < 7 {
+                    cfg["weekday"] = json!(days);
+                }
+                ExprKind::Condition { config: cfg, args: BTreeMap::new() }
+            }
+            "ha_has_value" | "ha_friendly_name" => {
+                let e = self.entity_expr(b);
+                let name = if b.ty() == "ha_has_value" { "ha:has_value" } else { "ha:friendly_name" };
+                self.builtin(name, vec![e])
+            }
+            "ha_seconds_since" => {
+                let e = self.entity_expr(b);
+                let field = Expr::lit(b.id(), json!(b.field_str("FIELD").unwrap_or("last_changed")));
+                self.builtin("ha:seconds_since", vec![e, field])
+            }
+            "ha_number_state" => {
+                let e = self.entity_expr(b);
+                let d = self.value_opt(b, "DEFAULT").unwrap_or_else(|| Expr::lit(b.id(), json!(0)));
+                self.builtin("ha:number_state", vec![e, d])
+            }
+            "ha_state_check" => {
+                let list = self.value(b, "LIST");
+                let f = |k: &str, d: &str| Expr::lit(b.id(), json!(b.field_str(k).unwrap_or(d)));
+                let (mode, op, state) = (f("MODE", "any"), f("OP", "is"), f("STATE", "on"));
+                self.builtin("ha:state_check", vec![list, mode, op, state])
+            }
+            "ha_states_aggregate" => {
+                let list = self.value(b, "LIST");
+                let op = Expr::lit(b.id(), json!(b.field_str("OP").unwrap_or("average")));
+                self.builtin("ha:aggregate", vec![list, op])
+            }
+            "ha_scene_last" => {
+                let scenes = self.value(b, "SCENES");
+                self.builtin("ha:last_scene", vec![scenes])
+            }
+            "ha_history" => {
+                let e = self.entity_expr(b);
+                let op = Expr::lit(b.id(), json!(b.field_str("OP").unwrap_or("average")));
+                let secs = self.value(b, "SECONDS");
+                let state = Expr::lit(b.id(), json!(b.field_str("STATE").unwrap_or("")));
+                self.builtin("ha:history", vec![e, op, secs, state])
+            }
+            "ha_entities_in" => {
+                let kind = b.field_str("KIND").unwrap_or("area");
+                let name = b.field_str("NAME").unwrap_or("").trim().replace(['\\', '\''], "");
+                let domain = b.field_str("DOMAIN").unwrap_or("").trim().replace(['\\', '\''], "");
+                let func = match kind {
+                    "floor" => "floor_entities",
+                    "label" => "label_entities",
+                    "device" => "device_entities",
+                    "integration" => "integration_entities",
+                    _ => "area_entities",
+                };
+                if name.is_empty() {
+                    self.err(b, "name is required");
+                }
+                let filter = if domain.is_empty() {
+                    String::new()
+                } else {
+                    format!(" | select('match', '{domain}\\.')")
+                };
+                ExprKind::Template { template: format!("{{{{ {func}('{name}'){filter} | list }}}}") }
+            }
+            "time_today_at" => {
+                let t = Expr::lit(b.id(), json!(b.field_str("TIME").unwrap_or("00:00")));
+                self.builtin("today_at", vec![t])
+            }
+            "time_add" => {
+                let args = vec![self.value(b, "DATETIME"), self.value(b, "SECONDS")];
+                self.builtin("datetime_add", args)
+            }
+            "time_seconds_between" => {
+                let args = vec![self.value(b, "A"), self.value(b, "B")];
+                self.builtin("seconds_between", args)
+            }
+            "format_duration" => {
+                let args = vec![
+                    self.value(b, "SECONDS"),
+                    Expr::lit(b.id(), json!(b.field_str("STYLE").unwrap_or("words"))),
+                ];
+                self.builtin("format_duration", args)
+            }
+            "trigger_info" => {
+                let attr = b.field_str("ATTR").unwrap_or("").trim().to_owned();
+                let path = match b.field_str("WHAT").unwrap_or("entity") {
+                    "from" => "from_state.state".to_owned(),
+                    "to" => "to_state.state".to_owned(),
+                    "from_attr" => format!("from_state.attributes.{attr}"),
+                    "to_attr" => format!("to_state.attributes.{attr}"),
+                    "id" => "id".to_owned(),
+                    "platform" => "platform".to_owned(),
+                    _ => "entity_id".to_owned(),
+                };
+                ExprKind::TriggerData { path }
+            }
+            "triggered_by" => {
+                let id = b.field_str("TRIGGER").unwrap_or("").to_owned();
+                ExprKind::Binary {
+                    bin: BinOp::Eq,
+                    left: Box::new(Expr {
+                        id: b.id().into(),
+                        kind: ExprKind::TriggerData { path: "id".into() },
+                    }),
+                    right: Box::new(Expr::lit(b.id(), json!(id))),
+                }
+            }
             "http_request" => ExprKind::Http {
                 method: b.field_str("METHOD").unwrap_or("GET").to_owned(),
                 url: Box::new(self.value(b, "URL")),

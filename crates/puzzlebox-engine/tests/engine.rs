@@ -447,3 +447,76 @@ async fn registry_change_restarts_only_affected_programs() {
     // Only the affected program resubscribed (the old stream stays in the mock's list).
     assert_eq!(subscribed(&ha), ["sensor.old", "x.z", "sensor.new"]);
 }
+
+fn on_run(body: Value) -> Value {
+    b("ha_on_run", "run", json!({}), json!({"DO": blk(body)}))
+}
+
+#[tokio::test]
+async fn restart_timer_fires_once_after_last_start() {
+    let (engine, ha) = setup().await;
+    let mut events = engine.subscribe();
+    let timer = b(
+        "timer_start",
+        "tm",
+        json!({"NAME": "off", "MODE": "restart"}),
+        json!({"SECONDS": blk(num("s", 0.3)), "DO": blk(call("fired", "light.turn_off", "light.a"))}),
+    );
+    let ws = workspace(vec![on_run(timer)], json!([]));
+    engine.save(program("tmr", ws, "single")).await.unwrap();
+    assert!(engine.run_now("tmr", None, None));
+    next_finished(&mut events).await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Second start restarts the countdown, so only one firing happens.
+    assert!(engine.run_now("tmr", None, None));
+    next_finished(&mut events).await;
+    assert!(ha.calls().is_empty());
+    // The timer's own run (single mode doesn't block it).
+    let (status, _) = next_finished(&mut events).await;
+    assert_eq!(status, "ok");
+    assert_eq!(ha.calls(), ["light.turn_off"]);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(ha.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn throttle_wait_until_and_triggered_by() {
+    let (engine, ha) = setup().await;
+    let mut events = engine.subscribe();
+    let throttled = b(
+        "controls_if",
+        "if",
+        json!({}),
+        json!({
+        "IF0": blk(b("throttle", "th", json!({"KEY": "k"}), json!({"SECONDS": blk(num("ts", 60.0))}))),
+        "DO0": blk(call("c", "notify.x", "x.y"))}),
+    );
+    let wait = b(
+        "wait_until",
+        "w",
+        json!({}),
+        json!({
+        "COND": blk(b("logic_boolean", "f", json!({"BOOL": "FALSE"}), json!({}))),
+        "TIMEOUT": blk(num("to", 0.2))}),
+    );
+    let set = b(
+        "variables_set",
+        "s",
+        json!({"VAR": {"id": "v"}}),
+        json!({"VALUE": blk(
+        b("triggered_by", "tb", json!({"TRIGGER": "trg"}), json!({})))}),
+    );
+    let body = chain(vec![throttled, wait, set]);
+    let ws =
+        workspace(vec![when("wh", state_trigger("trg", "x.y"), body)], json!([{"name": "hit", "id": "v"}]));
+    engine.save(program("th", ws, "parallel")).await.unwrap();
+    for _ in 0..3 {
+        ha.fire(json!({"platform": "state", "id": "trg"}));
+        next_finished(&mut events).await;
+    }
+    assert_eq!(ha.calls(), ["notify.x"], "throttle lets only the first run through");
+    let run = engine.store().list_runs("th", 1).await.unwrap().remove(0);
+    let vars = engine.store().get_run(&run.id).await.unwrap().unwrap().trace.unwrap()["variables"].clone();
+    assert_eq!(vars["wait"], json!({"completed": false}));
+    assert_eq!(vars["hit"], json!(true));
+}

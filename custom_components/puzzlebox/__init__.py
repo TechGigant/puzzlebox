@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigEntry
@@ -9,10 +11,12 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 
 from .bridge import BridgeClient
 from .const import CONF_TOKEN, CONF_URL, DOMAIN, PENDING_PACKS
+from .supervisor import async_find_app
 
 PLATFORMS = [Platform.SWITCH, Platform.BUTTON]
 
@@ -62,6 +66,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         client.register_pack(pack, handlers)
     await client.async_start()
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    async def _refresh(_now=None) -> None:
+        # Picks up a reinstalled app (new token) or a changed host name without user action.
+        found = await async_find_app(hass)
+        if found and found != {k: entry.data.get(k) for k in found}:
+            hass.config_entries.async_update_entry(entry, data={**entry.data, **found})
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+        elif not client.connected and found:
+            client.nudge()
+
+    entry.async_on_unload(async_track_time_interval(hass, _refresh, timedelta(minutes=5)))
     return True
 
 

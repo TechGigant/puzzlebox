@@ -24,8 +24,14 @@ pub struct Handler {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum HandlerKind {
-    Triggers { triggers: Vec<Trigger> },
+    Triggers {
+        triggers: Vec<Trigger>,
+    },
     OnStart,
+    /// Body of a named timer; runs when the timer started by `StmtKind::TimerStart` fires.
+    Timer {
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -171,6 +177,33 @@ pub enum StmtKind {
         block: String,
         args: BTreeMap<String, Expr>,
     },
+    /// Starts the program's timer `name`; after `seconds` the handler with block id
+    /// `handler` runs as its own run.
+    TimerStart {
+        name: String,
+        seconds: Expr,
+        if_running: TimerMode,
+        handler: BlockId,
+    },
+    TimerCancel {
+        name: String,
+    },
+    /// Waits until `cond` is true (and stays true for `hold` seconds), or `timeout` passes.
+    /// Sets the local variable `wait` to `{"completed": bool}`.
+    WaitUntil {
+        cond: Expr,
+        hold: Option<Expr>,
+        timeout: Option<Expr>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TimerMode {
+    /// Start over with the new duration (e.g. "off 5 min after the *last* motion").
+    Restart,
+    /// Keep the running timer.
+    Keep,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

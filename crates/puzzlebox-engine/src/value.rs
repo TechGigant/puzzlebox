@@ -339,8 +339,222 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
         "time_day" => json!(Local::now().day()),
         "time_month" => json!(Local::now().month()),
         "time_year" => json!(Local::now().year()),
+        "today_at" => json!(today_at(&to_text(a(0)))?.to_rfc3339()),
+        "datetime_add" => {
+            let t = parse_time(a(0)).ok_or_else(|| format!("not a date/time: {}", short(a(0))))?;
+            let ms = (n(1)? * 1000.0) as i64;
+            json!((t + chrono::Duration::milliseconds(ms)).to_rfc3339())
+        }
+        "seconds_between" => {
+            let x = parse_time(a(0)).ok_or_else(|| format!("not a date/time: {}", short(a(0))))?;
+            let y = parse_time(a(1)).ok_or_else(|| format!("not a date/time: {}", short(a(1))))?;
+            num((y - x).num_milliseconds() as f64 / 1000.0)
+        }
+        "format_duration" => json!(format_duration(n(0)?, &to_text(a(1)))),
         "time_timestamp" => num(Local::now().timestamp_millis() as f64 / 1000.0),
         _ => return Err(format!("unknown function '{name}'")),
+    })
+}
+
+/// `"HH:MM"`/`"HH:MM:SS"` today in local time.
+pub fn today_at(t: &str) -> Result<chrono::DateTime<Local>, String> {
+    let parts: Vec<u32> = t
+        .trim()
+        .split(':')
+        .map(|p| p.parse().ok())
+        .collect::<Option<_>>()
+        .ok_or_else(|| format!("expected HH:MM, got '{t}'"))?;
+    let (h, m, sec) = (
+        parts.first().copied().unwrap_or(0),
+        parts.get(1).copied().unwrap_or(0),
+        parts.get(2).copied().unwrap_or(0),
+    );
+    let naive =
+        Local::now().date_naive().and_hms_opt(h, m, sec).ok_or_else(|| format!("invalid time '{t}'"))?;
+    naive.and_local_timezone(Local).earliest().ok_or_else(|| format!("'{t}' does not exist today"))
+}
+
+/// RFC 3339 / ISO date-time, or `HH:MM` meaning today.
+pub fn parse_time(v: &Value) -> Option<chrono::DateTime<Local>> {
+    let s = to_text(v);
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s.trim()) {
+        return Some(t.with_timezone(&Local));
+    }
+    if let Some(f) = v.as_f64().filter(|_| v.is_number()) {
+        return chrono::DateTime::from_timestamp_millis((f * 1000.0) as i64).map(|t| t.with_timezone(&Local));
+    }
+    today_at(&s).ok()
+}
+
+pub fn format_duration(secs: f64, style: &str) -> String {
+    let total = secs.max(0.0).round() as u64;
+    let (d, h, m, s) = (total / 86400, (total / 3600) % 24, (total / 60) % 60, total % 60);
+    if style == "clock" {
+        let hours = total / 3600;
+        return format!("{hours}:{m:02}:{s:02}");
+    }
+    let mut parts = Vec::new();
+    for (v, unit) in [(d, "d"), (h, "h"), (m, "min"), (s, "s")] {
+        if v > 0 {
+            parts.push(format!("{v} {unit}"));
+        }
+    }
+    if parts.is_empty() { "0 s".into() } else { parts.into_iter().take(2).collect::<Vec<_>>().join(" ") }
+}
+
+/// An entity id, comma-separated ids, or a list of ids.
+pub fn entity_list(v: &Value) -> Vec<String> {
+    match v {
+        Value::Array(a) => a.iter().map(to_text).filter(|s| !s.is_empty()).collect(),
+        Value::Null => vec![],
+        other => to_text(other).split(',').map(|s| s.trim().to_owned()).filter(|s| !s.is_empty()).collect(),
+    }
+}
+
+fn usable(state: &str) -> bool {
+    !matches!(state, "unknown" | "unavailable" | "")
+}
+
+/// Last-activation time of a scene (its state), if it has one.
+fn scene_time(state: Option<Value>) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    let s = state?.get("state")?.as_str()?.to_owned();
+    chrono::DateTime::parse_from_rfc3339(&s).ok()
+}
+
+/// Builtins that read Home Assistant's state cache through `lookup`.
+pub fn ha_builtin(name: &str, a: &[Value], lookup: &dyn Fn(&str) -> Option<Value>) -> VResult {
+    let arg = |i: usize| a.get(i).cloned().unwrap_or(Value::Null);
+    let state_of =
+        |e: &str| lookup(e).and_then(|s| s.get("state").and_then(Value::as_str).map(str::to_owned));
+    Ok(match name {
+        "ha:has_value" => json!(state_of(&to_text(&arg(0))).is_some_and(|s| usable(&s))),
+        "ha:friendly_name" => {
+            let e = to_text(&arg(0));
+            lookup(&e)
+                .and_then(|s| s.pointer("/attributes/friendly_name").cloned())
+                .unwrap_or_else(|| json!(e))
+        }
+        "ha:seconds_since" => {
+            let field = to_text(&arg(1));
+            let field = if field == "last_updated" { "last_updated" } else { "last_changed" };
+            match lookup(&to_text(&arg(0)))
+                .and_then(|s| s.get(field).and_then(Value::as_str).map(str::to_owned))
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())
+            {
+                Some(t) => num((chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_milliseconds()
+                    as f64
+                    / 1000.0),
+                None => Value::Null,
+            }
+        }
+        "ha:number_state" => match state_of(&to_text(&arg(0))).and_then(|s| s.trim().parse::<f64>().ok()) {
+            Some(f) if f.is_finite() => num(f),
+            _ => arg(1),
+        },
+        "ha:state_check" => {
+            let ids = entity_list(&arg(0));
+            let (mode, negate, want) = (to_text(&arg(1)), to_text(&arg(2)) == "is_not", to_text(&arg(3)));
+            let hits = ids
+                .iter()
+                .filter(|e| state_of(e).is_some_and(|s| loose_eq(&json!(s), &json!(want)) != negate))
+                .count();
+            match mode.as_str() {
+                "all" => json!(!ids.is_empty() && hits == ids.len()),
+                "none" => json!(hits == 0),
+                "count" => json!(hits),
+                _ => json!(hits > 0),
+            }
+        }
+        "ha:aggregate" => {
+            let vals: Vec<f64> = entity_list(&arg(0))
+                .iter()
+                .filter_map(|e| state_of(e)?.trim().parse::<f64>().ok())
+                .filter(|f| f.is_finite())
+                .collect();
+            if vals.is_empty() {
+                return Ok(Value::Null);
+            }
+            match to_text(&arg(1)).as_str() {
+                "min" => num(vals.iter().copied().fold(f64::INFINITY, f64::min)),
+                "max" => num(vals.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
+                "sum" => num(vals.iter().sum()),
+                _ => num(vals.iter().sum::<f64>() / vals.len() as f64),
+            }
+        }
+        "ha:last_scene" => last_scene(&entity_list(&arg(0)), lookup).map_or(Value::Null, |s| json!(s)),
+        "ha:next_scene" => {
+            let scenes = entity_list(&arg(0));
+            let usable_scenes: Vec<&String> = scenes
+                .iter()
+                .filter(|s| {
+                    lookup(s)
+                        .and_then(|v| v.get("state").and_then(Value::as_str).map(|x| x != "unavailable"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if usable_scenes.is_empty() {
+                return Err("none of the scenes is available".into());
+            }
+            let current = last_scene(&scenes, lookup);
+            let pos = current.and_then(|c| usable_scenes.iter().position(|s| **s == c));
+            let n = usable_scenes.len();
+            let next = match (pos, to_text(&arg(1)).as_str()) {
+                (None, _) => 0,
+                (Some(i), "previous") => (i + n - 1) % n,
+                (Some(i), _) => (i + 1) % n,
+            };
+            json!(usable_scenes[next])
+        }
+        _ => return Err(format!("unknown function '{name}'")),
+    })
+}
+
+/// The scene among `scenes` that was activated most recently (ignores never-activated ones).
+pub fn last_scene(scenes: &[String], lookup: &dyn Fn(&str) -> Option<Value>) -> Option<String> {
+    scenes
+        .iter()
+        .filter_map(|s| scene_time(lookup(s)).map(|t| (t, s)))
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, s)| s.clone())
+}
+
+/// Statistics over recorded states `(unix seconds, state)` within `[start, end]`.
+pub fn history_stat(points: &[(f64, String)], start: f64, end: f64, op: &str, state: &str) -> VResult {
+    let mut pts: Vec<(f64, &str)> = points.iter().map(|(t, s)| (t.max(start), s.as_str())).collect();
+    pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Segment i lasts from its time to the next point (or `end`).
+    let seg = |i: usize| -> f64 { pts.get(i + 1).map_or(end, |p| p.0).min(end) - pts[i].0 };
+    Ok(match op {
+        "state_ago" => pts.first().map_or(Value::Null, |(_, s)| json!(s)),
+        "changes" => json!(pts.windows(2).filter(|w| w[0].1 != w[1].1).count()),
+        "time_in_state" => num((0..pts.len()).filter(|&i| pts[i].1 == state).map(seg).sum()),
+        "min" | "max" | "average" => {
+            let numeric: Vec<(usize, f64)> = pts
+                .iter()
+                .enumerate()
+                .filter_map(|(i, (_, s))| s.trim().parse::<f64>().ok().map(|f| (i, f)))
+                .collect();
+            if numeric.is_empty() {
+                return Ok(Value::Null);
+            }
+            match op {
+                "min" => num(numeric.iter().map(|x| x.1).fold(f64::INFINITY, f64::min)),
+                "max" => num(numeric.iter().map(|x| x.1).fold(f64::NEG_INFINITY, f64::max)),
+                _ => {
+                    // Time-weighted: each value counts for as long as it was the state.
+                    let (sum, weight) = numeric.iter().fold((0.0, 0.0), |(s, w), (i, v)| {
+                        let d = seg(*i).max(0.0);
+                        (s + v * d, w + d)
+                    });
+                    if weight > 0.0 {
+                        num((sum / weight * 1000.0).round() / 1000.0)
+                    } else {
+                        num(numeric[0].1)
+                    }
+                }
+            }
+        }
+        other => return Err(format!("unknown history statistic '{other}'")),
     })
 }
 
@@ -386,6 +600,84 @@ mod tests {
         assert_eq!(builtin("text_join", &[json!("a"), json!(1), Value::Null]).unwrap(), json!("a1"));
         assert_eq!(builtin("index_of", &[json!("héllo"), json!("l")]).unwrap(), json!(3));
         assert_eq!(builtin("text_titlecase", &[json!("hello wORLD")]).unwrap(), json!("Hello World"));
+    }
+
+    #[test]
+    fn scenes_and_state_checks() {
+        let states: std::collections::HashMap<&str, Value> = [
+            ("scene.day", json!({"state": "2026-11-25T20:00:00+00:00"})),
+            ("scene.sleepy", json!({"state": "2026-11-25T22:00:00+00:00"})),
+            ("scene.new", json!({"state": "unknown"})),
+            ("light.a", json!({"state": "on", "attributes": {"friendly_name": "Lamp A"}})),
+            ("light.b", json!({"state": "off"})),
+            ("sensor.t1", json!({"state": "20"})),
+            ("sensor.t2", json!({"state": "unavailable"})),
+            ("sensor.t3", json!({"state": "24"})),
+        ]
+        .into_iter()
+        .collect();
+        let lookup = |e: &str| states.get(e).cloned();
+        let scenes = json!(["scene.day", "scene.sleepy", "scene.new"]);
+        // `unknown` (never activated) no longer "wins" like it did with text comparison.
+        assert_eq!(ha_builtin("ha:last_scene", &[scenes.clone()], &lookup).unwrap(), json!("scene.sleepy"));
+        assert_eq!(
+            ha_builtin("ha:next_scene", &[scenes.clone(), json!("next")], &lookup).unwrap(),
+            json!("scene.new")
+        );
+        assert_eq!(
+            ha_builtin("ha:next_scene", &[json!("scene.day,scene.sleepy"), json!("next")], &lookup).unwrap(),
+            json!("scene.day")
+        );
+        assert_eq!(
+            ha_builtin(
+                "ha:state_check",
+                &[json!("light.a,light.b"), json!("count"), json!("is"), json!("on")],
+                &lookup
+            )
+            .unwrap(),
+            json!(1)
+        );
+        assert_eq!(
+            ha_builtin(
+                "ha:state_check",
+                &[json!(["light.a", "light.b"]), json!("all"), json!("is_not"), json!("unavailable")],
+                &lookup
+            )
+            .unwrap(),
+            json!(true)
+        );
+        assert_eq!(
+            ha_builtin("ha:aggregate", &[json!("sensor.t1,sensor.t2,sensor.t3"), json!("average")], &lookup)
+                .unwrap(),
+            json!(22)
+        );
+        assert_eq!(ha_builtin("ha:has_value", &[json!("sensor.t2")], &lookup).unwrap(), json!(false));
+        assert_eq!(
+            ha_builtin("ha:number_state", &[json!("sensor.t2"), json!(-1)], &lookup).unwrap(),
+            json!(-1)
+        );
+        assert_eq!(ha_builtin("ha:friendly_name", &[json!("light.a")], &lookup).unwrap(), json!("Lamp A"));
+    }
+
+    #[test]
+    fn history_statistics() {
+        // 0..10 s at 10, 10..30 s at 20, 30..40 s "off".
+        let pts = vec![(-5.0, "10".to_owned()), (10.0, "20".to_owned()), (30.0, "off".to_owned())];
+        let (start, end) = (0.0, 40.0);
+        assert_eq!(history_stat(&pts, start, end, "state_ago", "").unwrap(), json!("10"));
+        assert_eq!(history_stat(&pts, start, end, "average", "").unwrap(), json!(16.667));
+        assert_eq!(history_stat(&pts, start, end, "max", "").unwrap(), json!(20));
+        assert_eq!(history_stat(&pts, start, end, "changes", "").unwrap(), json!(2));
+        assert_eq!(history_stat(&pts, start, end, "time_in_state", "off").unwrap(), json!(10));
+    }
+
+    #[test]
+    fn durations_and_times() {
+        assert_eq!(format_duration(3725.0, "words"), "1 h 2 min");
+        assert_eq!(format_duration(3725.0, "clock"), "1:02:05");
+        let a = json!("2026-11-25T10:00:00+00:00");
+        let b = builtin("datetime_add", &[a.clone(), json!(90)]).unwrap();
+        assert_eq!(builtin("seconds_between", &[a, b]).unwrap(), json!(90));
     }
 
     #[test]

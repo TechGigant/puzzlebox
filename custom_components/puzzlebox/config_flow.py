@@ -14,6 +14,7 @@ from homeassistant.helpers.hassio import is_hassio
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 
 from .const import CONF_TOKEN, CONF_URL, DOMAIN
+from .supervisor import async_find_app, data_from_discovery
 
 APP_PORT = 8099
 
@@ -54,17 +55,15 @@ async def _validate(hass, url: str, token: str) -> str | None:
 class PuzzleboxConfigFlow(ConfigFlow, domain=DOMAIN):
     VERSION = 1
 
-    def __init__(self) -> None:
-        self._discovered: dict[str, str] = {}
-
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         errors: dict[str, str] = {}
+        if user_input is None and (found := await async_find_app(self.hass)):
+            # On Home Assistant OS the app announces its address and token: nothing to ask.
+            return await self._async_create(found)
         if user_input is not None:
             error = await _validate(self.hass, user_input[CONF_URL], user_input[CONF_TOKEN])
             if error is None:
-                await self.async_set_unique_id(DOMAIN)
-                self._abort_if_unique_id_configured(updates=user_input)
-                return self.async_create_entry(title="Puzzlebox", data=user_input)
+                return await self._async_create(user_input)
             errors["base"] = error
         schema = vol.Schema(
             {
@@ -77,15 +76,10 @@ class PuzzleboxConfigFlow(ConfigFlow, domain=DOMAIN):
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
 
     async def async_step_hassio(self, discovery_info: HassioServiceInfo) -> ConfigFlowResult:
-        cfg = discovery_info.config
-        data = {CONF_URL: f"http://{cfg['host']}:{cfg['port']}", CONF_TOKEN: cfg["token"]}
-        await self.async_set_unique_id(DOMAIN)
-        # Reinstalling the app rotates nothing, but a new host name must reach the entry.
-        self._abort_if_unique_id_configured(updates=data)
-        self._discovered = data
-        return await self.async_step_hassio_confirm()
+        return await self._async_create(data_from_discovery(discovery_info.config))
 
-    async def async_step_hassio_confirm(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
-        if user_input is not None:
-            return self.async_create_entry(title="Puzzlebox", data=self._discovered)
-        return self.async_show_form(step_id="hassio_confirm")
+    async def _async_create(self, data: dict[str, str]) -> ConfigFlowResult:
+        await self.async_set_unique_id(DOMAIN)
+        # A reinstalled app has a new token or host name; keep the entry, update its data.
+        self._abort_if_unique_id_configured(updates=data)
+        return self.async_create_entry(title="Puzzlebox", data=data)

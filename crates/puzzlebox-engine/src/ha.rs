@@ -37,6 +37,16 @@ pub trait HaApi: Send + Sync + 'static {
     async fn fire_event(&self, event_type: &str, data: Option<Value>) -> Result<(), String>;
     /// Each item is the trigger payload (HA's `trigger` variable).
     async fn subscribe_trigger(&self, trigger: Value) -> Result<TriggerStream, String>;
+    /// Recorded states of one entity between two RFC 3339 times, as (unix seconds, state),
+    /// including the state at `start`.
+    async fn history(
+        &self,
+        _entity_id: &str,
+        _start: &str,
+        _end: &str,
+    ) -> Result<Vec<(f64, String)>, String> {
+        Err("history is not available".into())
+    }
 }
 
 /// [`HaApi`] backed by the live WebSocket client, with an entity state cache.
@@ -166,6 +176,32 @@ impl HaApi for LiveHa {
 
     async fn fire_event(&self, event_type: &str, data: Option<Value>) -> Result<(), String> {
         self.client.fire_event(event_type, data).await.map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    async fn history(&self, entity_id: &str, start: &str, end: &str) -> Result<Vec<(f64, String)>, String> {
+        let res = self
+            .client
+            .request(json!({
+                "type": "history/history_during_period",
+                "start_time": start,
+                "end_time": end,
+                "entity_ids": [entity_id],
+                "minimal_response": true,
+                "no_attributes": true,
+                "significant_changes_only": false,
+                "include_start_time_state": true,
+            }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let rows = res.get(entity_id).and_then(Value::as_array).cloned().unwrap_or_default();
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let state = r.get("s").and_then(Value::as_str)?.to_owned();
+                let ts = r.get("lu").or_else(|| r.get("lc")).and_then(Value::as_f64)?;
+                Some((ts, state))
+            })
+            .collect())
     }
 
     async fn subscribe_trigger(&self, trigger: Value) -> Result<TriggerStream, String> {

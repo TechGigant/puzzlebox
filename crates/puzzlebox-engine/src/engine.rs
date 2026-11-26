@@ -101,6 +101,10 @@ pub enum EngineEvent {
 
 struct RunningProgram {
     program: Arc<Program>,
+    /// Named timers: name → task that dispatches the timer's handler when it fires.
+    timers: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    /// Throttle keys → when they last let a run through.
+    throttles: Mutex<HashMap<String, Instant>>,
     program_vars: Arc<Mutex<Map<String, Value>>>,
     tasks: Vec<JoinHandle<()>>,
     runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
@@ -335,6 +339,9 @@ impl Engine {
             for t in rp.tasks {
                 t.abort();
             }
+            for (_, t) in lock(&rp.timers).drain() {
+                t.abort();
+            }
             for tok in lock(&rp.runs).values() {
                 tok.cancel();
             }
@@ -413,8 +420,14 @@ impl Engine {
                     },
                     other => {
                         let tx = tx.clone();
-                        let sink =
-                            Box::new(move |t: Value| tx.send(Dispatch { handler: idx, trigger: t }).is_ok());
+                        let trigger_id = other.block_id().to_owned();
+                        // Engine triggers report their block id like HA triggers do (`trigger.id`).
+                        let sink = Box::new(move |mut t: Value| {
+                            if let Some(o) = t.as_object_mut() {
+                                o.entry("id").or_insert_with(|| json!(trigger_id));
+                            }
+                            tx.send(Dispatch { handler: idx, trigger: t }).is_ok()
+                        });
                         if let Err(e) = self.inner.sources.register(&rec.id, other, sink) {
                             errors.push(CompileError { block_id: Some(other.block_id().into()), message: e });
                         }
@@ -442,7 +455,15 @@ impl Engine {
 
         lock(&self.inner.running).insert(
             rec.id.clone(),
-            RunningProgram { program: program.clone(), program_vars, tasks, runs, tx },
+            RunningProgram {
+                program: program.clone(),
+                timers: Arc::new(Mutex::new(HashMap::new())),
+                throttles: Mutex::new(HashMap::new()),
+                program_vars,
+                tasks,
+                runs,
+                tx,
+            },
         );
         if !errors.is_empty() {
             let msg = errors.iter().map(|e| e.message.as_str()).collect::<Vec<_>>().join("; ");
@@ -480,6 +501,10 @@ impl DispatchCtx {
                 }
             });
             while let Some(d) = rx.recv().await {
+                if self.is_timer(&d) {
+                    let _handle = self.spawn_run(d);
+                    continue;
+                }
                 if qtx.try_send(d).is_err() {
                     self.skipped("queue is full");
                 }
@@ -488,6 +513,11 @@ impl DispatchCtx {
             return;
         }
         while let Some(d) = rx.recv().await {
+            // A timer firing is the continuation of an earlier run, not a new trigger.
+            if self.is_timer(&d) {
+                let _handle = self.spawn_run(d);
+                continue;
+            }
             let active = lock(&self.runs).len();
             match self.mode {
                 RunMode::Single if active > 0 => {
@@ -507,6 +537,10 @@ impl DispatchCtx {
             }
             let _handle = self.spawn_run(d);
         }
+    }
+
+    fn is_timer(&self, d: &Dispatch) -> bool {
+        self.program.handlers.get(d.handler).is_some_and(|h| matches!(h.kind, HandlerKind::Timer { .. }))
     }
 
     fn skipped(&self, why: &str) {
@@ -609,8 +643,74 @@ struct EngineHooks {
     engine: Engine,
 }
 
+impl EngineHooks {
+    fn with_program<T>(&self, ctx: &RunCtx, f: impl FnOnce(&RunningProgram) -> T) -> Option<T> {
+        lock(&self.engine.inner.running).get(&ctx.program_id).map(f)
+    }
+}
+
 #[async_trait::async_trait]
 impl RunHooks for EngineHooks {
+    fn timer_start(
+        &self,
+        ctx: &RunCtx,
+        name: &str,
+        seconds: f64,
+        mode: puzzlebox_ir::TimerMode,
+        handler: &str,
+    ) -> Result<(), String> {
+        let started = self.with_program(ctx, |rp| {
+            let idx =
+                rp.program.handlers.iter().position(|h| h.id == handler).ok_or("timer body not found")?;
+            let mut timers = lock(&rp.timers);
+            if let Some(t) = timers.get(name) {
+                if !t.is_finished() && mode == puzzlebox_ir::TimerMode::Keep {
+                    return Ok(());
+                }
+                t.abort();
+            }
+            let (tx, timers_ref, key) = (rp.tx.clone(), rp.timers.clone(), name.to_owned());
+            let trigger =
+                json!({"platform": "timer", "timer": name, "id": handler, "started_by": ctx.trigger.clone()});
+            let task = tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs_f64(seconds)).await;
+                lock(&timers_ref).remove(&key);
+                let _ = tx.send(Dispatch { handler: idx, trigger });
+            });
+            timers.insert(name.to_owned(), task);
+            Ok(())
+        });
+        started.unwrap_or(Err("the program is not running".into()))
+    }
+
+    fn timer_cancel(&self, ctx: &RunCtx, name: &str) {
+        self.with_program(ctx, |rp| {
+            if let Some(t) = lock(&rp.timers).remove(name) {
+                t.abort();
+            }
+        });
+    }
+
+    fn timer_running(&self, ctx: &RunCtx, name: &str) -> bool {
+        self.with_program(ctx, |rp| lock(&rp.timers).get(name).is_some_and(|t| !t.is_finished()))
+            .unwrap_or(false)
+    }
+
+    fn throttle(&self, ctx: &RunCtx, key: &str, seconds: f64) -> bool {
+        self.with_program(ctx, |rp| {
+            let mut map = lock(&rp.throttles);
+            let now = Instant::now();
+            match map.get(key) {
+                Some(last) if now.duration_since(*last).as_secs_f64() < seconds => false,
+                _ => {
+                    map.insert(key.to_owned(), now);
+                    true
+                }
+            }
+        })
+        .unwrap_or(true)
+    }
+
     async fn on_step(&self, ctx: &RunCtx, block: &str) {
         let inner = &self.engine.inner;
         if inner.debugger.is_watched(&ctx.program_id) {

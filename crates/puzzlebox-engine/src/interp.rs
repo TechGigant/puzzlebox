@@ -80,6 +80,25 @@ pub struct Trace {
 pub trait RunHooks: Send + Sync {
     async fn on_step(&self, _ctx: &RunCtx, _block: &str) {}
     fn on_log(&self, _ctx: &RunCtx, _level: LogLevel, _message: &str) {}
+    /// Starts (or restarts/keeps) a program timer that runs the handler `handler` later.
+    fn timer_start(
+        &self,
+        _ctx: &RunCtx,
+        _name: &str,
+        _seconds: f64,
+        _mode: TimerMode,
+        _handler: &str,
+    ) -> Result<(), String> {
+        Err("timers are not available".into())
+    }
+    fn timer_cancel(&self, _ctx: &RunCtx, _name: &str) {}
+    fn timer_running(&self, _ctx: &RunCtx, _name: &str) -> bool {
+        false
+    }
+    /// True at most once per `seconds` for `key` within a program.
+    fn throttle(&self, _ctx: &RunCtx, _key: &str, _seconds: f64) -> bool {
+        true
+    }
 }
 
 /// Runtime for third-party blocks (Python bridge, WASM).
@@ -431,6 +450,42 @@ impl RunCtx {
             StmtKind::Plugin { plugin, block, args } => {
                 self.plugin_call(frame, id, plugin, block, args).await?;
             }
+            StmtKind::TimerStart { name, seconds, if_running, handler } => {
+                let secs = to_num(&self.eval(frame, seconds).await?).at(id)?.max(0.0);
+                self.hooks.timer_start(self, name, secs, *if_running, handler).at(id)?;
+            }
+            StmtKind::TimerCancel { name } => self.hooks.timer_cancel(self, name),
+            StmtKind::WaitUntil { cond, hold, timeout } => {
+                let hold = match hold {
+                    Some(h) => to_num(&self.eval(frame, h).await?).at(id)?.max(0.0),
+                    None => 0.0,
+                };
+                let deadline = match timeout {
+                    Some(t) => {
+                        let t = to_num(&self.eval(frame, t).await?).at(id)?;
+                        (t > 0.0).then(|| Instant::now() + Duration::from_secs_f64(t))
+                    }
+                    None => None,
+                };
+                let mut true_since: Option<Instant> = None;
+                let completed = loop {
+                    if truthy(&self.eval(frame, cond).await?) {
+                        let since = *true_since.get_or_insert_with(Instant::now);
+                        if since.elapsed().as_secs_f64() >= hold {
+                            break true;
+                        }
+                    } else {
+                        true_since = None;
+                    }
+                    if deadline.is_some_and(|d| Instant::now() >= d) {
+                        break false;
+                    }
+                    // Conditions read HA's state cache, which updates on every state change;
+                    // polling once a second is cheap and catches any expression.
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                };
+                self.set_var(frame, "wait", VarScope::Local, json!({"completed": completed})).await;
+            }
         }
         Ok(Flow::Normal)
     }
@@ -494,6 +549,15 @@ impl RunCtx {
                 ExprKind::Builtin { name, args } if name == "list_get" && is_random_index(args) => {
                     let list = self.eval(frame, &args[0]).await?;
                     value::builtin("list_random", &[list]).at(id)?
+                }
+                ExprKind::Builtin { name, args }
+                    if name.starts_with("engine:") || name.starts_with("ha:") =>
+                {
+                    let mut vals = Vec::with_capacity(args.len());
+                    for a in args {
+                        vals.push(self.eval(frame, a).await?);
+                    }
+                    self.context_builtin(name, &vals).await.at(id)?
                 }
                 ExprKind::Builtin { name, args } if name == "template_with" => {
                     let template = to_text(&self.eval(frame, &args[0]).await?);
@@ -584,6 +648,33 @@ impl RunCtx {
             vals.insert(k.clone(), self.eval(frame, e).await?);
         }
         Ok(puzzlebox_ir::substitute_args(template, &vals))
+    }
+
+    /// Builtins that need the engine (timers, throttles) or Home Assistant data.
+    async fn context_builtin(&self, name: &str, a: &[Value]) -> Result<Value, String> {
+        let arg = |i: usize| a.get(i).cloned().unwrap_or(Value::Null);
+        let text = |i: usize| to_text(&arg(i));
+        Ok(match name {
+            "engine:timer_running" => json!(self.hooks.timer_running(self, &text(0))),
+            "engine:throttle" => json!(self.hooks.throttle(self, &text(0), to_num(&arg(1))?)),
+            "ha:history" => {
+                let seconds = to_num(&arg(2))?.max(1.0);
+                let end = chrono::Utc::now();
+                let start = end - chrono::Duration::milliseconds((seconds * 1000.0) as i64);
+                let points = self.ha.history(&text(0), &start.to_rfc3339(), &end.to_rfc3339()).await?;
+                value::history_stat(
+                    &points,
+                    start.timestamp_millis() as f64 / 1000.0,
+                    end.timestamp_millis() as f64 / 1000.0,
+                    &text(1),
+                    &text(3),
+                )?
+            }
+            _ => {
+                let lookup = |e: &str| self.ha.state(e);
+                value::ha_builtin(name, a, &lookup)?
+            }
+        })
     }
 
     async fn call(&self, frame: &Frame, id: &str, name: &str, args: &[Expr]) -> R<Value> {

@@ -3,15 +3,11 @@
     "step": {
       "user": {
         "title": "Connect to the Puzzlebox app",
-        "description": "Enter the address of the Puzzlebox app and its bridge token. Both are shown on the Settings page inside Puzzlebox. With Home Assistant OS the address is usually filled in already.",
+        "description": "No running Puzzlebox app was found automatically. Enter its address and bridge token; both are shown on the Settings page inside Puzzlebox.",
         "data": {
           "url": "App URL",
           "token": "Bridge token"
         }
-      },
-      "hassio_confirm": {
-        "title": "Puzzlebox app found",
-        "description": "Connect Home Assistant to the Puzzlebox app? Programs appear as entities and integrations can add their own blocks."
       }
     },
     "error": {

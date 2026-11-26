@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+import contextlib
 import inspect
 import json
 import logging
@@ -42,6 +43,7 @@ class BridgeClient:
         self._ws = None
         self._task: asyncio.Task | None = None
         self._webhooks: set[str] = set()
+        self._wake = asyncio.Event()
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -68,7 +70,9 @@ class BridgeClient:
             except Exception as err:  # noqa: BLE001 - reconnect on anything
                 _LOGGER.debug("Puzzlebox app connection failed: %s", err)
             self._set_connected(False)
-            await asyncio.sleep(delay)
+            self._wake.clear()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._wake.wait(), delay)
             delay = min(delay * 2, 30)
 
     async def _session(self) -> None:
@@ -96,6 +100,11 @@ class BridgeClient:
         if self.connected != value:
             self.connected = value
             async_dispatcher_send(self.hass, SIGNAL_CONNECTION, value)
+
+    @callback
+    def nudge(self) -> None:
+        """Retry the connection now instead of after the backoff."""
+        self._wake.set()
 
     async def _send(self, msg: dict[str, Any]) -> bool:
         if self._ws is None or self._ws.closed:

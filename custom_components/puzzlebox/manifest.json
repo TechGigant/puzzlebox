@@ -1,9 +1,14 @@
 {
   "domain": "puzzlebox",
   "name": "Puzzlebox",
+  "after_dependencies": [
+    "hassio"
+  ],
   "codeowners": [],
   "config_flow": true,
-  "dependencies": ["webhook"],
+  "dependencies": [
+    "webhook"
+  ],
   "documentation": "https://github.com/TechGigant/puzzlebox",
   "integration_type": "service",
   "iot_class": "local_push",

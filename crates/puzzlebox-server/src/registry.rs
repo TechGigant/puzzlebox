@@ -124,7 +124,10 @@ impl RegistryService {
                 translations.extend(resources);
             }
         }
+        let config_entries =
+            self.ha.request(json!({"type": "config_entries/get"})).await.unwrap_or(Value::Null);
         let defs = generate(&HaDescriptions {
+            config_entries: &config_entries,
             services: &services,
             triggers: &triggers,
             conditions: &conditions,

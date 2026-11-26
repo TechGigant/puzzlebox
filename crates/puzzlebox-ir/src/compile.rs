@@ -404,6 +404,34 @@ impl<'a> Compiler<'a> {
                     None
                 }
             },
+            "device_trigger" => {
+                let (mut config, args) = self.device_parts(&b);
+                for (k, e) in args {
+                    match e.kind {
+                        ExprKind::Lit { value } => config[k.trim_start_matches("p:")] = value,
+                        ExprKind::Builtin { name, args } if name == "duration_dict" => {
+                            match args.first().map(|a| &a.kind) {
+                                Some(ExprKind::Lit { value }) => {
+                                    config[k.trim_start_matches("p:")] =
+                                        duration_or_none(value.as_f64()).unwrap_or(json!({"seconds": 0}))
+                                }
+                                _ => self.err(
+                                    &b,
+                                    format!(
+                                        "'{}' must be a fixed value for triggers",
+                                        k.trim_start_matches("p:")
+                                    ),
+                                ),
+                            }
+                        }
+                        _ => self.err(
+                            &b,
+                            format!("'{}' must be a fixed value for triggers", k.trim_start_matches("p:")),
+                        ),
+                    }
+                }
+                ha(config)
+            }
             "engine_trigger_cron" => Some(Trigger::Cron { id, expr: self.required_str(&b, "CRON") }),
             "engine_trigger_webhook" => {
                 let methods = b.field_str("METHOD").unwrap_or("POST");
@@ -552,6 +580,13 @@ impl<'a> Compiler<'a> {
                     },
                     handler: b.id().into(),
                 }
+            }
+            "device_action" => {
+                let (mut config, args) = self.device_parts(&b);
+                for k in args.keys() {
+                    config[k.trim_start_matches("p:")] = arg_placeholder(k);
+                }
+                StmtKind::HaScript { sequence: json!([config]), args }
             }
             "timer_cancel" => StmtKind::TimerCancel { name: self.required_str(&b, "NAME") },
             "wait_until" => StmtKind::WaitUntil {
@@ -895,6 +930,7 @@ impl<'a> Compiler<'a> {
             }
             "ha_trigger_data" => ExprKind::TriggerData { path: b.field_str("PATH").unwrap_or("").to_owned() },
             "ha_entity" => lit(json!(self.required_str(b, "ENTITY"))),
+            "yaml_value" if b.field_str("CONFIG").unwrap_or("").trim().is_empty() => lit(Value::Null),
             "yaml_value" => match parse_config(b.field_str("CONFIG").unwrap_or("")) {
                 Ok(v) => lit(v),
                 Err(e) => {
@@ -920,6 +956,14 @@ impl<'a> Compiler<'a> {
                         right: Box::new(Expr::lit(b.id(), number(factor))),
                     },
                 }
+            }
+            "device_condition" => {
+                let (mut config, args) = self.device_parts(b);
+                config["condition"] = json!("device");
+                for k in args.keys() {
+                    config[k.trim_start_matches("p:")] = arg_placeholder(k);
+                }
+                ExprKind::Condition { config, args }
             }
             "timer_running" => {
                 let name = Expr::lit(b.id(), json!(self.required_str(b, "NAME")));
@@ -1073,6 +1117,52 @@ impl<'a> Compiler<'a> {
                 lit(Value::Null)
             }
         }
+    }
+
+    /// A device trigger/condition/action block: HA's config stored in the block, plus its
+    /// option fields (`P_<name>`) as expressions keyed `p:<name>`.
+    fn device_parts(&mut self, b: &Block<'_>) -> (Value, BTreeMap<String, Expr>) {
+        let config = b.extra("config").cloned().unwrap_or_default();
+        if !config.is_object() {
+            self.err(b, "this device block is missing its configuration; drag it in again from Devices");
+            return (json!({}), BTreeMap::new());
+        }
+        let mut args = BTreeMap::new();
+        for p in b.extra("params").and_then(Value::as_array).into_iter().flatten() {
+            let Some(name) = p.get("name").and_then(Value::as_str) else { continue };
+            let slot = format!("P_{name}");
+            let expr = if let Some(raw) = b.field(&slot) {
+                let v = match (p.get("input").and_then(Value::as_str), raw) {
+                    (Some("boolean"), Value::String(s)) => json!(s == "TRUE"),
+                    (_, Value::String(s)) if s.is_empty() => continue,
+                    (_, v) => v.clone(),
+                };
+                Expr::lit(b.id(), v)
+            } else if let Some(e) = self.value_opt(b, &slot) {
+                if matches!(&e.kind, ExprKind::Lit { value: Value::Null }) {
+                    continue;
+                }
+                e
+            } else {
+                if p.get("required").and_then(Value::as_bool) == Some(true) {
+                    self.err(
+                        b,
+                        format!("'{}' is required", p.get("label").and_then(Value::as_str).unwrap_or(name)),
+                    );
+                }
+                continue;
+            };
+            let expr = if p.get("duration_dict").and_then(Value::as_bool) == Some(true) {
+                Expr {
+                    id: b.id().into(),
+                    kind: ExprKind::Builtin { name: "duration_dict".into(), args: vec![expr] },
+                }
+            } else {
+                expr
+            };
+            args.insert(format!("p:{name}"), expr);
+        }
+        (config, args)
     }
 
     fn entity_expr(&mut self, b: &Block<'_>) -> Expr {

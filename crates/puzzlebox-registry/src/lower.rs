@@ -25,13 +25,20 @@ fn field_value(p: &Param, raw: &Value) -> Value {
     match (&p.input, raw) {
         (ParamInput::Boolean, Value::String(s)) => json!(s == "TRUE"),
         (ParamInput::Color, Value::String(s)) => hex_to_rgb(s).unwrap_or(Value::Null),
-        (ParamInput::StateValue { multiple: true, .. }, Value::String(s)) => {
-            let items: Vec<&str> = s.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-            if items.is_empty() { Value::Null } else { json!(items) }
-        }
+        (
+            ParamInput::StateValue { multiple: true, .. }
+            | ParamInput::Select { multiple: true, .. }
+            | ParamInput::Registry { multiple: true, .. },
+            Value::String(s),
+        ) => split_list(s),
         (_, Value::String(s)) if s.is_empty() => Value::Null,
         (_, v) => v.clone(),
     }
+}
+
+fn split_list(s: &str) -> Value {
+    let items: Vec<&str> = s.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if items.is_empty() { Value::Null } else { json!(items) }
 }
 
 /// Normalizes a constant target expression (entity id, list, or target dict) to an HA target.
@@ -84,7 +91,15 @@ impl RegistryLowerer {
                 let v = field_value(p, raw);
                 (!v.is_null()).then(|| Expr::lit(b.id(), v))
             } else {
-                c.value_opt(&b, &slot)
+                c.value_opt(&b, &slot).and_then(|e| match (&p.input, &e.kind) {
+                    // An empty YAML value means "not set".
+                    (_, ExprKind::Lit { value: Value::Null }) => None,
+                    (
+                        ParamInput::Entity { multiple: true, .. },
+                        ExprKind::Lit { value: Value::String(s) },
+                    ) => Some(Expr::lit(e.id.clone(), split_list(s))),
+                    _ => Some(e),
+                })
             };
             match e {
                 Some(e) => {

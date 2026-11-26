@@ -40,7 +40,13 @@ fn registry() -> Registry {
     let r = Registry::default();
     r.set_source(
         "ha",
-        generate(&HaDescriptions { services: &s, triggers: &t, conditions: &c, translations: &tr }),
+        generate(&HaDescriptions {
+            services: &s,
+            triggers: &t,
+            conditions: &c,
+            translations: &tr,
+            config_entries: &Value::Null,
+        }),
     );
     r
 }
@@ -55,7 +61,7 @@ fn autogen_maps_selectors_and_translations() {
     let names: Vec<_> = turn_on.params.iter().map(|p| p.name.as_str()).collect();
     assert!(names.contains(&"rgb_color"), "collapsible sections are flattened: {names:?}");
     let flash = turn_on.params.iter().find(|p| p.name == "flash").unwrap();
-    let ParamInput::Select { options } = &flash.input else { panic!() };
+    let ParamInput::Select { options, .. } = &flash.input else { panic!() };
     assert_eq!(options[0].label, "Long");
 
     // Response-only services become value blocks only.
@@ -98,7 +104,7 @@ fn generated_blocks_compile_to_native_configs() {
     assert_eq!(
         config,
         &json!({"trigger": "light.turned_on", "target": {"entity_id": ["light.a", "light.b"]},
-        "options": {"behavior": "first", "for": 5}})
+        "options": {"behavior": "first", "for": 5}, "id": "t"})
     );
 
     let StmtKind::If { branches, .. } = &p.handlers[0].body[0].kind else { panic!() };
@@ -185,7 +191,7 @@ fn example_pack_compiles() {
     let Trigger::Ha { config, .. } = &triggers[0] else { panic!() };
     assert_eq!(
         config,
-        &json!({"trigger": "state", "entity_id": "binary_sensor.back", "to": "on", "for": {"minutes": 10}})
+        &json!({"trigger": "state", "entity_id": "binary_sensor.back", "to": "on", "for": {"minutes": 10}, "id": "t"})
     );
     let StmtKind::If { branches, .. } = &p.handlers[0].body[0].kind else { panic!() };
     assert!(matches!(&branches[0].0.kind, ExprKind::Condition { .. }));
@@ -212,6 +218,7 @@ fn thresholds_and_state_values_lower_to_ha_shapes() {
             triggers: &triggers,
             conditions: &json!({}),
             translations: &serde_json::Map::new(),
+            config_entries: &Value::Null,
         }),
     );
     let ent = |id: &str, e: &str| json!({"shadow": {"type": "ha_entity", "id": id, "fields": {"ENTITY": e}}});

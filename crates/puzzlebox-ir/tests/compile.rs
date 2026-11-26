@@ -37,7 +37,7 @@ fn compiles_motion_light() {
         triggers[0],
         Trigger::Ha {
             id: "t1".into(),
-            config: json!({"trigger": "state", "entity_id": "binary_sensor.motion", "to": "on"})
+            config: json!({"trigger": "state", "entity_id": "binary_sensor.motion", "to": "on", "id": "t1"})
         }
     );
     assert_eq!(h.body.len(), 3);
@@ -99,7 +99,7 @@ fn raw_yaml_trigger() {
         triggers[0],
         Trigger::Ha {
             id: "r".into(),
-            config: json!({"trigger": "zone", "entity_id": "person.me", "zone": "zone.home", "event": "enter"})
+            config: json!({"trigger": "zone", "entity_id": "person.me", "zone": "zone.home", "event": "enter", "id": "r"})
         }
     );
 }
@@ -116,7 +116,7 @@ fn numeric_trigger_accepts_numbers_and_entities() {
         Trigger::Ha {
             id: "n".into(),
             config: json!({
-        "trigger": "numeric_state", "entity_id": "sensor.t", "above": "input_number.limit", "below": 30})
+        "trigger": "numeric_state", "entity_id": "sensor.t", "above": "input_number.limit", "below": 30, "id": "n"})
         }
     );
     let bad = json!({"blocks": {"blocks": [{"type": "ha_when", "id": "w", "inputs": {"TRIGGERS": {"block": {

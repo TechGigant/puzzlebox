@@ -49,6 +49,9 @@ pub struct TargetSpec {
     /// Entity domains offered by the picker; empty = any.
     #[serde(default)]
     pub domains: Vec<String>,
+    /// Device classes offered by the picker (e.g. `temperature`); empty = any.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub device_classes: Vec<String>,
     #[serde(default)]
     pub required: bool,
 }
@@ -93,13 +96,26 @@ pub enum ParamInput {
         multiline: bool,
     },
     Boolean,
-    /// Dropdown field (constant).
+    /// Dropdown field (constant); with `multiple`, a text field suggesting the options.
     Select {
         options: Vec<SelectOption>,
+        #[serde(default)]
+        multiple: bool,
     },
     Entity {
         #[serde(default)]
         domains: Vec<String>,
+        /// Several entities (comma-separated in the editor), sent as a list.
+        #[serde(default)]
+        multiple: bool,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        device_classes: Vec<String>,
+    },
+    /// An area, floor, label or device, chosen from Home Assistant's registries (value = id).
+    Registry {
+        kind: String,
+        #[serde(default)]
+        multiple: bool,
     },
     /// Seconds.
     Duration,

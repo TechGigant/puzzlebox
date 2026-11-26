@@ -13,6 +13,8 @@ pub struct HaDescriptions<'a> {
     pub triggers: &'a Value,
     pub conditions: &'a Value,
     pub translations: &'a Translations,
+    /// `config_entries/get` result, for config-entry selectors (may be `Null`).
+    pub config_entries: &'a Value,
 }
 
 pub fn humanize(key: &str) -> String {
@@ -55,19 +57,30 @@ fn domains_of(v: &Value) -> Vec<String> {
 }
 
 fn target_spec(target: &Value) -> TargetSpec {
-    let mut domains = Vec::new();
+    let (mut domains, mut device_classes) = (Vec::new(), Vec::new());
     for e in target.get("entity").and_then(Value::as_array).into_iter().flatten() {
         for d in domains_of(e.get("domain").unwrap_or(&Value::Null)) {
             if !domains.contains(&d) {
                 domains.push(d);
             }
         }
+        for c in domains_of(e.get("device_class").unwrap_or(&Value::Null)) {
+            if !device_classes.contains(&c) {
+                device_classes.push(c);
+            }
+        }
     }
-    TargetSpec { domains, required: false }
+    TargetSpec { domains, device_classes, required: false }
 }
 
 /// Maps an HA selector to an editor input.
-fn selector_input(selector: &Value, t: &Translations, domain: &str, mode: &str) -> ParamInput {
+fn selector_input(
+    selector: &Value,
+    t: &Translations,
+    entries: &Value,
+    domain: &str,
+    mode: &str,
+) -> ParamInput {
     let Some((kind, cfg)) = selector.as_object().and_then(|m| m.iter().next()) else {
         return ParamInput::Any;
     };
@@ -86,12 +99,12 @@ fn selector_input(selector: &Value, t: &Translations, domain: &str, mode: &str) 
         "boolean" => ParamInput::Boolean,
         "text" | "template" => {
             if multiple {
-                ParamInput::Any
+                ParamInput::Select { options: vec![], multiple: true }
             } else {
                 ParamInput::Text { multiline: cfg.get("multiline").and_then(Value::as_bool).unwrap_or(false) }
             }
         }
-        "select" if !multiple && cfg.get("custom_value").and_then(Value::as_bool) != Some(true) => {
+        "select" => {
             let key = cfg.get("translation_key").and_then(Value::as_str);
             let options = cfg
                 .get("options")
@@ -116,10 +129,12 @@ fn selector_input(selector: &Value, t: &Translations, domain: &str, mode: &str) 
                     })
                 })
                 .collect::<Vec<_>>();
-            if options.is_empty() {
+            let custom = cfg.get("custom_value").and_then(Value::as_bool) == Some(true);
+            if options.is_empty() && !multiple {
                 ParamInput::Text { multiline: false }
             } else {
-                ParamInput::Select { options }
+                // Free values (custom_value) need a text field; suggestions still list the options.
+                ParamInput::Select { options, multiple: multiple || custom }
             }
         }
         "automation_behavior" => {
@@ -130,6 +145,7 @@ fn selector_input(selector: &Value, t: &Translations, domain: &str, mode: &str) 
                     &[("each", "any of them"), ("first", "the first one"), ("all", "all of them")]
                 };
             ParamInput::Select {
+                multiple: false,
                 options: opts
                     .iter()
                     .map(|(v, l)| SelectOption { label: (*l).into(), value: (*v).into() })
@@ -138,10 +154,33 @@ fn selector_input(selector: &Value, t: &Translations, domain: &str, mode: &str) 
         }
         "entity" => {
             let mut domains = domains_of(cfg.get("domain").unwrap_or(&Value::Null));
+            let mut device_classes = domains_of(cfg.get("device_class").unwrap_or(&Value::Null));
             for flt in cfg.get("filter").and_then(Value::as_array).into_iter().flatten() {
                 domains.extend(domains_of(flt.get("domain").unwrap_or(&Value::Null)));
+                device_classes.extend(domains_of(flt.get("device_class").unwrap_or(&Value::Null)));
             }
-            ParamInput::Entity { domains }
+            ParamInput::Entity { domains, multiple, device_classes }
+        }
+        "area" | "floor" | "label" | "device" => ParamInput::Registry { kind: kind.clone(), multiple },
+        "config_entry" => {
+            let integration = cfg.get("integration").and_then(Value::as_str);
+            let options: Vec<SelectOption> = entries
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|e| integration.is_none_or(|i| e.get("domain").and_then(Value::as_str) == Some(i)))
+                .filter_map(|e| {
+                    Some(SelectOption {
+                        label: e.get("title").and_then(Value::as_str).unwrap_or("entry").to_owned(),
+                        value: e.get("entry_id")?.as_str()?.to_owned(),
+                    })
+                })
+                .collect();
+            if options.is_empty() {
+                ParamInput::Text { multiline: false }
+            } else {
+                ParamInput::Select { options, multiple: false }
+            }
         }
         "duration" => ParamInput::Duration,
         "numeric_threshold" => ParamInput::Threshold {
@@ -158,9 +197,7 @@ fn selector_input(selector: &Value, t: &Translations, domain: &str, mode: &str) 
         },
         "time" => ParamInput::Time,
         "color_rgb" => ParamInput::Color,
-        "date" | "datetime" | "device" | "area" | "floor" | "label" | "icon" | "conversation_agent"
-            if !multiple =>
-        {
+        "date" | "datetime" | "icon" | "conversation_agent" if !multiple => {
             ParamInput::Text { multiline: false }
         }
         _ => ParamInput::Any,
@@ -170,6 +207,7 @@ fn selector_input(selector: &Value, t: &Translations, domain: &str, mode: &str) 
 fn params_from(
     fields: &Value,
     t: &Translations,
+    entries: &Value,
     prefix: &str,
     domain: &str,
     mode: &str,
@@ -180,14 +218,17 @@ fn params_from(
         .into_iter()
         .filter(|(name, _)| !skip.contains(&name.as_str()))
         .map(|(name, spec)| {
-            let input = selector_input(spec.get("selector").unwrap_or(&Value::Null), t, domain, mode);
+            let input =
+                selector_input(spec.get("selector").unwrap_or(&Value::Null), t, entries, domain, mode);
             let mut default = spec.get("default").cloned();
             if matches!(input, ParamInput::Duration) {
                 default = default.as_ref().and_then(duration_seconds).map(|s| json!(s));
             }
             if default.is_none() && spec.get("required").and_then(Value::as_bool) == Some(true) {
                 default = match &input {
-                    ParamInput::Select { options } => options.first().map(|o| json!(o.value)),
+                    ParamInput::Select { options, multiple: false } => {
+                        options.first().map(|o| json!(o.value))
+                    }
                     _ => None,
                 };
             }
@@ -254,6 +295,7 @@ pub fn generate(d: &HaDescriptions<'_>) -> Vec<BlockDef> {
             let params = params_from(
                 spec.get("fields").unwrap_or(&Value::Null),
                 t,
+                d.config_entries,
                 &prefix,
                 domain,
                 "action",
@@ -312,6 +354,7 @@ pub fn generate(d: &HaDescriptions<'_>) -> Vec<BlockDef> {
             params: params_from(
                 spec.get("fields").unwrap_or(&Value::Null),
                 t,
+                d.config_entries,
                 &prefix,
                 domain,
                 "trigger",
@@ -337,6 +380,7 @@ pub fn generate(d: &HaDescriptions<'_>) -> Vec<BlockDef> {
             params: params_from(
                 spec.get("fields").unwrap_or(&Value::Null),
                 t,
+                d.config_entries,
                 &prefix,
                 domain,
                 "condition",

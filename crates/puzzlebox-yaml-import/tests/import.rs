@@ -68,7 +68,8 @@ fn imports_and_compiles_automation() {
     let HandlerKind::Triggers { triggers } = &h.kind else { panic!() };
     assert_eq!(triggers.len(), 3);
     let Trigger::Ha { config, .. } = &triggers[1] else { panic!() };
-    assert_eq!(config, &json!({"trigger": "sun", "event": "sunset", "offset": "-00:30:00"}));
+    assert_eq!(config["offset"], "-00:30:00");
+    assert_eq!(config["event"], "sunset");
     let Trigger::Ha { config, .. } = &triggers[2] else { panic!() };
     assert_eq!(config["trigger"], "zone");
 

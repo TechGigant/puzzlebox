@@ -1,5 +1,6 @@
 mod bridge;
 mod config;
+mod devices;
 mod http;
 mod mqtt;
 mod plugins;
@@ -79,8 +80,18 @@ async fn main() -> Result<()> {
     engine.set_lowerer(registry.registry.lowerer());
     engine.load_all().await?;
 
-    let state =
-        routes::AppState { ha, live, engine, registry, bridge, webhooks, wasm, mqtt, cfg: cfg.clone() };
+    let state = routes::AppState {
+        ha,
+        live,
+        engine,
+        registry,
+        bridge,
+        webhooks,
+        wasm,
+        mqtt,
+        devices: Arc::new(devices::DeviceCache::default()),
+        cfg: cfg.clone(),
+    };
 
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     info!(addr = %cfg.bind, ha = %cfg.ha_ws_url, "puzzlebox listening");

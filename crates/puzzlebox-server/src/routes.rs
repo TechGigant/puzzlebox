@@ -20,7 +20,7 @@ use crate::mqtt::Mqtt;
 use crate::registry::RegistryService;
 use crate::wasm::WasmHost;
 use crate::webhooks::Webhooks;
-use crate::{bridge, programs, webhooks, ws};
+use crate::{bridge, devices, programs, webhooks, ws};
 
 #[derive(Clone)]
 pub struct AppState {
@@ -32,6 +32,7 @@ pub struct AppState {
     pub webhooks: Arc<Webhooks>,
     pub wasm: Arc<WasmHost>,
     pub mqtt: Arc<Mqtt>,
+    pub devices: Arc<devices::DeviceCache>,
     pub cfg: Config,
 }
 
@@ -78,6 +79,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/ha/states", get(ha_states))
         .route("/api/ha/config", get(ha_config))
+        .route("/api/ha/registry", get(devices::registry))
+        .route("/api/ha/devices/{id}/automations", get(devices::automations))
         .route("/api/ws", get(ws::upgrade))
         .route("/api/compile", post(programs::compile))
         .route("/api/programs", get(programs::list).post(programs::create))

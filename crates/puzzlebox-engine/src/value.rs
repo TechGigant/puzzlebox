@@ -351,6 +351,10 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
             num((y - x).num_milliseconds() as f64 / 1000.0)
         }
         "format_duration" => json!(format_duration(n(0)?, &to_text(a(1)))),
+        "duration_dict" => {
+            let total = n(0)?.max(0.0) as u64;
+            json!({"hours": total / 3600, "minutes": (total / 60) % 60, "seconds": total % 60})
+        }
         "time_timestamp" => num(Local::now().timestamp_millis() as f64 / 1000.0),
         _ => return Err(format!("unknown function '{name}'")),
     })

@@ -10,6 +10,7 @@ mod routes;
 mod wasm;
 mod webhooks;
 mod ws;
+mod z2m;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -57,6 +58,7 @@ async fn main() -> Result<()> {
 
     let plugins = plugins::PluginRouter::new();
     let _ = plugins.mqtt.set(mqtt.clone());
+    let _ = plugins.z2m.set(z2m::Z2m::start(&mqtt, registry.clone(), cfg.z2m_bases.clone()));
     let wasm = wasm::WasmHost::new(live.clone(), engine.store().clone());
     let _ = plugins.wasm.set(wasm.clone());
     let bridge =

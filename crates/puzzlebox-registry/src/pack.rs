@@ -63,12 +63,19 @@ fn valid_ident(s: &str) -> bool {
 fn lowering_fits(kind: BlockKind, l: &Lowering) -> bool {
     use Lowering::*;
     match kind {
-        BlockKind::Action => matches!(l, Service { response: false, .. } | HaAction { .. } | Plugin { .. }),
-        BlockKind::Trigger => matches!(l, HaTrigger { .. } | HaTriggerPlatform { .. }),
+        BlockKind::Action => {
+            matches!(
+                l,
+                Service { response: false, .. } | HaAction { .. } | Plugin { .. } | MqttPublish { .. }
+            )
+        }
+        BlockKind::Trigger => matches!(l, HaTrigger { .. } | HaTriggerPlatform { .. } | MqttTrigger { .. }),
         BlockKind::Condition => {
             matches!(l, HaCondition { .. } | HaConditionPlatform { .. } | Template { .. } | Plugin { .. })
         }
-        BlockKind::Value => matches!(l, Template { .. } | Plugin { .. } | Service { response: true, .. }),
+        BlockKind::Value => {
+            matches!(l, Template { .. } | Plugin { .. } | Service { response: true, .. } | MqttValue { .. })
+        }
     }
 }
 

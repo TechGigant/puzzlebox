@@ -172,4 +172,31 @@ pub enum Lowering {
     Template { template: String },
     /// Runtime call into a plugin host (Python bridge or WASM).
     Plugin { plugin: String, function: String },
+    /// Trigger on MQTT messages on `topic` whose JSON `key` (fixed, or chosen by the param
+    /// `key_param`) matches the param `equals_param` (if set) or changes (`changed`).
+    MqttTrigger {
+        topic: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_param: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        equals_param: Option<String>,
+        #[serde(default)]
+        changed: bool,
+    },
+    /// Action publishing the params (plus `fixed`) as a JSON object to `topic`.
+    MqttPublish {
+        topic: String,
+        #[serde(default, skip_serializing_if = "Value::is_null")]
+        fixed: Value,
+    },
+    /// Value of a JSON key in the last message on `topic` (fixed `key`, or the param `key_param`).
+    MqttValue {
+        topic: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key_param: Option<String>,
+    },
 }

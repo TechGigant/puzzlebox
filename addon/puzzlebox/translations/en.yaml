@@ -2,3 +2,13 @@ configuration:
   log_level:
     name: Log level
     description: Verbosity of the app's log output.
+  mqtt_url:
+    name: MQTT broker
+    description: >-
+      Leave empty to use the Mosquitto broker app. For another broker, enter
+      mqtt://user:password@host:1883.
+  zigbee2mqtt_base_topics:
+    name: Zigbee2MQTT base topics
+    description: >-
+      Base topic of each Zigbee2MQTT instance (its "base_topic" setting).
+      Puzzlebox adds blocks for its devices and groups.

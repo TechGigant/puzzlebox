@@ -44,7 +44,24 @@ pub enum Trigger {
     /// Inbound webhook handled by the app server.
     Webhook { id: BlockId, webhook_id: String, methods: Vec<String> },
     /// MQTT topic subscription (wildcards allowed).
-    Mqtt { id: BlockId, topic: String },
+    Mqtt {
+        id: BlockId,
+        topic: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<MqttFilter>,
+    },
+}
+
+/// Fires only for JSON payloads whose `key` matches (Zigbee2MQTT device messages).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MqttFilter {
+    pub key: String,
+    /// Fire only when the value equals this (loosely, so "on" matches "ON").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub equals: Option<Value>,
+    /// Fire only when the value differs from the previous message.
+    #[serde(default)]
+    pub changed: bool,
 }
 
 impl Trigger {

@@ -7,6 +7,9 @@ use serde_json::{Map, Value, json};
 
 use crate::model::{BlockDef, BlockKind, Lowering, Param, ParamInput};
 
+/// Plugin id the runtime routes to its Zigbee2MQTT state cache.
+pub const BUILTIN_Z2M: &str = "__z2m";
+
 pub struct RegistryLowerer {
     pub(crate) defs: HashMap<String, BlockDef>,
 }
@@ -226,6 +229,35 @@ impl BlockLowerer for RegistryLowerer {
             Lowering::HaAction { sequence } => {
                 StmtKind::HaScript { sequence: sequence.clone(), args: Self::template_args(&args) }
             }
+            Lowering::MqttPublish { topic, fixed } => {
+                let mut entries: Vec<(String, Expr)> = fixed
+                    .as_object()
+                    .into_iter()
+                    .flatten()
+                    .map(|(k, v)| (k.clone(), Expr::lit(b.id(), v.clone())))
+                    .collect();
+                for (k, e) in args.exprs {
+                    let is_color =
+                        def.params.iter().any(|p| p.name == k && matches!(p.input, ParamInput::Color));
+                    let e = match (&e.kind, is_color) {
+                        // Zigbee2MQTT takes colours as {"r", "g", "b"}.
+                        (ExprKind::Lit { value: Value::Array(rgb) }, true) if rgb.len() == 3 => {
+                            Expr::lit(e.id.clone(), json!({"r": rgb[0], "g": rgb[1], "b": rgb[2]}))
+                        }
+                        _ => e,
+                    };
+                    entries.push((k, e));
+                }
+                let mut a = BTreeMap::new();
+                a.insert("topic".to_owned(), Expr::lit(b.id(), json!(topic)));
+                a.insert("payload".to_owned(), Expr { id: b.id().into(), kind: ExprKind::Dict { entries } });
+                a.insert("retain".to_owned(), Expr::lit(b.id(), json!(false)));
+                StmtKind::Plugin {
+                    plugin: puzzlebox_ir::BUILTIN_MQTT.into(),
+                    block: "publish".into(),
+                    args: a,
+                }
+            }
             Lowering::Plugin { plugin, function } => StmtKind::Plugin {
                 plugin: plugin.clone(),
                 block: function.clone(),
@@ -275,6 +307,19 @@ impl BlockLowerer for RegistryLowerer {
                 block: function.clone(),
                 args: Self::template_args(&args),
             },
+            Lowering::MqttValue { topic, key, key_param } => {
+                let key_expr = match (key, key_param) {
+                    (Some(k), _) => Expr::lit(b.id(), json!(k)),
+                    (None, Some(p)) => {
+                        args.exprs.get(p).cloned().unwrap_or_else(|| Expr::lit(b.id(), Value::Null))
+                    }
+                    (None, None) => Expr::lit(b.id(), Value::Null),
+                };
+                let mut a = BTreeMap::new();
+                a.insert("topic".to_owned(), Expr::lit(b.id(), json!(topic)));
+                a.insert("key".to_owned(), key_expr);
+                ExprKind::Plugin { plugin: BUILTIN_Z2M.into(), block: "state".into(), args: a }
+            }
             Lowering::Service { service, response: true } => {
                 // Value-returning action (`return_response`).
                 let entries: Vec<(String, Expr)> = args.exprs.into_iter().collect();
@@ -307,6 +352,22 @@ impl BlockLowerer for RegistryLowerer {
                     cfg["target"] = t;
                 }
                 cfg
+            }
+            Lowering::MqttTrigger { topic, key, key_param, equals_param, changed } => {
+                let key = key.clone().or_else(|| {
+                    key_param.as_ref().and_then(|p| options.get(p)).and_then(Value::as_str).map(str::to_owned)
+                });
+                let Some(key) = key else {
+                    c.err(&b, "choose what to watch");
+                    return None;
+                };
+                let equals =
+                    equals_param.as_ref().and_then(|p| options.get(p)).cloned().filter(|v| !v.is_null());
+                return Some(Trigger::Mqtt {
+                    id: b.id().into(),
+                    topic: topic.clone(),
+                    filter: Some(puzzlebox_ir::MqttFilter { key, equals, changed: *changed }),
+                });
             }
             Lowering::HaTrigger { config } => {
                 let mut vals: BTreeMap<String, Value> = options.into_iter().collect();

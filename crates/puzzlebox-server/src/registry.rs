@@ -194,6 +194,13 @@ impl RegistryService {
         }
     }
 
+    /// Replaces the blocks of a generated source (e.g. `z2m:<base topic>`).
+    pub async fn set_generated_source(&self, source: &str, blocks: Vec<puzzlebox_registry::BlockDef>) {
+        if self.registry.set_source(source, blocks) {
+            self.publish().await;
+        }
+    }
+
     async fn publish(&self) {
         if let Err(e) = self.engine.registry_changed(self.registry.lowerer()).await {
             warn!(error = %e, "failed to restart programs after registry change");

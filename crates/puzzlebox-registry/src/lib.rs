@@ -4,11 +4,12 @@ pub mod autogen;
 mod lower;
 mod model;
 pub mod pack;
+pub mod z2m;
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, RwLock};
 
-pub use lower::RegistryLowerer;
+pub use lower::{BUILTIN_Z2M, RegistryLowerer};
 pub use model::*;
 pub use pack::{Pack, PackFile, parse_pack};
 

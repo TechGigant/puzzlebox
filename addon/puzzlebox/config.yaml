@@ -27,5 +27,11 @@ map:
   - app_config:rw
 options:
   log_level: info
+  zigbee2mqtt_base_topics:
+    - zigbee2mqtt
 schema:
   log_level: list(trace|debug|info|warn|error)
+  # Leave empty to use the Mosquitto broker app; e.g. mqtt://user:pass@192.168.1.5:1883
+  mqtt_url: str?
+  zigbee2mqtt_base_topics:
+    - str

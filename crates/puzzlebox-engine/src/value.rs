@@ -623,7 +623,10 @@ mod tests {
         let lookup = |e: &str| states.get(e).cloned();
         let scenes = json!(["scene.day", "scene.sleepy", "scene.new"]);
         // `unknown` (never activated) no longer "wins" like it did with text comparison.
-        assert_eq!(ha_builtin("ha:last_scene", &[scenes.clone()], &lookup).unwrap(), json!("scene.sleepy"));
+        assert_eq!(
+            ha_builtin("ha:last_scene", std::slice::from_ref(&scenes), &lookup).unwrap(),
+            json!("scene.sleepy")
+        );
         assert_eq!(
             ha_builtin("ha:next_scene", &[scenes.clone(), json!("next")], &lookup).unwrap(),
             json!("scene.new")

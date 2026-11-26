@@ -441,7 +441,9 @@ impl<'a> Compiler<'a> {
                     methods: if methods == "ANY" { vec![] } else { vec![methods.to_owned()] },
                 })
             }
-            "engine_trigger_mqtt" => Some(Trigger::Mqtt { id, topic: self.required_str(&b, "TOPIC") }),
+            "engine_trigger_mqtt" => {
+                Some(Trigger::Mqtt { id, topic: self.required_str(&b, "TOPIC"), filter: None })
+            }
             _ => {
                 let ext = self.ext;
                 let t = ext.lower_trigger(b, self);

@@ -24,11 +24,15 @@ pub struct Config {
     pub supervisor_token: Option<String>,
     /// `mqtt://user:pass@host:port`; under the app the Supervisor's MQTT service is used instead.
     pub mqtt_url: Option<String>,
+    /// Zigbee2MQTT base topics to generate device blocks for.
+    pub z2m_bases: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
 struct AddonOptions {
     log_level: Option<String>,
+    mqtt_url: Option<String>,
+    zigbee2mqtt_base_topics: Option<Vec<String>>,
 }
 
 impl Config {
@@ -62,7 +66,14 @@ impl Config {
 
         Ok(Self {
             supervisor_token: env("SUPERVISOR_TOKEN"),
-            mqtt_url: env("PUZZLEBOX_MQTT_URL"),
+            mqtt_url: env("PUZZLEBOX_MQTT_URL").or(options.mqtt_url.filter(|u| !u.is_empty())),
+            z2m_bases: env("PUZZLEBOX_Z2M_BASE_TOPICS")
+                .map(|v| v.split(',').map(|s| s.trim().to_owned()).collect())
+                .or(options.zigbee2mqtt_base_topics)
+                .unwrap_or_else(|| vec!["zigbee2mqtt".into()])
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect(),
             extra_packs_dirs,
             config_dir,
             ha_ws_url,

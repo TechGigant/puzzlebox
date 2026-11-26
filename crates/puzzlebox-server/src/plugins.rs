@@ -14,11 +14,17 @@ pub struct PluginRouter {
     pub bridge: OnceLock<Arc<Bridge>>,
     pub wasm: OnceLock<Arc<WasmHost>>,
     pub mqtt: OnceLock<Arc<Mqtt>>,
+    pub z2m: OnceLock<Arc<crate::z2m::Z2m>>,
 }
 
 impl PluginRouter {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { bridge: OnceLock::new(), wasm: OnceLock::new(), mqtt: OnceLock::new() })
+        Arc::new(Self {
+            bridge: OnceLock::new(),
+            wasm: OnceLock::new(),
+            mqtt: OnceLock::new(),
+            z2m: OnceLock::new(),
+        })
     }
 }
 
@@ -31,6 +37,12 @@ impl PluginHost for PluginRouter {
         args: Map<String, Value>,
         ctx: Value,
     ) -> Result<Value, String> {
+        if plugin == puzzlebox_registry::BUILTIN_Z2M {
+            let z2m = self.z2m.get().ok_or("Zigbee2MQTT is not available")?;
+            let topic = args.get("topic").and_then(Value::as_str).unwrap_or("");
+            let key = args.get("key").and_then(Value::as_str).ok_or("choose a value")?;
+            return Ok(z2m.value(topic, key));
+        }
         if plugin == puzzlebox_ir::BUILTIN_MQTT {
             let mqtt = self.mqtt.get().ok_or("MQTT is not configured")?;
             let topic = args.get("topic").and_then(Value::as_str).ok_or("topic must be text")?;

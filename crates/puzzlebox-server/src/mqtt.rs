@@ -4,8 +4,9 @@ use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::Duration;
 
+use puzzlebox_engine::value::loose_eq;
 use puzzlebox_engine::{TriggerSink, TriggerSource};
-use puzzlebox_ir::Trigger;
+use puzzlebox_ir::{MqttFilter, Trigger};
 use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
 use serde_json::{Value, json};
 use tracing::{info, warn};
@@ -57,12 +58,19 @@ pub fn topic_matches(filter: &str, topic: &str) -> bool {
 struct Sub {
     program_id: String,
     filter: String,
+    payload_filter: Option<MqttFilter>,
+    /// Last value of the filtered key, for `changed`.
+    last: Mutex<Option<Value>>,
     sink: TriggerSink,
 }
+
+type Listener = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 pub struct Mqtt {
     client: Option<AsyncClient>,
     subs: Mutex<Vec<Sub>>,
+    /// Internal subscribers (Zigbee2MQTT watcher): topic filter → callback(topic, payload).
+    listeners: Mutex<Vec<(String, Listener)>>,
     subscribed: Mutex<HashSet<String>>,
 }
 
@@ -71,6 +79,7 @@ impl Mqtt {
         std::sync::Arc::new(Self {
             client: None,
             subs: Mutex::new(Vec::new()),
+            listeners: Mutex::new(Vec::new()),
             subscribed: Mutex::new(HashSet::new()),
         })
     }
@@ -86,6 +95,7 @@ impl Mqtt {
         let this = std::sync::Arc::new(Self {
             client: Some(client),
             subs: Mutex::new(Vec::new()),
+            listeners: Mutex::new(Vec::new()),
             subscribed: Mutex::new(HashSet::new()),
         });
         let weak = std::sync::Arc::downgrade(&this);
@@ -119,18 +129,68 @@ impl Mqtt {
     fn deliver(&self, topic: &str, payload: &[u8], retain: bool) {
         let text = String::from_utf8_lossy(payload).into_owned();
         let json_payload = serde_json::from_str::<Value>(&text).ok();
+        let listeners: Vec<Listener> = self
+            .listeners
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .filter(|(f, _)| topic_matches(f, topic))
+            .map(|(_, l)| l.clone())
+            .collect();
+        for l in listeners {
+            l(topic, &text);
+        }
         let msg = json!({"platform": "mqtt", "topic": topic, "payload": text, "payload_json": json_payload, "retain": retain});
         for s in self.subs.lock().unwrap_or_else(|p| p.into_inner()).iter() {
-            if topic_matches(&s.filter, topic) {
-                (s.sink)(msg.clone());
+            if !topic_matches(&s.filter, topic) {
+                continue;
             }
+            let Some(f) = &s.payload_filter else {
+                (s.sink)(msg.clone());
+                continue;
+            };
+            let Some(value) = json_payload.as_ref().and_then(|p| p.get(&f.key)).filter(|v| !v.is_null())
+            else {
+                continue;
+            };
+            // Z2M publishes an empty `action` right after a press on some setups.
+            if value.as_str() == Some("") {
+                continue;
+            }
+            let previous = s.last.lock().unwrap_or_else(|p| p.into_inner()).replace(value.clone());
+            // Retained messages replay old state on (re)connect: remember them, don't fire.
+            if retain {
+                continue;
+            }
+            if f.changed && previous.as_ref() == Some(value) {
+                continue;
+            }
+            if let Some(want) = &f.equals
+                && !loose_eq(value, want)
+            {
+                continue;
+            }
+            let mut m = msg.clone();
+            m["key"] = json!(f.key);
+            m["value"] = value.clone();
+            m["from_value"] = previous.unwrap_or(Value::Null);
+            (s.sink)(m);
         }
+    }
+
+    /// Calls `f(topic, payload)` for every message matching `filter`.
+    pub fn listen(self: &std::sync::Arc<Self>, filter: &str, f: Listener) {
+        self.listeners.lock().unwrap_or_else(|p| p.into_inner()).push((filter.to_owned(), f));
+        let this = self.clone();
+        tokio::spawn(async move { this.sync_subscriptions().await });
     }
 
     async fn sync_subscriptions(&self) {
         let Some(client) = &self.client else { return };
-        let wanted: HashSet<String> =
+        let mut wanted: HashSet<String> =
             self.subs.lock().unwrap_or_else(|p| p.into_inner()).iter().map(|s| s.filter.clone()).collect();
+        wanted
+            .extend(self.listeners.lock().unwrap_or_else(|p| p.into_inner()).iter().map(|(f, _)| f.clone()));
         let current = self.subscribed.lock().unwrap_or_else(|p| p.into_inner()).clone();
         for f in wanted.difference(&current) {
             if client.subscribe(f.clone(), QoS::AtLeastOnce).await.is_ok() {
@@ -159,7 +219,7 @@ pub struct MqttSource(pub std::sync::Arc<Mqtt>);
 
 impl TriggerSource for MqttSource {
     fn register(&self, program_id: &str, trigger: &Trigger, sink: TriggerSink) -> Result<(), String> {
-        let Trigger::Mqtt { topic, .. } = trigger else { return Err("not an MQTT trigger".into()) };
+        let Trigger::Mqtt { topic, filter, .. } = trigger else { return Err("not an MQTT trigger".into()) };
         if !self.0.enabled() {
             return Err(
                 "MQTT is not configured (install the Mosquitto broker app or set PUZZLEBOX_MQTT_URL)".into(),
@@ -168,6 +228,8 @@ impl TriggerSource for MqttSource {
         self.0.subs.lock().unwrap_or_else(|p| p.into_inner()).push(Sub {
             program_id: program_id.to_owned(),
             filter: topic.clone(),
+            payload_filter: filter.clone(),
+            last: Mutex::new(None),
             sink,
         });
         let this = self.0.clone();

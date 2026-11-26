@@ -171,6 +171,9 @@ pub(crate) struct Builder {
     pub(crate) next_id: usize,
     pub(crate) raw: usize,
     pub(crate) vars: Vec<(String, String)>,
+    /// HA modes (`count`, `for_each`, `while`, `until`) of the loops around the blocks being
+    /// built, innermost last: their templates see `repeat`.
+    pub(crate) loops: Vec<&'static str>,
 }
 
 impl Builder {

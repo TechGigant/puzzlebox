@@ -20,10 +20,11 @@ struct Lost {
     names: BTreeSet<String>,
     /// A wait inside a raw block: `wait` isn't set at all.
     wait_lost: bool,
-    /// A native "wait for trigger": `wait` has only `trigger` (no `remaining`/`completed`).
-    wait_partial: bool,
-    /// ...with several triggers, which HA numbers 0, 1… but Puzzlebox subscribes one by one.
-    wait_multi: bool,
+    /// A native wait: `wait` is set exactly as HA sets it.
+    wait_native: bool,
+    /// ...but a "wait for trigger" whose triggers became blocks that HA would number
+    /// differently (`wait.trigger.id`/`idx`).
+    wait_numbering: bool,
     /// A native wait in a parallel branch: HA keeps that `wait` inside the branch.
     wait_leak: bool,
     /// A stop/abort inside a raw block, which only ends that block.
@@ -34,8 +35,8 @@ impl Lost {
     fn merge(&mut self, o: Lost) {
         self.names.extend(o.names);
         self.wait_lost |= o.wait_lost;
-        self.wait_partial |= o.wait_partial;
-        self.wait_multi |= o.wait_multi;
+        self.wait_native |= o.wait_native;
+        self.wait_numbering |= o.wait_numbering;
         self.wait_leak |= o.wait_leak;
         self.halts |= o.halts;
     }
@@ -45,8 +46,8 @@ impl Lost {
         (self.halts && later.iter().any(enabled))
             || self.names.iter().any(|n| later.iter().any(|v| !uses(v, n).is_empty()))
             || ((self.wait_lost || self.wait_leak) && later.iter().any(|v| !uses(v, "wait").is_empty()))
-            || (self.wait_partial
-                && later.iter().any(|v| uses(v, "wait").iter().any(|u| !wait_ok(u, self.wait_multi))))
+            || (self.wait_numbering
+                && later.iter().any(|v| uses(v, "wait").iter().any(|u| !numbering_unused(u))))
     }
 }
 
@@ -233,19 +234,22 @@ fn uses<'a>(v: &'a Value, name: &str) -> Vec<&'a str> {
     out
 }
 
-/// A use of `wait` that a native "wait for trigger" gets right: `wait.trigger…` (with several
-/// triggers, not its `id`/`idx`, which HA numbers by position).
-fn wait_ok(after: &str, multi: bool) -> bool {
-    let rest = [".trigger", "['trigger']", "[\"trigger\"]"].iter().find_map(|p| after.strip_prefix(p));
-    let Some(rest) = rest else { return false };
-    if rest.chars().next().is_some_and(ident_char) {
-        return false;
+/// Whether a use of `wait` can't see the trigger's `id`/`idx` (which HA numbers by position):
+/// `wait.remaining`, `wait.trigger.entity_id`…, but not `wait`, `wait.trigger` or `wait.trigger.id`.
+fn numbering_unused(after: &str) -> bool {
+    let field = |s: &str| -> Option<String> {
+        let f = [".", "['", "[\""].iter().find_map(|p| s.strip_prefix(p))?;
+        Some(f.chars().take_while(|c| ident_char(*c)).collect())
+    };
+    match field(after).as_deref() {
+        Some("trigger") => {
+            let rest =
+                [".trigger", "['trigger']", "[\"trigger\"]"].iter().find_map(|p| after.strip_prefix(p));
+            matches!(rest.and_then(field).as_deref(), Some(f) if !f.is_empty() && f != "id" && f != "idx")
+        }
+        Some(f) => !f.is_empty(),
+        None => false,
     }
-    let field = [".", "['", "[\""]
-        .iter()
-        .find_map(|p| rest.strip_prefix(p))
-        .map(|f| f.chars().take_while(|c| ident_char(*c)).collect::<String>());
-    !(multi && matches!(field.as_deref(), Some("id" | "idx")))
 }
 
 /// Whether `repeat` (the loop variable HA sets) is used where this loop's value would be seen.
@@ -265,6 +269,22 @@ fn uses_repeat(r: &Map<String, Value>) -> bool {
         }
     }
     ["sequence", "while", "until"].iter().filter_map(|k| r.get(*k)).any(walk)
+}
+
+/// Whether a "for each" loop could turn these items into entities, as it does for lists of
+/// entity ids and area/floor/label/device targets (templates might give such a target).
+fn may_expand(items: &[Value]) -> bool {
+    let target = |v: &Value| match v {
+        Value::Object(m) => {
+            const KEYS: [&str; 5] = ["entity_id", "area_id", "floor_id", "label_id", "device_id"];
+            !m.is_empty()
+                && m.keys().all(|k| KEYS.contains(&k.as_str()))
+                && m.keys().any(|k| k != "entity_id")
+        }
+        Value::String(s) => is_tpl(s),
+        _ => false,
+    };
+    items.iter().any(target) && items.iter().all(|i| i.is_string() || target(i))
 }
 
 /// What a raw block hides from the rest of the program.
@@ -435,6 +455,7 @@ impl Builder {
             "repeat" => self.repeat(&m2),
             "choose" => self.choose(&m2),
             "wait_for_trigger" => self.wait_for_trigger(&m2),
+            "wait_template" => self.wait_template(&m2),
             "variables" => self.set_variables(&m2),
             "if" => self.if_then(&m2),
             "action" => self.service(&m2),
@@ -450,9 +471,7 @@ impl Builder {
                     (vec![b], Lost::default())
                 })
             }
-            // wait_template: HA reacts to every state change and sets `wait.remaining`; the
-            // "wait until" block polls once a second. set_conversation_response, templated
-            // action names and the rest have no block.
+            // set_conversation_response, templated action names and the rest have no block.
             _ => None,
         };
         match res {
@@ -625,23 +644,37 @@ impl Builder {
             || !only_keys(r, &["count", "for_each", "while", "until", "sequence"])
             || modes.iter().filter(|k| r.contains_key(**k)).count() != 1
             || !r.contains_key("sequence")
-            // HA sets `repeat` (index, first, last, item) for the body; no block does.
-            || uses_repeat(r)
         {
             return None;
         }
+        // The loops set HA's `repeat` (index, first, last, item) for their body and conditions.
         let body_yaml = list(r.get("sequence"));
         let cond_yaml = list(r.get("while").or_else(|| r.get("until")));
+        let mut each = None;
         let times = match (r.get("count"), r.get("for_each")) {
             (Some(Value::Number(n)), _) => Some(n.as_f64()?.trunc()),
             (Some(Value::String(s)), _) if !is_tpl(s) => Some(s.trim().parse::<i64>().ok()? as f64),
             (Some(_), _) => return None,
-            // Only the item count matters when the body doesn't use `repeat.item`.
-            (_, Some(Value::Array(items))) => Some(items.len() as f64),
+            // Only the item count matters when nothing uses `repeat.item`.
+            (_, Some(Value::Array(items))) if !uses_repeat(r) => Some(items.len() as f64),
+            (_, Some(Value::Array(items))) if !may_expand(items) => {
+                each = Some(self.lit(&Value::Array(items.clone()))?);
+                None
+            }
+            // HA stops with an error unless the template gives a list; the loop doesn't (it
+            // goes through a text's entities or a dictionary's keys).
+            (_, Some(Value::String(s))) if is_tpl(s) => {
+                each = Some(self.template_value(s));
+                None
+            }
             (_, Some(_)) => return None,
             _ => None,
         };
+        self.loops.push(modes.into_iter().find(|k| r.contains_key(*k))?);
         let (mut body, lost) = self.seq(&body_yaml);
+        let until_needed = r.contains_key("until") && body.last().is_none_or(|l| l["type"] != "control_stop");
+        let cond = (r.contains_key("while") || until_needed).then(|| self.conds(&cond_yaml));
+        self.loops.pop();
         // What the body hides is seen by its next round and by the loop condition.
         let mut again = body_yaml.clone();
         again.extend(cond_yaml.iter().cloned());
@@ -651,8 +684,20 @@ impl Builder {
         let b = if let Some(n) = times {
             let n = self.num(n);
             self.block("controls_repeat_ext", json!({}), vec![("TIMES", Some(n)), ("DO", chain(body))], None)
+        } else if let Some(list) = each {
+            let all = Value::Object(r.clone());
+            let name = (1..)
+                .map(|i| if i == 1 { "repeat_item".to_owned() } else { format!("repeat_item_{i}") })
+                .find(|n| !self.vars.iter().any(|(v, _)| v == n) && uses(&all, n).is_empty())?;
+            let id = self.var_id(&name);
+            self.block(
+                "controls_forEach",
+                json!({"VAR": {"id": id}}),
+                vec![("LIST", Some(list)), ("DO", chain(body))],
+                None,
+            )
         } else if r.contains_key("while") {
-            let c = self.conds(&cond_yaml);
+            let c = cond?;
             self.block(
                 "controls_whileUntil",
                 json!({"MODE": "WHILE"}),
@@ -661,8 +706,7 @@ impl Builder {
             )
         } else {
             // HA checks `until` after each round: loop forever, leave when it holds.
-            if body.last().is_none_or(|l| l["type"] != "control_stop") {
-                let c = self.conds(&cond_yaml);
+            if let Some(c) = cond {
                 let brk = self.block("controls_flow_statements", json!({"FLOW": "BREAK"}), vec![], None);
                 body.push(self.block(
                     "controls_if",
@@ -734,16 +778,9 @@ impl Builder {
         Some((vec![self.block("controls_if", json!({}), inputs, extra)], lost))
     }
 
-    fn wait_for_trigger(&mut self, m: &Map<String, Value>) -> Option<(Vec<Value>, Lost)> {
-        if !only_keys(m, &["wait_for_trigger", "timeout", "continue_on_timeout"]) {
-            return None;
-        }
-        let triggers = list(m.get("wait_for_trigger"));
-        // HA renders trigger templates with the script's variables; Puzzlebox subscribes without.
-        if triggers.is_empty() || triggers.iter().any(has_tpl) {
-            return None;
-        }
-        // A zero timeout means "time out at once" in HA but "no timeout" for the block.
+    /// The timeout of a wait (seconds) and whether the script stops when it passes.
+    fn wait_options(m: &Map<String, Value>) -> Option<(Option<f64>, bool)> {
+        // A zero timeout means "time out at once" in HA but "no timeout" for the blocks.
         let timeout = match m.get("timeout") {
             Some(t) => Some(period(t).filter(|s| *s > 0.0)?),
             None => None,
@@ -753,15 +790,15 @@ impl Builder {
             Some(Value::Bool(false)) => true,
             Some(_) => return None,
         };
-        let multi = triggers.len() > 1 || triggers.iter().any(|t| t.get("triggers").is_some());
-        let trig = self.triggers(&triggers);
-        let timeout = timeout.map(|s| self.duration(s));
-        let mut out = vec![self.block(
-            "ha_wait_for_trigger",
-            json!({}),
-            vec![("TRIGGERS", chain(trig)), ("TIMEOUT", timeout)],
-            None,
-        )];
+        Some((timeout, stop_on_timeout))
+    }
+
+    /// The wait block, then (for `continue_on_timeout: false`) "if the wait timed out, stop".
+    fn wait_block(&mut self, mut wait: Value, timeout: Option<f64>, stop_on_timeout: bool) -> Vec<Value> {
+        if let Some(s) = timeout {
+            wait["inputs"]["TIMEOUT"] = json!({"block": self.duration(s)});
+        }
+        let mut out = vec![wait];
         if stop_on_timeout {
             let timed_out = self.block("wait_timed_out", json!({}), vec![], None);
             let stop = self.block("control_stop", json!({}), vec![], None);
@@ -772,7 +809,54 @@ impl Builder {
                 None,
             ));
         }
-        Some((out, Lost { wait_partial: true, wait_multi: multi, ..Lost::default() }))
+        out
+    }
+
+    fn wait_for_trigger(&mut self, m: &Map<String, Value>) -> Option<(Vec<Value>, Lost)> {
+        if !only_keys(m, &["wait_for_trigger", "timeout", "continue_on_timeout"]) {
+            return None;
+        }
+        // Puzzlebox subscribes them as one list, with the run's variables for their templates.
+        let triggers = list(m.get("wait_for_trigger"));
+        if triggers.is_empty() {
+            return None;
+        }
+        let (timeout, stop_on_timeout) = Self::wait_options(m)?;
+        let trig = self.triggers(&triggers);
+        // HA numbers the triggers by position, counting disabled ones; blocks split from one
+        // trigger or left out (disabled) shift the numbers.
+        let flat: usize = triggers
+            .iter()
+            .map(|t| match t.as_object() {
+                Some(o) if o.len() == 1 && o.contains_key("triggers") => list(o.get("triggers")).len(),
+                _ => 1,
+            })
+            .sum();
+        let disabled = |b: &Value| b.get("disabledReasons").is_some();
+        // With none enabled, HA goes on at once; the block needs a trigger.
+        if trig.iter().all(disabled) {
+            return None;
+        }
+        let numbering = trig.len() != flat || trig.iter().any(disabled);
+        let wait = self.block("ha_wait_for_trigger", json!({}), vec![("TRIGGERS", chain(trig))], None);
+        let out = self.wait_block(wait, timeout, stop_on_timeout);
+        Some((out, Lost { wait_native: true, wait_numbering: numbering, ..Lost::default() }))
+    }
+
+    /// `wait_template` → "wait until <template>": HA re-renders the template whenever
+    /// something it uses changes, for the block as for the script.
+    fn wait_template(&mut self, m: &Map<String, Value>) -> Option<(Vec<Value>, Lost)> {
+        if !only_keys(m, &["wait_template", "timeout", "continue_on_timeout"]) {
+            return None;
+        }
+        let tpl = m["wait_template"].as_str()?;
+        let (timeout, stop_on_timeout) = Self::wait_options(m)?;
+        // Kept as a template even when blocks could say the same: only a template is followed
+        // change by change.
+        let cond = self.block("ha_template", json!({"TEMPLATE": tpl}), vec![], None);
+        let wait = self.block("wait_until", json!({}), vec![("COND", Some(cond))], None);
+        let out = self.wait_block(wait, timeout, stop_on_timeout);
+        Some((out, Lost { wait_native: true, ..Lost::default() }))
     }
 
     fn set_variables(&mut self, m: &Map<String, Value>) -> Option<(Vec<Value>, Lost)> {
@@ -838,12 +922,12 @@ impl Builder {
             let others: Vec<Value> =
                 branches.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, b)| b.clone()).collect();
             let seen =
-                Lost { names: l.names.clone(), wait_leak: l.wait_partial || l.wait_leak, ..Lost::default() };
+                Lost { names: l.names.clone(), wait_leak: l.wait_native || l.wait_leak, ..Lost::default() };
             if seen.observable(&others) {
                 return None;
             }
             // HA keeps each branch's `wait` to itself: a lost one is not missed outside.
-            lost.merge(Lost { wait_lost: false, wait_partial: false, ..seen });
+            lost.merge(seen);
             lost.halts |= l.halts;
             blocks.push(self.block("control_branch", json!({}), vec![("DO", chain(body))], None));
         }
@@ -854,10 +938,25 @@ impl Builder {
         if m.contains_key("action") && m.contains_key("service") {
             return None;
         }
-        // `response_variable` needs an action block that keeps the response.
-        if !only_keys(m, &["action", "service", "target", "data", "data_template", "entity_id", "metadata"]) {
+        let keys = [
+            "action",
+            "service",
+            "target",
+            "data",
+            "data_template",
+            "entity_id",
+            "metadata",
+            "response_variable",
+        ];
+        if !only_keys(m, &keys) {
             return None;
         }
+        // Puzzlebox hands templates its own `trigger` and `repeat`, whatever is in variables.
+        let response = match m.get("response_variable") {
+            None => None,
+            Some(Value::String(r)) if !["trigger", "repeat"].contains(&r.as_str()) => Some(r.as_str()),
+            Some(_) => return None,
+        };
         let svc = m.get("action").or_else(|| m.get("service"))?.as_str()?;
         if is_tpl(svc) {
             return None;
@@ -883,14 +982,23 @@ impl Builder {
             target.insert("entity_id".into(), e.clone());
         }
         let snap = self.snapshot();
-        if let Some(b) = self.helper(&svc, &target, &data) {
+        if response.is_none()
+            && let Some(b) = self.helper(&svc, &target, &data)
+        {
             return Some((vec![b], Lost::default()));
         }
         self.restore(snap);
         let t = if target.is_empty() { None } else { Some(self.target_from(&target)?) };
         let d = if data.is_empty() { None } else { Some(self.lit(&Value::Object(data))?) };
-        let b =
-            self.block("ha_call_service", json!({"SERVICE": svc}), vec![("TARGET", t), ("DATA", d)], None);
+        let inputs = vec![("TARGET", t), ("DATA", d)];
+        let b = match response {
+            Some(r) => {
+                let id = self.var_id(r);
+                let fields = json!({"SERVICE": svc, "RESPONSE": {"id": id}});
+                self.block("ha_call_service_response", fields, inputs, None)
+            }
+            None => self.block("ha_call_service", json!({"SERVICE": svc}), inputs, None),
+        };
         Some((vec![b], Lost::default()))
     }
 
@@ -1278,10 +1386,16 @@ mod tests {
     fn finds_variable_uses() {
         let v = json!({"data": {"m": "Please wait {{ wait.remaining }} {{ x.wait }} {{ waiting }}"}});
         assert_eq!(uses(&v, "wait"), vec![".remaining "]);
-        assert!(wait_ok(".trigger.entity_id", true));
-        assert!(!wait_ok(" is none", false));
-        assert!(!wait_ok(".trigger.id", true));
-        assert!(wait_ok(".trigger.id", false));
+        assert!(numbering_unused(".trigger.entity_id"));
+        assert!(numbering_unused("['remaining'] > 5"));
+        assert!(!numbering_unused(" is none"));
+        assert!(!numbering_unused(".trigger.id"));
+        assert!(!numbering_unused("['trigger']['idx']"));
+        assert!(!numbering_unused(".trigger | tojson"));
+        assert!(!may_expand(&[json!("light.a"), json!("light.b")]));
+        assert!(may_expand(&[json!("light.a"), json!({"area_id": "kitchen"})]));
+        assert!(!may_expand(&[json!(1), json!({"area_id": "kitchen"})]));
+        assert!(may_expand(&[json!("{{ x }}")]));
         assert_eq!(uses(&json!({"stop": "", "response_variable": "r"}), "r").len(), 1);
     }
 }

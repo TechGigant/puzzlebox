@@ -174,3 +174,63 @@ fn trigger_durations_are_sockets_and_every_is_checked() {
     let errors = compile(&ws(every(90, "minutes")), &NoExternals).unwrap_err();
     assert!(errors[0].message.contains("can't repeat"), "{}", errors[0].message);
 }
+
+#[test]
+fn action_responses_and_loop_info() {
+    let ask = |id: &str, var: &str| {
+        json!({"type": "ha_call_service_response", "id": id,
+            "fields": {"SERVICE": "weather.get_forecasts", "RESPONSE": {"id": var}}})
+    };
+    let mut first = ask("a", "r");
+    first["next"] = json!({"block": ask("b", "p")});
+    let info = json!({"type": "loop_info", "id": "li", "fields": {"WHAT": "item"}});
+    first["next"]["block"]["next"] = json!({"block": {"type": "controls_repeat_ext", "id": "rep",
+        "inputs": {"TIMES": {"block": {"type": "math_number", "id": "n", "fields": {"NUM": 2}}},
+            "DO": {"block": {"type": "variables_set", "id": "s", "fields": {"VAR": {"id": "r"}},
+                "inputs": {"VALUE": {"block": info}}}}}}});
+    let ws = json!({"blocks": {"blocks": [{"type": "ha_on_run", "id": "run", "inputs": {"DO": {"block": first}}}]},
+        "variables": [{"name": "r", "id": "r"}, {"name": "p", "id": "p", "type": "Program"}]});
+    let p = compile(&ws, &NoExternals).unwrap();
+    let body = &p.handlers[0].body;
+    assert!(matches!(&body[0].kind,
+        StmtKind::CallService { service, response_var: Some(v), .. } if service == "weather.get_forecasts" && v == "r"));
+    // A program variable gets the response copied in.
+    let StmtKind::If { branches, .. } = &body[1].kind else { panic!("{:?}", body[1]) };
+    let StmtKind::CallService { response_var: Some(tmp), .. } = &branches[0].1[0].kind else { panic!() };
+    let StmtKind::Set { name, scope, value } = &branches[0].1[1].kind else { panic!() };
+    assert_eq!((name.as_str(), *scope), ("p", VarScope::Program));
+    assert_eq!(value.kind, ExprKind::Var { name: tmp.clone(), scope: VarScope::Local });
+    let StmtKind::Repeat { body: inner, .. } = &body[2].kind else { panic!() };
+    let StmtKind::Set { value, .. } = &inner[0].kind else { panic!() };
+    assert_eq!(
+        value.kind,
+        ExprKind::Builtin { name: "loop_info".into(), args: vec![Expr::lit("li", json!("item"))] }
+    );
+
+    // Outside a loop (also in a timer started inside one), it is an error.
+    let set = json!({"type": "variables_set", "id": "s", "fields": {"VAR": {"id": "r"}},
+        "inputs": {"VALUE": {"block": {"type": "loop_info", "id": "li", "fields": {"WHAT": "index"}}}}});
+    let timer = json!({"type": "timer_start", "id": "tm", "fields": {"NAME": "t"}, "inputs": {
+        "SECONDS": {"block": {"type": "math_number", "id": "n2", "fields": {"NUM": 2}}}, "DO": {"block": set}}});
+    let rep = json!({"type": "controls_repeat_ext", "id": "rep", "inputs": {
+        "TIMES": {"block": {"type": "math_number", "id": "n", "fields": {"NUM": 2}}}, "DO": {"block": timer}}});
+    let ws = json!({"blocks": {"blocks": [{"type": "ha_on_run", "id": "run", "inputs": {"DO": {"block": rep}}}]},
+        "variables": [{"name": "r", "id": "r"}]});
+    let errs = compile(&ws, &NoExternals).unwrap_err();
+    assert_eq!(errs[0].block_id.as_deref(), Some("li"), "{errs:?}");
+}
+
+#[test]
+fn waits_keep_their_trigger_configs_as_written() {
+    let ws = json!({"blocks": {"blocks": [{"type": "ha_on_run", "id": "run", "inputs": {"DO": {"block":
+        {"type": "ha_wait_for_trigger", "id": "w", "inputs": {"TRIGGERS": {"block":
+            {"type": "ha_trigger_raw", "id": "t1", "fields": {"CONFIG": "trigger: event\nevent_type: a"},
+             "next": {"block": {"type": "ha_trigger_raw", "id": "t2", "fields": {"CONFIG": "trigger: event\nevent_type: b"}}}}}}}}}}]}});
+    let p = compile(&ws, &NoExternals).unwrap();
+    let StmtKind::WaitForTrigger { triggers, .. } = &p.handlers[0].body[0].kind else { panic!() };
+    // No `id`, so HA numbers them like a script's `wait_for_trigger` ("0", "1").
+    assert_eq!(
+        triggers,
+        &vec![json!({"trigger": "event", "event_type": "a"}), json!({"trigger": "event", "event_type": "b"})]
+    );
+}

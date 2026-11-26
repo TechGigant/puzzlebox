@@ -86,6 +86,8 @@ pub struct Compiler<'a> {
     timer_handlers: Vec<Handler>,
     /// Item variables of the enclosing "filter"/"map" blocks (innermost last).
     item_vars: Vec<String>,
+    /// Number of loops around the block being compiled.
+    loops: usize,
 }
 
 pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec<CompileError>> {
@@ -103,6 +105,7 @@ pub fn compile_partial(workspace: &Value, ext: &dyn BlockLowerer) -> (Program, V
         persistent: Vec::new(),
         timer_handlers: Vec::new(),
         item_vars: Vec::new(),
+        loops: 0,
     };
     for v in workspace.get("variables").and_then(Value::as_array).into_iter().flatten() {
         let (Some(id), Some(name)) =
@@ -369,6 +372,10 @@ fn walk_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     }
 }
 
+/// Blocks that run their body in rounds, each with HA's `repeat` variable.
+const LOOPS: [&str; 5] =
+    ["controls_repeat_ext", "controls_repeat", "controls_whileUntil", "controls_for", "controls_forEach"];
+
 /// Plugin id the runtime routes to its MQTT client.
 pub const BUILTIN_MQTT: &str = "__mqtt";
 
@@ -461,10 +468,14 @@ impl<'a> Compiler<'a> {
         let mut out = Vec::new();
         let mut cur = first;
         while let Some(b) = cur {
-            if b.enabled()
-                && let Some(kind) = self.stmt(b)
-            {
-                out.push(Stmt { id: b.id().into(), kind });
+            if b.enabled() {
+                let is_loop = LOOPS.contains(&b.ty());
+                self.loops += usize::from(is_loop);
+                let kind = self.stmt(b);
+                self.loops -= usize::from(is_loop);
+                if let Some(kind) = kind {
+                    out.push(Stmt { id: b.id().into(), kind });
+                }
             }
             cur = b.next();
         }
@@ -923,7 +934,10 @@ impl<'a> Compiler<'a> {
             "control_stop" => StmtKind::Stop,
             "timer_start" => {
                 let name = self.required_str(&b, "NAME");
+                // The body runs later, on its own, outside any loop around this block.
+                let loops = std::mem::take(&mut self.loops);
                 let body = self.stmt_chain(b.input("DO"));
+                self.loops = loops;
                 self.timer_handlers.push(Handler {
                     id: b.id().into(),
                     kind: HandlerKind::Timer { name: name.clone() },
@@ -967,14 +981,33 @@ impl<'a> Compiler<'a> {
                     response_var: None,
                 }
             }
-            "ha_call_service" => {
+            "ha_call_service" | "ha_call_service_response" => {
                 let service = self.required_str(&b, "SERVICE");
                 if !service.is_empty() && !service.contains('.') {
                     self.err(&b, "action must look like domain.service");
                 }
                 let target = self.value_opt(&b, "TARGET");
                 let data = self.value_opt(&b, "DATA");
-                StmtKind::CallService { service, target, data, response_var: None }
+                if b.ty() == "ha_call_service" {
+                    return Some(StmtKind::CallService { service, target, data, response_var: None });
+                }
+                let (name, scope) = self.var(&b, "RESPONSE");
+                if scope == VarScope::Local {
+                    return Some(StmtKind::CallService { service, target, data, response_var: Some(name) });
+                }
+                // The response lands in a run variable; copy it into the program/global one.
+                let tmp = format!("__response_{}", b.id());
+                let call = StmtKind::CallService { service, target, data, response_var: Some(tmp.clone()) };
+                let value =
+                    Expr { id: b.id().into(), kind: ExprKind::Var { name: tmp, scope: VarScope::Local } };
+                let set = StmtKind::Set { name, scope, value };
+                return Some(StmtKind::If {
+                    branches: vec![(
+                        Expr::lit(b.id(), json!(true)),
+                        vec![Stmt { id: b.id().into(), kind: call }, Stmt { id: b.id().into(), kind: set }],
+                    )],
+                    otherwise: None,
+                });
             }
             "ha_action_raw" => match parse_config(b.field_str("CONFIG").unwrap_or("")) {
                 Ok(v) => StmtKind::HaScript {
@@ -1531,6 +1564,13 @@ impl<'a> Compiler<'a> {
                     lit(Value::Null)
                 }
             },
+            "loop_info" => {
+                if self.loops == 0 {
+                    self.err(b, "this only works inside a repeat or \"for each\" loop");
+                }
+                let what = Expr::lit(b.id(), json!(b.field_str("WHAT").unwrap_or("index")));
+                self.builtin("loop_info", vec![what])
+            }
             "time_today_at" => {
                 let t = Expr::lit(b.id(), json!(b.field_str("TIME").unwrap_or("00:00")));
                 self.builtin("today_at", vec![t])

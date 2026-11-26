@@ -168,7 +168,13 @@ export const CORE_BLOCKS: Json[] = [
     [text('SERVICE', 'light.turn_on'), { type: 'input_dummy' }, value('TARGET'), value('DATA', ['Dict', 'Object'])],
     'Calls a Home Assistant action. Target: entity id(s), a list, or a target dictionary.',
   ),
-  action('ha_wait', 'wait %1', [value('SECONDS', 'Number')], 'Pauses this run for a while (a number on its own means seconds).', 'flow_blocks'),
+  action(
+    'ha_call_service_response',
+    'perform action %1 %2 on %3 with data %4 and save the response in %5',
+    [text('SERVICE', 'weather.get_forecasts'), { type: 'input_dummy' }, value('TARGET'), value('DATA', ['Dict', 'Object']), variable('RESPONSE', 'response')],
+    'Calls a Home Assistant action that sends back an answer (weather forecasts, calendar events…) and keeps it in a variable. Only for actions that have a response.',
+  ),
+  action('ha_wait','wait %1', [value('SECONDS', 'Number')], 'Pauses this run for a while (a number on its own means seconds).', 'flow_blocks'),
   action(
     'ha_wait_for_trigger',
     'wait for %1 %2 at most %3',
@@ -195,7 +201,7 @@ export const CORE_BLOCKS: Json[] = [
   expr('ha_attribute', '%1 of %2', [{ type: 'field_attribute', name: 'ATTRIBUTE', text: 'friendly_name' }, value('ENTITY')], null, 'condition_blocks', 'A detail (attribute) of an entity, e.g. a light\'s brightness (0–255) or a thermostat\'s target temperature.'),
   expr('ha_is_state', '%1 is %2', [value('ENTITY'), stateValue('STATE', 'on')], 'Boolean', 'condition_blocks', 'True if the entity is in this state.'),
   expr('ha_condition_raw', 'HA condition (YAML) %1', [multiline('CONFIG', 'condition: state\nentity_id: sun.sun\nstate: below_horizon')], 'Boolean', 'condition_blocks', 'Any native Home Assistant condition, written as YAML.'),
-  expr('ha_template', 'template %1', [multiline('TEMPLATE', "{{ states('sun.sun') }}")], null, 'condition_blocks', 'Rendered by Home Assistant. Program variables and "trigger" are available.'),
+  expr('ha_template', 'template %1', [multiline('TEMPLATE', "{{ states('sun.sun') }}")], null, 'condition_blocks', 'Rendered by Home Assistant. Program variables and "trigger" are available, "repeat" inside a loop and "wait" after a wait.'),
   expr('ha_trigger_data', 'trigger detail %1', [text('PATH', 'to_state.state')], null, 'trigger_blocks', 'Any detail of what started this run, by its path (e.g. to_state.attributes.brightness).'),
 
 
@@ -213,7 +219,7 @@ export const CORE_BLOCKS: Json[] = [
     'wait_until',
     'wait until %1 stays true for %2 at most %3',
     [value('COND', 'Boolean'), value('HOLD', 'Number'), value('TIMEOUT', 'Number')],
-    'Waits until the condition is true (and has stayed true for a while, if set), or the time runs out. Afterwards, "the wait timed out" tells you which.',
+    'Waits until the condition is true (and has stayed true for a while, if set), or the time runs out. A template is checked again as soon as something it uses changes, like in Home Assistant. Afterwards, "the wait timed out" tells you which.',
     'flow_blocks',
   ),
   expr(
@@ -463,6 +469,14 @@ export const CORE_BLOCKS: Json[] = [
   expr('lists_filter', 'items of %1 where %2', [value('LIST'), value('COND', 'Boolean')], 'Array', 'list_blocks', 'Keeps the items for which the condition is true. Use "current item" inside the condition.'),
   expr('lists_map', 'each item of %1 as %2', [value('LIST'), value('EXPR')], 'Array', 'list_blocks', 'Turns every item into a new value. Use "current item" inside.'),
   expr('lists_item', 'current item', [], null, 'list_blocks', 'The item being looked at inside "items of … where" or "each item of … as".'),
+  expr(
+    'loop_info',
+    'loop %1',
+    [dropdown('WHAT', [['round number', 'index'], ['item', 'item'], ['is on its first round', 'first'], ['is on its last round', 'last']])],
+    null,
+    'loop_blocks',
+    'Inside a loop: which round it is on (1, 2, 3…), the item of a "for each" loop, or whether this is the first or last round (not known for "repeat while"). Templates see the same as repeat.index, repeat.item, repeat.first and repeat.last.',
+  ),
 
   // --- flow -----------------------------------------------------------------
   {

@@ -7,13 +7,13 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures_util::future::{BoxFuture, join_all};
-use futures_util::stream::{StreamExt, select_all};
+use futures_util::stream::StreamExt;
 use puzzlebox_ir::*;
 use puzzlebox_storage::Store;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::ha::HaApi;
+use crate::ha::{HaApi, TemplateStream};
 use crate::value::{self, to_num, to_text, truthy};
 
 pub const MAX_STEPS: u64 = 5_000_000;
@@ -146,13 +146,31 @@ pub struct RunCtx {
 
 /// A function activation: parameters shadow the (workspace-global, as in Blockly) run variables.
 pub struct Frame {
-    params: Mutex<Map<String, Value>>,
+    params: Arc<Mutex<Map<String, Value>>>,
     depth: usize,
+    /// HA's `repeat` for the innermost loop running this code; loop rounds get their own
+    /// frame sharing the parameters, so nested loops shadow it and parallel branches keep it.
+    repeat: Option<Value>,
 }
 
 impl Frame {
     pub fn root() -> Self {
-        Self { params: Mutex::new(Map::new()), depth: 0 }
+        Self { params: Arc::new(Mutex::new(Map::new())), depth: 0, repeat: None }
+    }
+
+    /// A loop round: `index` counts from 1; `last` is known for loops with a count.
+    fn round(&self, index: u64, last: Option<bool>, item: Option<&Value>) -> Frame {
+        let mut r = Map::new();
+        r.insert("first".into(), json!(index == 1));
+        r.insert("index".into(), json!(index));
+        if let Some(last) = last {
+            r.insert("last".into(), json!(last));
+        }
+        // HA leaves `item` out when it is None.
+        if let Some(item) = item.filter(|i| !i.is_null()) {
+            r.insert("item".into(), item.clone());
+        }
+        Frame { params: self.params.clone(), depth: self.depth, repeat: Some(Value::Object(r)) }
     }
 }
 
@@ -187,6 +205,9 @@ impl RunCtx {
     fn ha_vars(&self, frame: &Frame) -> Value {
         let Value::Object(mut all) = self.variables_snapshot() else { unreachable!() };
         all.extend(lock(&frame.params).clone());
+        if let Some(r) = &frame.repeat {
+            all.insert("repeat".into(), r.clone());
+        }
         all.insert("trigger".into(), self.trigger.clone());
         Value::Object(all)
     }
@@ -291,23 +312,27 @@ impl RunCtx {
                     return self.exec_block(frame, body).await;
                 }
             }
-            StmtKind::While { cond, body, until } => loop {
-                let c = truthy(&self.eval(frame, cond).await?);
-                if c == *until {
-                    break;
+            StmtKind::While { cond, body, until } => {
+                for i in 1.. {
+                    // As in HA, the condition already sees this round's `repeat`.
+                    let round = frame.round(i, None, None);
+                    let c = truthy(&self.eval(&round, cond).await?);
+                    if c == *until {
+                        break;
+                    }
+                    self.step(id)?;
+                    match self.exec_block(&round, body).await? {
+                        Flow::Break => break,
+                        Flow::Return(v) => return Ok(Flow::Return(v)),
+                        _ => {}
+                    }
                 }
-                self.step(id)?;
-                match self.exec_block(frame, body).await? {
-                    Flow::Break => break,
-                    Flow::Return(v) => return Ok(Flow::Return(v)),
-                    _ => {}
-                }
-            },
+            }
             StmtKind::Repeat { times, body } => {
                 let n = to_num(&self.eval(frame, times).await?).at(id)?.max(0.0) as u64;
-                for _ in 0..n {
+                for i in 1..=n {
                     self.step(id)?;
-                    match self.exec_block(frame, body).await? {
+                    match self.exec_block(&frame.round(i, Some(i == n), None), body).await? {
                         Flow::Break => break,
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                         _ => {}
@@ -322,16 +347,20 @@ impl RunCtx {
                     return Err(RunError::at(id, "step must not be 0"));
                 }
                 let step = if from > to { -by } else { by };
+                let in_range = |i: f64| (step > 0.0 && i <= to) || (step < 0.0 && i >= to);
                 let mut i = from;
-                while (step > 0.0 && i <= to) || (step < 0.0 && i >= to) {
+                let mut round = 1;
+                while in_range(i) {
                     self.step(id)?;
                     self.set_var(frame, var, VarScope::Local, value::num(i)).await;
-                    match self.exec_block(frame, body).await? {
+                    let r = frame.round(round, Some(!in_range(i + step)), None);
+                    match self.exec_block(&r, body).await? {
                         Flow::Break => break,
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                         _ => {}
                     }
                     i += step;
+                    round += 1;
                 }
             }
             StmtKind::ForEach { var, list, body } => {
@@ -346,10 +375,12 @@ impl RunCtx {
                     }
                     other => return Err(RunError::at(id, format!("cannot loop over {other}"))),
                 };
-                for item in items {
+                let n = items.len() as u64;
+                for (i, item) in (1..).zip(items) {
                     self.step(id)?;
+                    let round = frame.round(i, Some(i == n), Some(&item));
                     self.set_var(frame, var, VarScope::Local, item).await;
-                    match self.exec_block(frame, body).await? {
+                    match self.exec_block(&round, body).await? {
                         Flow::Break => break,
                         Flow::Return(v) => return Ok(Flow::Return(v)),
                         _ => {}
@@ -410,10 +441,14 @@ impl RunCtx {
                     },
                     None => None,
                 };
-                let res = self.ha.call_service(service, data, target).await.at(id)?;
-                if let Some(var) = response_var {
-                    let resp = res.get("response").cloned().unwrap_or(Value::Null);
-                    self.set_var(frame, var, VarScope::Local, resp).await;
+                match response_var {
+                    Some(var) => {
+                        let resp = self.ha.call_service_response(service, data, target).await.at(id)?;
+                        self.set_var(frame, var, VarScope::Local, resp).await;
+                    }
+                    None => {
+                        self.ha.call_service(service, data, target).await.at(id)?;
+                    }
                 }
             }
             StmtKind::HaScript { sequence, args } => {
@@ -431,19 +466,30 @@ impl RunCtx {
                     Some(t) => Some(to_num(&self.eval(frame, t).await?).at(id)?).filter(|t| *t > 0.0),
                     None => None,
                 };
-                let mut streams = Vec::new();
-                for t in triggers {
-                    streams.push(self.ha.subscribe_trigger(t.clone()).await.at(id)?);
-                }
-                let mut all = select_all(streams);
+                let started = Instant::now();
+                // One subscription for all of them, so HA numbers them (`trigger.idx`, the
+                // default `trigger.id`) as in a script, and renders their templates with the
+                // run's variables.
+                let config = match triggers.as_slice() {
+                    [one] => one.clone(),
+                    many => Value::Array(many.to_vec()),
+                };
+                let mut fired_by =
+                    self.ha.subscribe_trigger_with(config, self.ha_vars(frame)).await.at(id)?;
                 let fired = match timeout {
                     Some(t) => {
-                        tokio::time::timeout(Duration::from_secs_f64(t), all.next()).await.ok().flatten()
+                        tokio::time::timeout(Duration::from_secs_f64(t), fired_by.next()).await.ok().flatten()
                     }
-                    None => all.next().await,
+                    None => fired_by.next().await,
                 };
+                let completed = fired.is_some();
+                let wait = json!({
+                    "remaining": remaining(timeout, started, completed),
+                    "completed": completed,
+                    "trigger": fired,
+                });
                 let var = result_var.clone().unwrap_or_else(|| "wait".into());
-                self.set_var(frame, &var, VarScope::Local, json!({"trigger": fired})).await;
+                self.set_var(frame, &var, VarScope::Local, wait).await;
             }
             StmtKind::Log { level, message } => {
                 let m = to_text(&self.eval(frame, message).await?);
@@ -478,34 +524,104 @@ impl RunCtx {
                     Some(h) => to_num(&self.eval(frame, h).await?).at(id)?.max(0.0),
                     None => 0.0,
                 };
-                let deadline = match timeout {
-                    Some(t) => {
-                        let t = to_num(&self.eval(frame, t).await?).at(id)?;
-                        (t > 0.0).then(|| Instant::now() + Duration::from_secs_f64(t))
-                    }
+                let timeout = match timeout {
+                    Some(t) => Some(to_num(&self.eval(frame, t).await?).at(id)?).filter(|t| *t > 0.0),
                     None => None,
                 };
-                let mut true_since: Option<Instant> = None;
-                let completed = loop {
-                    if truthy(&self.eval(frame, cond).await?) {
+                let started = Instant::now();
+                let until = Until {
+                    hold: Duration::from_secs_f64(hold),
+                    deadline: timeout.map(|t| started + Duration::from_secs_f64(t)),
+                };
+                let subscribed = match &cond.kind {
+                    ExprKind::Template { template } => {
+                        self.ha.subscribe_template(template, self.ha_vars(frame)).await
+                    }
+                    _ => None,
+                };
+                let (completed, at_once) = match subscribed {
+                    Some(results) => self.wait_template(&cond.id, results.at(&cond.id)?, &until).await?,
+                    None => self.poll_until(frame, cond, &until).await?,
+                };
+                // HA leaves `remaining` at the whole timeout when the condition holds right away.
+                let remaining = match (at_once, timeout) {
+                    (true, Some(t)) => json!(t),
+                    _ => remaining(timeout, started, completed),
+                };
+                let wait = json!({"remaining": remaining, "completed": completed});
+                self.set_var(frame, "wait", VarScope::Local, wait).await;
+            }
+        }
+        Ok(Flow::Normal)
+    }
+
+    /// "wait until" a condition: `(completed, at_once)`.
+    async fn poll_until(&self, frame: &Frame, cond: &Expr, until: &Until) -> R<(bool, bool)> {
+        // A template counts as true the way HA reads a template condition.
+        let is_template = matches!(cond.kind, ExprKind::Template { .. });
+        let mut true_since: Option<Instant> = None;
+        for first in std::iter::once(true).chain(std::iter::repeat(false)) {
+            let v = self.eval(frame, cond).await?;
+            if if is_template { ha_bool(&v) } else { truthy(&v) } {
+                let since = *true_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= until.hold {
+                    return Ok((true, first));
+                }
+            } else {
+                true_since = None;
+            }
+            if until.deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
+            // Conditions read HA's state cache, which updates on every state change;
+            // polling once a second is cheap and catches any expression.
+            let now = Instant::now();
+            let mut nap = Duration::from_secs(1);
+            for wake in [until.deadline, true_since.map(|s| s + until.hold)].into_iter().flatten() {
+                nap = nap.min(wake.saturating_duration_since(now));
+            }
+            tokio::time::sleep(nap).await;
+        }
+        Ok((false, false))
+    }
+
+    /// "wait until" a template HA re-renders whenever the entities it uses change, as with
+    /// `wait_template`: `(completed, at_once)`. Only the first render's error ends the run;
+    /// later ones count as false, as in HA.
+    async fn wait_template(&self, id: &str, mut results: TemplateStream, until: &Until) -> R<(bool, bool)> {
+        let mut true_since: Option<Instant> = None;
+        let mut first = true;
+        loop {
+            let wake = [until.deadline, true_since.map(|s| s + until.hold)].into_iter().flatten().min();
+            let next = match wake {
+                Some(w) => tokio::time::timeout_at(w.into(), results.next()).await.ok(),
+                None => Some(results.next().await),
+            };
+            match next {
+                // A timer: the hold is over or the time is up.
+                None => {
+                    if true_since.is_some_and(|s| s.elapsed() >= until.hold) {
+                        return Ok((true, false));
+                    }
+                    if until.deadline.is_some_and(|d| Instant::now() >= d) {
+                        return Ok((false, false));
+                    }
+                }
+                Some(None) => return Err(RunError::at(id, "lost the connection to Home Assistant")),
+                Some(Some(Err(e))) if first => return Err(RunError::at(id, e)),
+                Some(Some(result)) => {
+                    if result.is_ok_and(|v| ha_bool(&v)) {
                         let since = *true_since.get_or_insert_with(Instant::now);
-                        if since.elapsed().as_secs_f64() >= hold {
-                            break true;
+                        if since.elapsed() >= until.hold {
+                            return Ok((true, first));
                         }
                     } else {
                         true_since = None;
                     }
-                    if deadline.is_some_and(|d| Instant::now() >= d) {
-                        break false;
-                    }
-                    // Conditions read HA's state cache, which updates on every state change;
-                    // polling once a second is cheap and catches any expression.
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                };
-                self.set_var(frame, "wait", VarScope::Local, json!({"completed": completed})).await;
+                }
             }
+            first = false;
         }
-        Ok(Flow::Normal)
     }
 
     async fn plugin_call(
@@ -613,6 +729,13 @@ impl RunCtx {
                         v.extend(e);
                     }
                     self.ha.render_template(&template, vars).await.at(id)?
+                }
+                ExprKind::Builtin { name, args } if name == "loop_info" => {
+                    let what = match args.first() {
+                        Some(a) => to_text(&self.eval(frame, a).await?),
+                        None => "index".into(),
+                    };
+                    frame.repeat.as_ref().and_then(|r| r.get(&what)).cloned().unwrap_or(Value::Null)
                 }
                 ExprKind::Builtin { name, args } if name == "service_response" => {
                     let service = to_text(&self.eval(frame, &args[0]).await?);
@@ -805,7 +928,7 @@ impl RunCtx {
             };
             params.insert(p.clone(), v);
         }
-        let inner = Frame { params: Mutex::new(params), depth: frame.depth + 1 };
+        let inner = Frame { params: Arc::new(Mutex::new(params)), depth: frame.depth + 1, repeat: None };
         if let Flow::Return(v) = self.exec_block(&inner, &f.body).await? {
             return Ok(v);
         }
@@ -813,6 +936,33 @@ impl RunCtx {
             Some(r) => self.eval(&inner, r).await,
             None => Ok(Value::Null),
         }
+    }
+}
+
+/// When a "wait until" is done: its condition held for `hold`, or `deadline` passed.
+struct Until {
+    hold: Duration,
+    deadline: Option<Instant>,
+}
+
+/// HA's `wait.remaining`: the time left, 0 after a timeout, null without a timeout.
+fn remaining(timeout: Option<f64>, started: Instant, completed: bool) -> Value {
+    match timeout {
+        None => Value::Null,
+        Some(_) if !completed => json!(0.0),
+        Some(t) => json!((t - started.elapsed().as_secs_f64()).max(0.0)),
+    }
+}
+
+/// How HA reads a template condition's result (`cv.boolean`, anything else is false).
+fn ha_bool(v: &Value) -> bool {
+    match v {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
+        Value::String(s) => {
+            matches!(s.trim().to_lowercase().as_str(), "1" | "true" | "yes" | "on" | "enable")
+        }
+        _ => false,
     }
 }
 

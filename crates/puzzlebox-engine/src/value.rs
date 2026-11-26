@@ -434,7 +434,7 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
             num((y - x).num_milliseconds() as f64 / 1000.0)
         }
         "format_duration" => json!(format_duration(n(0)?, &to_text(a(1)))),
-        // `wait` after "wait until" is {"completed": bool}; after "wait for" {"trigger": … | null}.
+        // `wait` is HA's {"remaining", "completed", "trigger"} (no "trigger" after "wait until").
         "wait_timed_out" => json!(match a(0) {
             Value::Object(m) if m.contains_key("completed") => !truthy(&m["completed"]),
             Value::Object(m) => m.get("trigger").is_none_or(Value::is_null),

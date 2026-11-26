@@ -11,6 +11,8 @@ use serde_json::{Value, json};
 use tracing::warn;
 
 pub type TriggerStream = Pin<Box<dyn Stream<Item = Value> + Send>>;
+/// A template's result each time it changes (or the error rendering it gave).
+pub type TemplateStream = Pin<Box<dyn Stream<Item = Result<Value, String>> + Send>>;
 
 #[async_trait]
 pub trait HaApi: Send + Sync + 'static {
@@ -37,6 +39,24 @@ pub trait HaApi: Send + Sync + 'static {
     async fn fire_event(&self, event_type: &str, data: Option<Value>) -> Result<(), String>;
     /// Each item is the trigger payload (HA's `trigger` variable).
     async fn subscribe_trigger(&self, trigger: Value) -> Result<TriggerStream, String>;
+    /// Like `subscribe_trigger` (also for a list of triggers), with the run's variables, which
+    /// HA uses to render the triggers' templates.
+    async fn subscribe_trigger_with(
+        &self,
+        trigger: Value,
+        _variables: Value,
+    ) -> Result<TriggerStream, String> {
+        self.subscribe_trigger(trigger).await
+    }
+    /// Renders a template now and again whenever its result changes, like HA's
+    /// `wait_template`. `None` if not supported (callers poll instead).
+    async fn subscribe_template(
+        &self,
+        _template: &str,
+        _variables: Value,
+    ) -> Option<Result<TemplateStream, String>> {
+        None
+    }
     /// Recorded states of one entity between two RFC 3339 times, as (unix seconds, state),
     /// including the state at `start`.
     async fn history(
@@ -113,6 +133,21 @@ async fn maintain_cache(client: HaClient, states: Arc<RwLock<HashMap<String, Val
                 }
             }
         }
+    }
+}
+
+impl LiveHa {
+    async fn trigger_stream(
+        &self,
+        trigger: Value,
+        variables: Option<Value>,
+    ) -> Result<TriggerStream, String> {
+        let sub = self.client.subscribe_trigger(trigger, variables).await.map_err(|e| e.to_string())?;
+        Ok(Box::pin(futures_util::stream::unfold(sub, |mut sub| async move {
+            let ev = sub.next().await?;
+            let trig = ev.pointer("/variables/trigger").cloned().unwrap_or(ev);
+            Some((trig, sub))
+        })))
     }
 }
 
@@ -205,11 +240,37 @@ impl HaApi for LiveHa {
     }
 
     async fn subscribe_trigger(&self, trigger: Value) -> Result<TriggerStream, String> {
-        let sub = self.client.subscribe_trigger(trigger, None).await.map_err(|e| e.to_string())?;
-        Ok(Box::pin(futures_util::stream::unfold(sub, |mut sub| async move {
-            let ev = sub.next().await?;
-            let trig = ev.pointer("/variables/trigger").cloned().unwrap_or(ev);
-            Some((trig, sub))
-        })))
+        self.trigger_stream(trigger, None).await
+    }
+
+    async fn subscribe_trigger_with(
+        &self,
+        trigger: Value,
+        variables: Value,
+    ) -> Result<TriggerStream, String> {
+        self.trigger_stream(trigger, Some(variables)).await
+    }
+
+    async fn subscribe_template(
+        &self,
+        template: &str,
+        variables: Value,
+    ) -> Option<Result<TemplateStream, String>> {
+        let sub = match self.client.subscribe_template(template, Some(variables)).await {
+            Ok(s) => s,
+            Err(e) => return Some(Err(e.to_string())),
+        };
+        Some(Ok(Box::pin(futures_util::stream::unfold(sub, |mut sub| async move {
+            loop {
+                let ev = sub.next().await?;
+                let Some(err) = ev.get("error") else {
+                    return Some((Ok(ev.get("result").cloned().unwrap_or(Value::Null)), sub));
+                };
+                // Warnings (an undefined variable…) are reported before the result itself.
+                if ev.get("level").and_then(Value::as_str) != Some("WARNING") {
+                    return Some((Err(err.as_str().unwrap_or_default().to_owned()), sub));
+                }
+            }
+        }))))
     }
 }

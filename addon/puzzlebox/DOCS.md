@@ -9,6 +9,8 @@ from the sidebar after starting the app.
   from your own installation (including integrations you add later).
 - Variables, lists, dictionaries, loops, functions, try/catch, parallel
   branches, and stored variables that survive restarts.
+- One-line blocks for common devices (blinds, thermostats, speakers, locks,
+  notifications…) and for lights and colours.
 - Your devices' own triggers, conditions and actions, grouped by area.
 - Zigbee2MQTT devices and groups as blocks (with the Mosquitto app or any
   MQTT broker).
@@ -24,12 +26,12 @@ Install the **Puzzlebox** integration (HACS → custom repository, category
 sets itself up; nothing to enter.
 
 Each program then gets a switch to enable it and a button to run it, and
-global variables show up as sensors. You can
-start programs and set stored variables from automations with the
-`puzzlebox.run_program` and `puzzlebox.set_variable` actions, and
-react to runs with the `puzzlebox_program_started` and
-`puzzlebox_program_finished` events. Webhook triggers are reachable on your
-Home Assistant URL, and other integrations can add their own blocks.
+global variables show up as sensors. Automations can start programs and set
+stored variables with the `puzzlebox.run_program` and
+`puzzlebox.set_variable` actions, and react to runs with the
+`puzzlebox_program_started` and `puzzlebox_program_finished` events.
+Webhook triggers are reachable on your Home Assistant URL, and other
+integrations can add their own blocks.
 
 Keep the app and the integration on the same version. If one is older, the
 app shows a banner and Home Assistant lists it under **Settings → Repairs**;

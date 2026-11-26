@@ -460,8 +460,8 @@ export const CORE_BLOCKS: Json[] = [
     ),
     inputsInline: true,
   },
-  expr('lists_filter', 'items of %1 where %2', [value('LIST'), value('COND', 'Boolean')], 'Array', 'list_blocks', 'Keeps the items for which the condition is true. Use the "item" block inside the condition.'),
-  expr('lists_map', 'each item of %1 as %2', [value('LIST'), value('EXPR')], 'Array', 'list_blocks', 'Turns every item into a new value. Use the "item" block inside.'),
+  expr('lists_filter', 'items of %1 where %2', [value('LIST'), value('COND', 'Boolean')], 'Array', 'list_blocks', 'Keeps the items for which the condition is true. Use "current item" inside the condition.'),
+  expr('lists_map', 'each item of %1 as %2', [value('LIST'), value('EXPR')], 'Array', 'list_blocks', 'Turns every item into a new value. Use "current item" inside.'),
   expr('lists_item', 'current item', [], null, 'list_blocks', 'The item being looked at inside "items of … where" or "each item of … as".'),
 
   // --- flow -----------------------------------------------------------------
@@ -513,7 +513,7 @@ export const CORE_BLOCKS: Json[] = [
     style: 'dict_blocks',
     tooltip: 'A key and its value.',
   },
-  expr('dict_get', 'get %1 from %2', [value('KEY'), value('DICT')], null, 'dict_blocks', 'Value for a key (null if missing).'),
+  expr('dict_get', 'get %1 from %2', [value('KEY'), value('DICT')], null, 'dict_blocks', 'The value stored under a key, or nothing if the key is missing.'),
   expr('dict_has', '%1 has key %2', [value('DICT'), value('KEY')], 'Boolean', 'dict_blocks', 'True if the key exists.'),
   expr('dict_keys', 'keys of %1', [value('DICT')], 'Array', 'dict_blocks', 'List of keys.'),
   expr('dict_values', 'values of %1', [value('DICT')], 'Array', 'dict_blocks', 'List of values.'),
@@ -522,13 +522,13 @@ export const CORE_BLOCKS: Json[] = [
   expr('json_stringify', 'to JSON %1', [value('VALUE')], 'String', 'dict_blocks', 'Value → JSON text.'),
 
   // --- text & time ----------------------------------------------------------
-  expr('text_to_number', 'number from %1', [value('TEXT')], 'Number', 'text_blocks', 'Parses a number (null if not numeric).'),
+  expr('text_to_number', 'number from %1', [value('TEXT')], 'Number', 'text_blocks', 'The number in a text, or nothing if it isn\'t one.'),
   expr('to_text', 'text of %1', [value('VALUE')], 'String', 'text_blocks', 'Converts any value to text.'),
   expr('text_contains', '%1 contains %2', [value('TEXT'), value('FIND')], 'Boolean', 'text_blocks', 'True if the text (or list) contains the value.'),
-  expr('time_now', 'now', [], 'String', 'time_blocks', 'Current local date/time (ISO 8601).'),
-  expr('time_today_at', 'today at %1', [text('TIME', '07:00')], 'String', 'time_blocks', 'Today at the given local time.'),
-  expr('time_add', '%1 plus %2 s', [value('DATETIME'), value('SECONDS', 'Number')], 'String', 'time_blocks', 'A date/time moved by some seconds (negative to go back).'),
-  expr('time_seconds_between', 'seconds from %1 to %2', [value('A'), value('B')], 'Number', 'time_blocks', 'Seconds between two date/times (negative if the second is earlier).'),
+  expr('time_now', 'now', [], 'String', 'time_blocks', 'The current date and time.'),
+  expr('time_today_at', 'today at %1', [time('TIME', '07:00')], 'String', 'time_blocks', 'Today\'s date at this time.'),
+  expr('time_add', '%1 plus %2', [value('DATETIME'), value('SECONDS', 'Number')], 'String', 'time_blocks', 'A date and time moved forward by a duration (a negative one goes back).'),
+  expr('time_seconds_between', 'seconds from %1 to %2', [value('A'), value('B')], 'Number', 'time_blocks', 'Seconds from one date and time to another (negative if the second is earlier).'),
   expr(
     'format_duration',
     'format %1 s as %2',

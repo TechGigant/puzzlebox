@@ -175,7 +175,7 @@ export const HELPER_BLOCKS: Json[] = [
   // Sensing
   { ...val('sun_is', 'the sun is %1', [dropdown('WHERE', [['up', 'up'], ['down', 'down']])], 'Boolean', 'True during the day (up) or at night (down).'), style: 'condition_blocks' },
   {
-    ...val('someone_home', '%1 is home', [dropdown('WHO', [['someone', 'someone'], ['nobody', 'nobody'], ['everyone', 'everyone']])], 'Boolean', 'Checks the people in Home Assistant.'),
+    ...val('someone_home', '%1 is home', [dropdown('WHO', [['someone', 'someone'], ['nobody', 'nobody'], ['everyone', 'everyone']])], 'Boolean', 'Looks at everyone set up as a person in Home Assistant and whether they are at home.'),
     style: 'condition_blocks',
   },
   { ...val('person_is_home', '%1 is %2', [value('ENTITY'), dropdown('WHERE', [['home', 'home'], ['away', 'away']])], 'Boolean', 'Whether a person is at home.'), style: 'condition_blocks' },

@@ -2,74 +2,88 @@
 
 ## 0.4.0
 
-- **Add a block by typing**: press Ctrl+Space (or middle-click the canvas),
-  type what you want ("turn off light", "wait until") and press Enter. The
-  block lands after the selected block, or where you clicked.
-- **Switch a block** from its right-click menu to a related one: turn on ↔
-  turn off ↔ toggle, state ↔ number state, entity ↔ area, a device's other
-  triggers or actions, and so on. Inner blocks and the stack stay in place.
-- **Find uses** of a variable, timer, entity, function or area (repeat to
-  step through them), and **rename** a variable, timer or entity everywhere
-  in the program.
-- **Run this stack** from the right-click menu. Loose stacks of blocks
-  outside any "when" block run only this way, so you can keep test snippets
-  next to a program.
-- **Backpack** (top right): drop blocks in to reuse them in other programs.
-- Nested blocks of the same colour alternate between two shades, and there's
-  a compact block size for big programs (Settings → Editor).
-- **Program folders**: group programs into folders (also nested) by dragging
-  them or with "Move"; search covers names, folders and descriptions.
-- **Favourites** at the top of the toolbox: pinned blocks (right-click → Add
-  to favourites) and your recently used ones.
-- **History**: every save that changes the blocks is kept (the last 30) and
-  can be restored from the editor.
-- **New blocks**: switch / case / otherwise, section labels to organise long
-  stacks, "items of a list where …" and "each item as …" with an "item"
-  block, regular expressions, text before/after, "is between", and "or if
-  empty" for unavailable values.
+### Blocks
+
+- New Home category with one-block actions for switches, covers,
+  thermostats, media players, fans, locks, vacuums, scenes, scripts,
+  counters and helpers. "Say … on speakers", phone notifications and "turn
+  on … for 5 minutes then off" are single blocks, and so are readings like a
+  cover's position or a thermostat's temperature.
+- New Lights & colours category. One block sets a light to a colour or a
+  white temperature with brightness and fade; others set brightness, dim or
+  brighten by a step, and turn lights on, off or toggle them with a fade.
+  You can read a light's colour and brightness, and build colours from RGB or
+  hue, mix two, or pick one at random. "#rrggbb" text and colour names work
+  as colours too.
+- The toolbox follows Scratch's order: Events, Control and Sensing first,
+  and technical blocks (YAML, templates, cron, HTTP, dictionaries) under
+  Advanced. "When" blocks have a hat and triggers start with ⚡.
+- Blocks that read an entity have a socket, so a variable, the trigger
+  entity or a list item fits there, not only a typed-in ID.
+- Durations are "5 minutes" blocks everywhere, triggers included. Units come
+  after the number, and times are tidied up as you type ("7" becomes
+  "07:00").
+- Entity pickers show names and start empty ("choose…"). State and
+  attribute boxes suggest values, and blocks warn about entities that don't
+  exist in Home Assistant.
+- New triggers: "… becomes …" and "… arrives at / leaves a zone".
+- New conditions and values: "the sun is up", "someone is home", "today is
+  a weekday", "how many of … are on", "state of … 1 hour ago", "trigger
+  entity", "the wait timed out", "what ended the wait".
+- New control blocks: switch / case / otherwise, section labels for long
+  stacks, and "wait until it is 07:00".
+- New list and text blocks: "items of … where …" and "each item of … as …"
+  (with a "current item" block), regular expressions, text before or after
+  a separator, "is between", and "… or if empty …" for unavailable values.
+- Areas, floors, labels and devices work in "any/all of", averages, scene
+  blocks and loops.
+- Colour settings in Home Assistant and Zigbee2MQTT blocks take colour
+  blocks. Zigbee2MQTT group brightness and white temperature are now in %
+  and K; values in saved programs are converted when you open them.
+
+### Editor
+
+- Press Ctrl+Space (or middle-click the canvas), type what you want ("turn
+  off light", "wait until") and press Enter. The block attaches after the
+  selected one, or lands where you clicked.
+- Right-click a block to switch it to a related one (turn on, turn off,
+  toggle; an entity, area or floor; a device's other triggers). Its contents
+  and its place in the stack stay.
+- Right-click to find the uses of a variable, timer, entity, function or
+  area (repeat to step through them) and to rename a variable, timer or
+  entity everywhere in the program.
+- Right-click "Run this stack" runs one stack. Stacks outside any "when"
+  block run only this way, so you can keep test snippets next to a program;
+  they are drawn faded.
+- Programs can go in folders, nested if you like. Drag a program onto a
+  folder or use "Move". The search also looks at folders and descriptions.
+- The Favourites category at the top holds blocks you pin (right-click, Add
+  to favourites) and the ones you used last. The backpack (top right) keeps
+  blocks for use in other programs. Both follow you across browsers.
+- History keeps the last 30 saves that changed the blocks, and you can
+  restore any of them.
 - Alt+drag leaves a copy behind, Ctrl+drag pulls out a single block, and
   Ctrl+V pastes at the pointer.
-- Collapsed blocks show a summary ("when motion turns on → 6 blocks").
-- Long dropdowns get a filter box; stacks outside any "when" block are
-  drawn faded; the editor shows the program's block count.
-- **Lights & colours**: one-block light actions (set to a colour or a white
-  temperature with brightness and fade, set brightness, brighten/dim by a
-  step, on/off/toggle with fade), the current colour and brightness of a
-  light, and colour blocks (picker, RGB, hue, mix, random, parts of a
-  colour). Colours can also be "#rrggbb" text or colour names.
-- Credits for TurboWarp, Scratch Addons and PenguinMod, whose editors many of
-  these features are modelled on (Settings → About and the README).
-- **Home** category: one-block actions for switches, covers, thermostats,
-  media players (incl. "say … on speakers"), fans, locks, vacuums, scenes,
-  scripts, counters, helpers and phone notifications, plus "turn on … for 5
-  minutes then off", and readings like a cover's position or a thermostat's
-  temperature.
-- **Easier blocks**, after a usability review:
-  - Scratch-like toolbox: Events, Control, Sensing first; technical blocks
-    (YAML, templates, cron, HTTP, dictionaries…) moved to "Advanced".
-  - "When" blocks have a hat and triggers a ⚡, so it's clear what goes where.
-  - Blocks that read an entity take any block in their entity socket (a
-    variable, the trigger entity, a list item…), not only a typed-in id.
-  - Durations are "5 minutes" blocks everywhere, also in triggers; units
-    come after the number; times are tidied up ("7" → "07:00").
-  - Entity pickers show names and start empty ("choose…"); state boxes
-    suggest the entity's states; attributes are suggested too. Blocks warn
-    about entities that don't exist.
-  - New: "… becomes …" and "arrives at/leaves zone" triggers, "the sun is
-    up", "someone is home", "today is a weekday", "wait until it is 07:00",
-    "the wait timed out", "trigger entity", "how many of … are on", "state
-    of … 1 hour ago", "text matches", "hex code of colour".
-  - Areas, floors, labels and devices work in "any/all of", averages, scene
-    blocks and loops.
-  - A stack with a problem no longer stops the whole program: the rest runs.
-    Problems name the block and its slot in plain words.
-  - Colour settings of Home Assistant and Zigbee2MQTT blocks take colour
-    blocks; Zigbee2MQTT group brightness and white are in % and K (re-enter
-    those two values in existing group blocks).
-- Fixes: "−" in the math block, trim left/right, list insert/remove and sort
-  types, sensor states compared as text, "seconds since reported", trigger
-  details inside timers, state triggers no longer fire on attribute changes,
-  "every N minutes" values that don't divide an hour are reported.
+- Collapsed blocks show a summary such as "when motion turns on → 6 blocks".
+  Long dropdowns have a filter box, and the editor shows the block count.
+- Nested blocks of the same colour alternate between two shades. A compact
+  block size helps with big programs (Settings → Editor).
+- A stack with a problem no longer stops the whole program; the other stacks
+  keep running. Problems name the block and the slot in the block's own
+  words.
+- Settings → About and the README credit TurboWarp, Scratch Addons and
+  PenguinMod, whose editors many of these features are modelled on.
+
+### Fixes
+
+- The "−" option of the math block, trim left/right, list insert/remove at
+  any position, and list sort types work.
+- Two sensor states compare as numbers ("9.5" is less than "10.2").
+- "Seconds since … reported" uses the reported time.
+- Trigger details are available inside timers.
+- State triggers no longer fire when only an attribute changes.
+- "Every 60 minutes" and "every 24 hours" become every hour and every day;
+  intervals Home Assistant can't run are reported.
 
 ## 0.3.0
 

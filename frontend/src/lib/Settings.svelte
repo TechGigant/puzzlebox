@@ -186,7 +186,7 @@
       Many editor features are modelled on
       <a href="https://turbowarp.org" target="_blank" rel="noopener">TurboWarp</a>,
       <a href="https://scratchaddons.com" target="_blank" rel="noopener">Scratch Addons</a> and
-      <a href="https://penguinmod.com" target="_blank" rel="noopener">PenguinMod</a> (reimplemented, not copied). Entity
+      <a href="https://penguinmod.com" target="_blank" rel="noopener">PenguinMod</a>; Puzzlebox writes its own versions and contains none of their code. Entity
       state lists come from the <a href="https://github.com/home-assistant/frontend" target="_blank" rel="noopener">Home Assistant frontend</a>.
       Puzzlebox isn't affiliated with any of these projects.
     </p>

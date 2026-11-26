@@ -15,8 +15,9 @@ error handling, schedules, webhooks, HTTP requests and MQTT.
   and an entity picker. New integrations show up automatically.
 - Your devices' triggers, conditions and actions, grouped by area, and
   Zigbee2MQTT devices and groups as blocks.
-- Simple light blocks: set a colour or white temperature with brightness and
-  fade in one block, dim and brighten, and mix or pick colours.
+- One-line blocks for everyday things: open the blinds, set the thermostat to
+  21 °, say something on a speaker, send a phone notification, or set a
+  light's colour, brightness and fade in a single block.
 - Timers ("turn off 5 minutes after the last motion"), "wait until",
   rate limits, recorder history and scene cycling.
 - Real programming when you need it: variables (also ones that survive a
@@ -24,9 +25,9 @@ error handling, schedules, webhooks, HTTP requests and MQTT.
   branches.
 - A run history with step-by-step traces, a live log, and a debugger with
   breakpoints.
-- Editor helpers: add blocks by typing (Ctrl+Space), switch a block to a
-  related one, find and rename uses, run a single stack, favourites, a
-  backpack for reusing blocks across programs, version history and program
+- Editor tools borrowed from Scratch-style editors: add a block by typing
+  (Ctrl+Space), switch a block to a related one, find and rename uses, run
+  a single stack, favourites, a backpack, version history and program
   folders.
 - Import your existing automations and scripts.
 - Each program gets a switch and a run button in Home Assistant.
@@ -75,10 +76,10 @@ entities and the extra actions, events and webhooks aren't available.
 ## Getting started
 
 1. Open **Puzzlebox** from the sidebar and click **New program**.
-2. Drag a trigger from **Triggers** or **Home Assistant** into the *when*
-   block.
-3. Add actions under *do*, for example **Home Assistant → Light → Turn on
-   light**.
+2. Drag a trigger (the blocks with ⚡) from **Events** into the *when* block,
+   for example "… becomes on" with your motion sensor.
+3. Add actions under *do*, for example "set … to colour … at 80 %
+   brightness" from **Lights & colours**.
 4. Click **Save**. The program runs whenever the trigger fires, and the
    **Runs** tab shows what happened.
 
@@ -125,14 +126,14 @@ The editor is built on [Blockly](https://github.com/google/blockly), Google's
 open source library for block-based programming. Puzzlebox is an independent
 project and is not affiliated with or endorsed by Google.
 
-Many editor features are modelled on the Scratch community's editors:
+Many editor features copy ideas from Scratch community editors:
 [TurboWarp](https://turbowarp.org), the
 [Scratch Addons](https://scratchaddons.com) it bundles, and
 [PenguinMod](https://penguinmod.com). Type-to-add, block switching, zebra
-striping, Alt/Ctrl+drag, the backpack, faded loose stacks, searchable
-dropdowns, restore points, switch/case, list filters and section labels all
-come from their ideas. Puzzlebox reimplements them for Blockly and doesn't
-include their code. Thanks to everyone who works on those projects.
+striping, Alt/Ctrl+drag, faded loose stacks, searchable dropdowns, restore
+points, switch/case, list filters and section labels all started there.
+Puzzlebox writes its own versions for Blockly and contains none of their
+code. Thanks to everyone who works on those projects.
 
 The lists of entity states and option attributes come from the
 [Home Assistant frontend](https://github.com/home-assistant/frontend)

@@ -4,6 +4,7 @@
 import * as Blockly from 'blockly/core';
 import { allBlockDefs, blockDef } from '../blocks/dynamic';
 import { deviceAlternatives } from '../blocks/devices';
+import { optionNames } from '../blocks/conditions';
 
 export interface Alternative {
   label: string;
@@ -46,7 +47,17 @@ const GROUPS: [string, string][][] = [
     ['ha_is_state', 'is (state)'],
     ['ha_state_for', 'has been … for'],
     ['ha_has_value', 'has a value'],
+    ['ha_numeric_state', 'is above / below'],
     ['person_is_home', 'is home'],
+    ['zone_condition', 'is in zone'],
+  ],
+  [
+    ['sun_is', 'the sun is up'],
+    ['sun_condition', 'before / after sunrise or sunset'],
+  ],
+  [
+    ['ha_template', 'template'],
+    ['ha_template_condition', 'template is true'],
   ],
   [
     ['ha_entity', 'entity'],
@@ -91,9 +102,13 @@ export function alternatives(block: Blockly.Block): Alternative[] {
   return (group ?? []).filter(([t]) => t !== block.type && Blockly.Blocks[t]).map(([type, label]) => ({ label, type }));
 }
 
-/** Keeps the optional params of a generated block that the new type also has. */
+/** Keeps the optional params of a generated block (or settings of a condition) that the new type also has. */
 function carriedExtraState(block: Blockly.Block, type: string): unknown {
-  const extra = block.saveExtraState?.() as { optional?: string[] } | null | undefined;
+  const extra = block.saveExtraState?.() as { optional?: string[]; options?: string[] } | null | undefined;
+  if (extra?.options) {
+    const options = extra.options.filter((n) => optionNames(type).includes(n));
+    return options.length ? { options } : undefined;
+  }
   const def = blockDef(type);
   if (!def || !extra?.optional) return undefined;
   const names = new Set(def.params.map((p) => p.name));

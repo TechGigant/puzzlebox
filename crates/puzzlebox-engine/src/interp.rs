@@ -13,7 +13,7 @@ use puzzlebox_storage::Store;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::ha::HaApi;
+use crate::ha::{ConditionError, HaApi};
 use crate::value::{self, to_num, to_text, truthy};
 
 pub const MAX_STEPS: u64 = 5_000_000;
@@ -245,6 +245,23 @@ impl RunCtx {
             trace.truncated = true;
         }
         Ok(())
+    }
+
+    /// Like HA's scripts: a condition that raised counts as false, with a warning.
+    fn condition_raised(&self, block: &str, message: &str) {
+        let message = format!("condition counted as false: {message}");
+        {
+            let mut trace = lock(&self.trace);
+            // "wait until" checks every second; warn once per block and message.
+            if trace.steps.iter().any(|s| s.block == block && s.error.as_ref() == Some(&message)) {
+                return;
+            }
+            if trace.steps.len() < MAX_TRACE {
+                let t = self.started.elapsed().as_millis() as u64;
+                trace.steps.push(TraceEntry { block: block.to_owned(), t, error: Some(message.clone()) });
+            }
+        }
+        self.hooks.on_log(self, LogLevel::Warning, &message);
     }
 
     pub fn exec_block<'a>(&'a self, frame: &'a Frame, stmts: &'a [Stmt]) -> BoxFuture<'a, R<Flow>> {
@@ -647,7 +664,14 @@ impl RunCtx {
                 }
                 ExprKind::Condition { config, args } => {
                     let config = self.substitute(frame, config, args).await?;
-                    json!(self.ha.test_condition(config, self.ha_vars(frame)).await.at(id)?)
+                    match self.ha.check_condition(config, self.ha_vars(frame)).await {
+                        Ok(b) => json!(b),
+                        Err(ConditionError::Raised(m)) => {
+                            self.condition_raised(id, &m);
+                            json!(false)
+                        }
+                        Err(ConditionError::Failed(m)) => return Err(RunError::at(id, m)),
+                    }
                 }
                 ExprKind::Template { template } => {
                     self.ha.render_template(template, self.ha_vars(frame)).await.at(id)?

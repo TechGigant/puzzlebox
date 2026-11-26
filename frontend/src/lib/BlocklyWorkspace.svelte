@@ -6,6 +6,7 @@
   import { registerCoreBlocks } from './blocks/core';
   import { registerDeviceBlocks, registerDeviceCallbacks } from './blocks/devices';
   import { registerHelperBlocks } from './blocks/helpers';
+  import { registerConditionBlocks } from './blocks/conditions';
   import { registry } from './registry.svelte';
   import { registerSwitchMenu } from './editor/switching';
   import { registerUsageMenu } from './editor/usages';
@@ -16,6 +17,7 @@
   registerCoreBlocks();
   registerDeviceBlocks();
   registerHelperBlocks();
+  registerConditionBlocks();
   registerSwitchMenu();
   registerUsageMenu();
   registerFavouritesMenu();

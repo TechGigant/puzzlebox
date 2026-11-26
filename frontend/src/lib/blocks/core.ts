@@ -2,6 +2,7 @@ import * as Blockly from 'blockly/core';
 import { registerFieldMultilineInput } from '@blockly/field-multilineinput';
 import { registerFieldColour } from '@blockly/field-colour';
 import { registerFieldEntity } from './field_entity';
+import { registerConditionOptions } from './conditions';
 
 type Json = Record<string, unknown>;
 
@@ -193,7 +194,17 @@ export const CORE_BLOCKS: Json[] = [
   expr('ha_device', 'device %1', [{ type: 'field_registry', name: 'ID', text: '', kind: 'device' }], null, 'condition_blocks', 'A device, usable as an action target.'),
   expr('ha_state', 'state of %1', [value('ENTITY')], 'String', 'condition_blocks', 'What an entity is right now ("on", "21.5", "home"…), as text.'),
   expr('ha_attribute', '%1 of %2', [{ type: 'field_attribute', name: 'ATTRIBUTE', text: 'friendly_name' }, value('ENTITY')], null, 'condition_blocks', 'A detail (attribute) of an entity, e.g. a light\'s brightness (0–255) or a thermostat\'s target temperature.'),
-  expr('ha_is_state', '%1 is %2', [value('ENTITY'), stateValue('STATE', 'on')], 'Boolean', 'condition_blocks', 'True if the entity is in this state.'),
+  {
+    ...expr(
+      'ha_is_state',
+      '%1 is %2',
+      [value('ENTITY'), stateValue('STATE', 'on')],
+      'Boolean',
+      'condition_blocks',
+      'True if the entity is in this state. Several states can be separated with commas (any of them counts). Use ＋ to compare a detail (attribute) instead, or to need just one of several entities.',
+    ),
+    mutator: 'pb_condition_options',
+  },
   expr('ha_condition_raw', 'HA condition (YAML) %1', [multiline('CONFIG', 'condition: state\nentity_id: sun.sun\nstate: below_horizon')], 'Boolean', 'condition_blocks', 'Any native Home Assistant condition, written as YAML.'),
   expr('ha_template', 'template %1', [multiline('TEMPLATE', "{{ states('sun.sun') }}")], null, 'condition_blocks', 'Rendered by Home Assistant. Program variables and "trigger" are available.'),
   expr('ha_trigger_data', 'trigger detail %1', [text('PATH', 'to_state.state')], null, 'trigger_blocks', 'Any detail of what started this run, by its path (e.g. to_state.attributes.brightness).'),
@@ -227,14 +238,17 @@ export const CORE_BLOCKS: Json[] = [
   expr('duration', '%1 %2', [value('N', 'Number'), dropdown('UNIT', [['seconds', 'seconds'], ['minutes', 'minutes'], ['hours', 'hours'], ['days', 'days']])], 'Number', 'time_blocks', 'A duration in seconds.'),
 
   // --- more state & conditions ---------------------------------------------------
-  expr(
-    'ha_state_for',
-    '%1 has been %2 for %3',
-    [value('ENTITY'), stateValue('STATE', 'off'), value('SECONDS', 'Number')],
-    'Boolean',
-    'condition_blocks',
-    'True if the entity has been in the state for at least the given time.',
-  ),
+  {
+    ...expr(
+      'ha_state_for',
+      '%1 has been %2 for %3',
+      [value('ENTITY'), stateValue('STATE', 'off'), value('SECONDS', 'Number')],
+      'Boolean',
+      'condition_blocks',
+      'True if the entity has been in the state for at least the given time. Several states can be separated with commas.',
+    ),
+    mutator: 'pb_condition_options',
+  },
   expr('ha_has_value', '%1 has a value', [value('ENTITY')], 'Boolean', 'condition_blocks', 'False while the entity is unknown or unavailable (or doesn\'t exist).'),
   expr('ha_number_state', '%1 as a number (or %2 if unknown)', [value('ENTITY'), value('DEFAULT', 'Number')], 'Number', 'condition_blocks', 'The state as a number, for sensors. When the sensor has no number right now, you get the second value instead.'),
   expr('ha_friendly_name', 'name of %1', [value('ENTITY')], 'String', 'condition_blocks', 'The name of an entity as shown in Home Assistant.'),
@@ -573,6 +587,7 @@ export function registerCoreBlocks(): void {
   registerFieldColour();
   registerFieldEntity();
   Blockly.fieldRegistry.register('field_trigger_ref', FieldTriggerRef);
+  registerConditionOptions();
   for (const b of CORE_BLOCKS) {
     if ((b as { nextStatement?: unknown }).nextStatement === undefined) delete (b as Json).nextStatement;
   }

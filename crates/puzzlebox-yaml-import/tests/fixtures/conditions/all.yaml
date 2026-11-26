@@ -63,6 +63,15 @@ conditions:
   - condition: state
     entity_id: person.anna
     state: not_home
+  - condition: state
+    entity_id: climate.living
+    attribute: hvac_action
+    state: [heating, idle]
+  - condition: state
+    entity_id: [binary_sensor.a, binary_sensor.b]
+    state: "on"
+    match: any
+    for: 30
   # numeric_state
   - condition: numeric_state
     entity_id: sensor.temperature
@@ -79,6 +88,9 @@ conditions:
     entity_id: sensor.temperature
     value_template: "{{ float(state.state) + 2 }}"
     below: 25
+  - condition: numeric_state
+    entity_id: sensor.temperature
+    above: "17.5"
   # template
   - condition: template
     value_template: "{{ is_state('device_tracker.iphone', 'away') }}"
@@ -106,11 +118,17 @@ conditions:
   - condition: sun
     before: sunrise
     after: sunset
+  - condition: sun
+    before: sunset
+    before_offset: {minutes: -30}
   - condition: sun.is_up
   # zone
   - condition: zone
     entity_id: person.anna
     zone: zone.home
+  - condition: zone
+    entity_id: [person.anna, person.bob]
+    zone: [zone.home, zone.work]
   - condition: zone.in_zone
     target: {entity_id: person.anna}
     options: {zone: zone.work}

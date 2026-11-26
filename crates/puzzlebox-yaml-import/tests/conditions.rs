@@ -86,13 +86,9 @@ fn state_entity_lists_and_state_lists() {
         "- condition: state\n  entity_id: alarm_control_panel.home\n  state: [armed_away, armed_home]",
     );
     let b = cond_block(&imp);
-    assert_eq!(ty(b), "logic_operation");
-    assert_eq!(b["fields"]["OP"], "OR");
-    let e = cond_expr(&imp);
-    let (op, l, r) = binary(&e);
-    assert_eq!(op, BinOp::Or);
-    assert_eq!(ha_config(l)["state"], "armed_away");
-    assert_eq!(ha_config(r)["state"], "armed_home");
+    assert_eq!(ty(b), "ha_is_state");
+    assert_eq!(b["fields"]["STATE"], "armed_away, armed_home");
+    assert_eq!(ha_config(&cond_expr(&imp))["state"], json!(["armed_away", "armed_home"]));
 
     // A state naming an input_* entity is compared by HA, so it passes through.
     let imp = import("- condition: state\n  entity_id: input_select.mode\n  state: input_select.wanted");
@@ -124,20 +120,64 @@ fn state_for() {
     let imp = import(
         "- condition: state\n  entity_id: binary_sensor.w\n  state: [\"off\", unavailable]\n  for: 45",
     );
-    let e = cond_expr(&imp);
-    let (op, l, r) = binary(&e);
-    assert_eq!(op, BinOp::Or);
-    assert_eq!(ha_config(l)["for"]["seconds"], 45);
-    assert_eq!(ha_config(r)["state"], "unavailable");
+    assert_eq!(ty(cond_block(&imp)), "ha_state_for");
+    assert_eq!(
+        ha_config(&cond_expr(&imp)),
+        json!({"condition": "state", "entity_id": "binary_sensor.w", "state": ["off", "unavailable"],
+            "for": {"seconds": 45}})
+    );
+}
+
+#[test]
+fn state_options() {
+    let imp = import("- condition: state\n  entity_id: [light.a, light.b]\n  state: \"on\"\n  match: any");
+    let b = cond_block(&imp);
+    assert_eq!(ty(b), "ha_is_state");
+    assert_eq!(b["extraState"], json!({"options": ["MATCH"]}));
+    assert_eq!(
+        ha_config(&cond_expr(&imp)),
+        json!({"condition": "state", "entity_id": "light.a,light.b", "state": "on", "match": "any"})
+    );
+
+    let imp = import("- condition: state\n  entity_id: [light.a, light.b]\n  state: [\"on\", \"off\"]");
+    assert_eq!(ha_config(&cond_expr(&imp))["state"], json!(["on", "off"]));
+
+    // Attribute values keep their YAML type.
+    for (state, want) in [
+        ("255", json!(255)),
+        ("[1.5, 2]", json!([1.5, 2])),
+        ("true", json!(true)),
+        ("heat", json!("heat")),
+        ("[heating, idle]", json!(["heating", "idle"])),
+    ] {
+        let imp = import(&format!(
+            "- condition: state\n  entity_id: light.a\n  attribute: brightness\n  state: {state}"
+        ));
+        let b = cond_block(&imp);
+        assert_eq!(b["extraState"], json!({"options": ["ATTRIBUTE"]}), "{state}");
+        assert_eq!(
+            ha_config(&cond_expr(&imp)),
+            json!({"condition": "state", "entity_id": "light.a", "attribute": "brightness", "state": want})
+        );
+    }
+
+    let imp = import(
+        "- condition: state\n  entity_id: [light.a, light.b]\n  state: \"off\"\n  match: any\n  for: 30",
+    );
+    let b = cond_block(&imp);
+    assert_eq!(ty(b), "ha_state_for");
+    assert_eq!(ha_config(&cond_expr(&imp))["match"], "any");
 }
 
 #[test]
 fn state_forms_kept_raw() {
     for c in [
-        // HA reports an unknown entity even when another one matches.
-        "- condition: state\n  entity_id: [light.a, light.b]\n  state: \"on\"\n  match: any",
-        "- condition: state\n  entity_id: light.a\n  attribute: brightness\n  state: 255",
-        "- condition: state\n  entity_id: [light.a, light.b]\n  state: [\"on\", \"off\"]",
+        // The block would send these as numbers or split them.
+        "- condition: state\n  entity_id: light.a\n  attribute: brightness\n  state: \"255\"",
+        "- condition: state\n  entity_id: light.a\n  state: \"a, b\"",
+        "- condition: state\n  entity_id: light.a\n  state: [\" on\", \"off\"]",
+        // HA rejects `for` with an attribute.
+        "- condition: state\n  entity_id: light.a\n  attribute: brightness\n  state: 255\n  for: 5",
         "- condition: state\n  entity_id: light.a\n  state: \"on\"\n  for: \"{{ minutes }}\"",
         "- condition: state\n  entity_id: light.a\n  state: \"on\"\n  for: \"-00:05\"",
         "- condition: state\n  entity_id: light.a\n  state: 5",
@@ -172,13 +212,70 @@ fn state_as_friendlier_blocks() {
 }
 
 #[test]
-fn numeric_state_template_sun_zone_and_integrations_stay_raw() {
+fn numeric_state_sun_and_zone() {
+    for (c, want, options) in [
+        (
+            "- condition: numeric_state\n  entity_id: sensor.t\n  above: 17\n  below: 25.5",
+            json!({"condition": "numeric_state", "entity_id": "sensor.t", "above": 17, "below": 25.5}),
+            Value::Null,
+        ),
+        (
+            "- condition: numeric_state\n  entity_id: [sensor.a, sensor.b]\n  attribute: x\n  below: input_number.max",
+            json!({"condition": "numeric_state", "entity_id": "sensor.a,sensor.b", "attribute": "x",
+                "below": "input_number.max"}),
+            json!({"options": ["ATTRIBUTE"]}),
+        ),
+        (
+            "- condition: numeric_state\n  entity_id: sensor.t\n  above: \"3\"\n  value_template: \"{{ state.state | float * 2 }}\"",
+            json!({"condition": "numeric_state", "entity_id": "sensor.t", "above": 3,
+                "value_template": "{{ state.state | float * 2 }}"}),
+            json!({"options": ["VALUE_TEMPLATE"]}),
+        ),
+        (
+            "- condition: sun\n  after: sunset\n  after_offset: \"-01:00:00\"",
+            json!({"condition": "sun", "after": "sunset", "after_offset": "-01:00:00"}),
+            Value::Null,
+        ),
+        (
+            "- condition: sun\n  before: sunrise\n  after: sunset\n  before_offset: 1800",
+            json!({"condition": "sun", "after": "sunset", "before": "sunrise", "before_offset": "00:30:00"}),
+            json!({"options": ["SECOND"]}),
+        ),
+        (
+            "- condition: sun\n  before: sunset\n  before_offset: {minutes: 45}",
+            json!({"condition": "sun", "before": "sunset", "before_offset": "00:45:00"}),
+            Value::Null,
+        ),
+        (
+            "- condition: zone\n  entity_id: person.anna\n  zone: zone.home",
+            json!({"condition": "zone", "entity_id": "person.anna", "zone": "zone.home"}),
+            Value::Null,
+        ),
+        (
+            "- condition: zone\n  entity_id: [person.anna, person.bob]\n  zone: [zone.home, zone.work]",
+            json!({"condition": "zone", "entity_id": "person.anna,person.bob", "zone": ["zone.home", "zone.work"]}),
+            Value::Null,
+        ),
+    ] {
+        let imp = import(c);
+        assert_eq!(imp.raw_blocks, 0, "{c}");
+        assert_eq!(cond_block(&imp)["extraState"], options, "{c}");
+        assert_eq!(ha_config(&cond_expr(&imp)), want, "{c}");
+    }
+}
+
+#[test]
+fn numeric_state_sun_zone_and_integrations_kept_raw() {
     for c in [
-        "- condition: numeric_state\n  entity_id: sensor.t\n  above: 17\n  below: 25",
-        "- condition: numeric_state\n  entity_id: sensor.t\n  attribute: x\n  below: input_number.max",
-        "- condition: sun\n  after: sunset\n  after_offset: \"-01:00:00\"",
+        "- condition: numeric_state\n  entity_id: sensor.t\n  above: \"{{ limit }}\"",
+        "- condition: numeric_state\n  entity_id: sensor.t\n  above: light.x",
+        "- condition: numeric_state\n  entity_id: sensor.t\n  value_template: \"{{ 1 }}\"",
+        "- condition: sun\n  after: sunset\n  before_offset: \"00:10:00\"",
+        "- condition: sun\n  after: sunset\n  after_offset: 0.5",
+        "- condition: sun\n  before: sunset\n  before_offset: {minutes: -45}",
         "- condition: sun.is_up",
-        "- condition: zone\n  entity_id: person.anna\n  zone: zone.home",
+        "- condition: zone\n  entity_id: person.anna\n  zone: \"{{ z }}\"",
+        "- condition: zone.in_zone\n  target: {entity_id: person.anna}\n  options: {zone: zone.work}",
         "- condition: light.is_on\n  target: {area_id: kitchen}\n  options: {behavior: any}",
     ] {
         let imp = import(c);
@@ -193,6 +290,7 @@ fn numeric_state_template_sun_zone_and_integrations_stay_raw() {
 #[test]
 fn template_conditions() {
     let boolean = ["logic_boolean", "logic_compare", "logic_operation", "logic_negate", "ha_is_state"];
+    let mut kept = 0;
     for c in [
         "- condition: template\n  value_template: \"{{ is_state('light.a', 'on') }}\"",
         "- \"{{ now().hour >= 18 }}\"",
@@ -201,15 +299,18 @@ fn template_conditions() {
     ] {
         let imp = import(c);
         let b = cond_block(&imp);
-        if ty(b) == "ha_condition_raw" {
-            let cfg = raw_yaml(b);
+        assert_eq!(imp.raw_blocks, 0, "{c}");
+        if ty(b) == "ha_template_condition" {
+            kept += 1;
+            let cfg = ha_config(&cond_expr(&imp));
             assert_eq!(cfg["condition"], "template", "{c}");
-            assert!(cfg["value_template"].as_str().unwrap().contains("{{"));
+            assert_eq!(cfg["value_template"], b["fields"]["TEMPLATE"]);
         } else {
             assert!(boolean.contains(&ty(b)), "{c}: {}", ty(b));
         }
         cond_expr(&imp);
     }
+    assert!(kept >= 1, "states('sensor.x') has no exact block");
 }
 
 #[test]
@@ -345,7 +446,7 @@ fn and_or_not() {
 
 #[test]
 fn all_raw_parts_stay_one_raw_condition() {
-    let c = "- or:\n  - condition: numeric_state\n    entity_id: sensor.a\n    above: 1\n  - condition: sun\n    after: sunset";
+    let c = "- or:\n  - condition: sun.is_up\n  - condition: sun.is_set";
     let imp = import(c);
     assert_eq!(imp.raw_blocks, 1);
     let cfg = raw_yaml(cond_block(&imp));
@@ -354,16 +455,16 @@ fn all_raw_parts_stay_one_raw_condition() {
 
     // A whole list of raw conditions becomes one raw AND.
     let imp = import(
-        "- condition: sun\n  after: sunset\n- condition: zone\n  entity_id: person.a\n  zone: zone.home",
+        "- condition: sun.is_up\n- condition: zone.in_zone\n  target: {entity_id: person.a}\n  options: {zone: zone.home}",
     );
     assert_eq!(imp.raw_blocks, 1);
     let cfg = raw_yaml(cond_block(&imp));
     assert_eq!(cfg["condition"], "and");
-    assert_eq!(ha_config(&cond_expr(&imp))["conditions"][1]["condition"], "zone");
+    assert_eq!(ha_config(&cond_expr(&imp))["conditions"][1]["condition"], "zone.in_zone");
 
     // Mixed: native parts stay native.
     let imp = import(
-        "- or:\n  - condition: state\n    entity_id: light.a\n    state: \"on\"\n  - condition: sun\n    after: sunset",
+        "- or:\n  - condition: state\n    entity_id: light.a\n    state: \"on\"\n  - condition: sun.is_up",
     );
     assert_eq!(imp.raw_blocks, 1);
     let blk = cond_block(&imp);
@@ -417,7 +518,7 @@ fn alias_becomes_a_comment() {
     cond_expr(&imp);
 
     // Raw blocks keep the alias in their YAML.
-    let imp = import("- condition: sun\n  alias: After dark\n  after: sunset");
+    let imp = import("- condition: sun.is_set\n  alias: After dark");
     let b = cond_block(&imp);
     assert!(b.get("icons").is_none());
     assert_eq!(raw_yaml(b)["alias"], "After dark");
@@ -445,6 +546,9 @@ fn imports_every_condition_form() {
         "logic_operation",
         "ha_condition_raw",
         "ha_template",
+        "ha_numeric_state",
+        "sun_condition",
+        "zone_condition",
     ] {
         assert!(types.contains(&want.to_owned()), "{want} missing");
     }
@@ -454,26 +558,8 @@ fn imports_every_condition_form() {
     let templates = raw.iter().filter(|k| *k == "template").count();
     assert!(templates <= 4, "{raw:?}");
     raw.retain(|k| k != "template");
-    let want = [
-        "state",
-        "state",
-        "state",
-        "state",
-        "numeric_state",
-        "numeric_state",
-        "numeric_state",
-        "numeric_state",
-        "time",
-        "sun",
-        "sun",
-        "sun.is_up",
-        "zone",
-        "zone.in_zone",
-        "trigger",
-        "light.is_on",
-        "light.brightness",
-        "or",
-    ];
+    let want =
+        ["state", "time", "sun", "sun.is_up", "zone.in_zone", "trigger", "light.is_on", "light.brightness"];
     assert_eq!(raw, want);
     let json = serde_json::to_string(&imp.workspace).unwrap();
     assert!(!json.contains("light.disabled"), "disabled conditions are left out");

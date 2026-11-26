@@ -32,6 +32,10 @@ pub trait HaApi: Send + Sync + 'static {
     /// Cached full state object (`{entity_id, state, attributes, ...}`).
     fn state(&self, entity_id: &str) -> Option<Value>;
     async fn test_condition(&self, condition: Value, variables: Value) -> Result<bool, String>;
+    /// Like `test_condition`, but tells conditions that raised while HA checked them apart.
+    async fn check_condition(&self, condition: Value, variables: Value) -> Result<bool, ConditionError> {
+        self.test_condition(condition, variables).await.map_err(ConditionError::Failed)
+    }
     async fn execute_script(&self, sequence: Value, variables: Value) -> Result<Value, String>;
     async fn render_template(&self, template: &str, variables: Value) -> Result<Value, String>;
     async fn fire_event(&self, event_type: &str, data: Option<Value>) -> Result<(), String>;
@@ -46,6 +50,31 @@ pub trait HaApi: Send + Sync + 'static {
         _end: &str,
     ) -> Result<Vec<(f64, String)>, String> {
         Err("history is not available".into())
+    }
+}
+
+/// Why HA gave no answer to a condition test.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConditionError {
+    /// HA checked the condition and it raised (unknown entity, a state that isn't a number…).
+    /// HA's own scripts count that as false, with a warning.
+    Raised(String),
+    /// Anything else: an invalid config, a lost connection…
+    Failed(String),
+}
+
+impl ConditionError {
+    fn from_client(e: puzzlebox_ha_client::Error) -> Self {
+        match e {
+            // test_condition sends HA's ConditionError as a home_assistant_error, and its text
+            // always starts with "In '<condition>'"; errors from setting the condition up don't.
+            puzzlebox_ha_client::Error::Ha { code, message }
+                if code == "home_assistant_error" && message.starts_with("In '") =>
+            {
+                Self::Raised(message)
+            }
+            e => Self::Failed(e.to_string()),
+        }
     }
 }
 
@@ -166,6 +195,10 @@ impl HaApi for LiveHa {
         self.client.test_condition(condition, Some(variables)).await.map_err(|e| e.to_string())
     }
 
+    async fn check_condition(&self, condition: Value, variables: Value) -> Result<bool, ConditionError> {
+        self.client.test_condition(condition, Some(variables)).await.map_err(ConditionError::from_client)
+    }
+
     async fn execute_script(&self, sequence: Value, variables: Value) -> Result<Value, String> {
         self.client.execute_script(sequence, Some(variables)).await.map_err(|e| e.to_string())
     }
@@ -211,5 +244,37 @@ impl HaApi for LiveHa {
             let trig = ev.pointer("/variables/trigger").cloned().unwrap_or(ev);
             Some((trig, sub))
         })))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use puzzlebox_ha_client::Error;
+
+    use super::ConditionError;
+
+    #[test]
+    fn only_errors_raised_by_the_check_count_as_false() {
+        let ha = |code: &str, message: &str| {
+            ConditionError::from_client(Error::Ha { code: code.into(), message: message.into() })
+        };
+        assert_eq!(
+            ha("home_assistant_error", "In 'state' condition: unknown entity light.x"),
+            ConditionError::Raised("In 'state' condition: unknown entity light.x".into())
+        );
+        assert!(matches!(
+            ha("home_assistant_error", "In 'and' (item 1 of 2):\n  In 'numeric_state'"),
+            ConditionError::Raised(_)
+        ));
+        assert!(matches!(
+            ha("invalid_format", "In 'x': required key not provided"),
+            ConditionError::Failed(_)
+        ));
+        assert!(matches!(
+            ha("home_assistant_error", "Invalid condition \"foo\" specified"),
+            ConditionError::Failed(_)
+        ));
+        assert!(matches!(ConditionError::from_client(Error::Disconnected), ConditionError::Failed(_)));
+        assert!(matches!(ConditionError::from_client(Error::NotConnected), ConditionError::Failed(_)));
     }
 }

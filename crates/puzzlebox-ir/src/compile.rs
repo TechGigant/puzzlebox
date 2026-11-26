@@ -7,6 +7,8 @@ use serde_json::{Map, Value, json};
 
 use crate::ir::*;
 
+#[path = "compile_conditions.rs"]
+mod conditions;
 #[path = "compile_helpers.rs"]
 mod helpers;
 
@@ -1286,15 +1288,7 @@ impl<'a> Compiler<'a> {
                     attribute: Some(Box::new(Expr::lit(b.id(), json!(attr)))),
                 }
             }
-            "ha_is_state" => {
-                let mut args = BTreeMap::new();
-                args.insert("entity".to_owned(), self.entity_expr(b));
-                let state = b.field_str("STATE").unwrap_or("").to_owned();
-                ExprKind::Condition {
-                    config: json!({"condition": "state", "entity_id": arg_placeholder("entity"), "state": state}),
-                    args,
-                }
-            }
+            "ha_is_state" => self.state_condition(b, false),
             "ha_condition_raw" => match parse_config(b.field_str("CONFIG").unwrap_or("")) {
                 Ok(v) => ExprKind::Condition { config: v, args: BTreeMap::new() },
                 Err(e) => {
@@ -1353,17 +1347,7 @@ impl<'a> Compiler<'a> {
                 let secs = self.value(b, "SECONDS");
                 self.builtin("engine:throttle", vec![key, secs])
             }
-            "ha_state_for" => {
-                let state = b.field_str("STATE").unwrap_or("").to_owned();
-                let mut args = BTreeMap::new();
-                args.insert("entity".to_owned(), self.entity_expr(b));
-                args.insert("for".to_owned(), self.value(b, "SECONDS"));
-                ExprKind::Condition {
-                    config: json!({"condition": "state", "entity_id": arg_placeholder("entity"), "state": state,
-                        "for": {"seconds": arg_placeholder("for")}}),
-                    args,
-                }
-            }
+            "ha_state_for" => self.state_condition(b, true),
             "time_is_between" => {
                 let mut cfg = json!({"condition": "time"});
                 for (field, key) in [("AFTER", "after"), ("BEFORE", "before")] {
@@ -1582,6 +1566,9 @@ impl<'a> Compiler<'a> {
             },
             _ => {
                 if let Some(k) = self.helper_expr(b) {
+                    return k;
+                }
+                if let Some(k) = self.condition_expr(b) {
                     return k;
                 }
                 let ext = self.ext;

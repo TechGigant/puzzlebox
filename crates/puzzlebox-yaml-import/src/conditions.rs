@@ -160,6 +160,47 @@ fn plain_id(v: &Value) -> Option<String> {
     s.trim().parse::<f64>().is_err().then(|| s.to_owned())
 }
 
+/// A state for the state box. Attribute values keep their type when the block compiles
+/// (numbers and true/false), so a text that looks like one can't be written in the box.
+fn state_text(v: &Value, attribute: bool) -> Option<String> {
+    let looks_typed =
+        |s: &str| matches!(serde_json::from_str::<Value>(s.trim()), Ok(Value::Number(_) | Value::Bool(_)));
+    match v {
+        Value::String(s) if !attribute || !looks_typed(s) => Some(s.clone()),
+        Value::Number(n) if attribute => Some(n.to_string()),
+        Value::Bool(b) if attribute => Some(b.to_string()),
+        _ => None,
+    }
+}
+
+/// A numeric_state limit: a number, or a number helper/sensor entity (HA's
+/// `NUMERIC_STATE_THRESHOLD_SCHEMA`).
+fn threshold_text(v: &Value) -> Option<String> {
+    match v {
+        Value::Number(n) => Some(n.to_string()),
+        Value::String(s) if s.trim().parse::<f64>().is_ok_and(f64::is_finite) => Some(s.trim().to_owned()),
+        Value::String(s) => {
+            let (domain, object) = s.split_once('.')?;
+            let slug = !object.is_empty()
+                && object.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_');
+            (["input_number", "number", "sensor", "zone"].contains(&domain) && slug).then(|| s.clone())
+        }
+        _ => None,
+    }
+}
+
+/// A sun offset in seconds, read like HA's `cv.time_period` (which allows negative ones).
+fn signed_seconds(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) if !is_template(s) => match s.trim().strip_prefix('-') {
+            Some(rest) => period_seconds(&json!(rest)).map(|x| -x),
+            None => period_seconds(&json!(s.trim())),
+        },
+        other => period_seconds(other),
+    }
+}
+
 fn is_input_entity(s: &str) -> bool {
     ["input_select.", "input_text.", "input_number.", "input_boolean.", "input_datetime."]
         .iter()
@@ -194,7 +235,7 @@ impl Builder {
     fn condition_in(&mut self, c: &Value, ctx: Ctx) -> Option<Value> {
         let Some(m) = c.as_object() else {
             return Some(match c {
-                Value::String(t) => self.template_cond(c, t),
+                Value::String(t) => self.template_cond(t),
                 _ => self.raw_condition(c),
             });
         };
@@ -227,12 +268,15 @@ impl Builder {
                     self.combinator(kind, &list(m.get("conditions")), c)
                 }
                 "state" => self.state_condition(c, m),
+                "numeric_state" => self.numeric_condition(c, m),
+                "sun" => self.sun_condition(c, m),
+                "zone" => self.zone_condition(c, m),
                 "time" => self.time_condition(c, m),
                 "trigger" => self.trigger_condition(c, m),
                 "device" => self.device_condition(c, m),
                 "template" => match m.get("value_template") {
                     Some(Value::String(t)) if only_keys(m, &with(&["value_template"])) => {
-                        self.template_cond(c, t)
+                        self.template_cond(t)
                     }
                     _ => self.raw_condition(c),
                 },
@@ -242,7 +286,7 @@ impl Builder {
                     cfg.insert("condition".into(), json!("template"));
                     cfg.insert("value_template".into(), json!(t));
                     if only_keys(m, &BASE) {
-                        self.template_cond(&Value::Object(cfg), t)
+                        self.template_cond(t)
                     } else {
                         self.raw_condition(&Value::Object(cfg))
                     }
@@ -303,13 +347,19 @@ impl Builder {
     }
 
     fn state_condition(&mut self, c: &Value, m: &Map<String, Value>) -> Value {
-        let keys_ok = only_keys(m, &with(&["entity_id", "state", "for", "match"]));
+        let keys_ok = only_keys(m, &with(&["entity_id", "state", "for", "match", "attribute"]));
         let ents = m.get("entity_id").and_then(entity_ids);
+        let attribute = match m.get("attribute") {
+            None => Some(None),
+            Some(Value::String(a)) if !a.is_empty() && a.trim() == a => Some(Some(a.clone())),
+            _ => None,
+        };
+        let typed = matches!(attribute, Some(Some(_)));
         let states: Option<Vec<String>> = match m.get("state") {
-            Some(Value::String(s)) => Some(vec![s.clone()]),
             Some(Value::Array(a)) if !a.is_empty() => {
-                a.iter().map(|s| s.as_str().map(str::to_owned)).collect::<Option<_>>()
+                a.iter().map(|s| state_text(s, typed)).collect::<Option<_>>()
             }
+            Some(s) if !s.is_array() => state_text(s, typed).map(|t| vec![t]),
             _ => None,
         };
         let any = match m.get("match").map(|v| v.as_str().map(str::to_lowercase)) {
@@ -322,50 +372,170 @@ impl Builder {
             None => Some(None),
             Some(f) => period_seconds(f).map(Some),
         };
-        let (true, Some(ents), Some(states), Some(any), Some(secs)) = (keys_ok, ents, states, any, secs)
+        let (true, Some(ents), Some(attribute), Some(states), Some(any), Some(secs)) =
+            (keys_ok, ents, attribute, states, any, secs)
         else {
             return self.raw_condition(c);
         };
-        // `match: any` (HA reports errors even when one entity matches) and several entities
-        // with several states have no exact block form; HA rejects `for` with an entity state.
-        if (any && ents.len() > 1)
-            || (ents.len() > 1 && states.len() > 1)
-            || (secs.is_some() && states.iter().any(|s| is_input_entity(s)))
-        {
+        // The block's box splits states at commas (and trims them when there are several).
+        let box_ok = states.iter().all(|s| !s.contains(','))
+            && (states.len() == 1 || states.iter().all(|s| !s.is_empty() && s.trim() == s));
+        // HA rejects `for` with an attribute or an entity state.
+        if !box_ok || (secs.is_some() && (attribute.is_some() || states.iter().any(|s| is_input_entity(s)))) {
             return self.raw_condition(c);
         }
         let ids = ents.join(",");
-        // One entity with several states: HA checks them in order, like an OR of the states.
-        let parts: Vec<Value> = states.iter().map(|s| self.is_state(&ids, s, secs)).collect();
-        self.join("OR", parts).expect("states is not empty")
-    }
-
-    fn is_state(&mut self, ids: &str, state: &str, secs: Option<f64>) -> Value {
-        let single = !ids.contains(',');
-        if let Some(secs) = secs {
-            let ent = self.entity(ids);
-            let dur = self.duration(secs);
-            let mut b = self.block("ha_state_for", json!({"STATE": state}), vec![], None);
-            b["inputs"] = json!({"ENTITY": {"shadow": ent}, "SECONDS": {"shadow": dur}});
+        if let ([state], None, false) = (states.as_slice(), &attribute, any)
+            && let Some(b) = self.friendlier_state(&ids, state, secs)
+        {
             return b;
         }
-        // These blocks compile to the same state condition.
-        if single && ids == "sun.sun" && (state == "above_horizon" || state == "below_horizon") {
-            let place = if state == "above_horizon" { "up" } else { "down" };
-            return self.block("sun_is", json!({"WHERE": place}), vec![], None);
+        let mut fields = json!({"STATE": states.join(", ")});
+        let mut options = Vec::new();
+        if let Some(a) = attribute {
+            fields["ATTRIBUTE"] = json!(a);
+            options.push("ATTRIBUTE");
         }
-        if single
-            && (ids.starts_with("person.") || ids.starts_with("device_tracker."))
+        if any {
+            fields["MATCH"] = json!("any");
+            options.push("MATCH");
+        }
+        let extra = (!options.is_empty()).then(|| json!({"options": options}));
+        let ent = self.entity(&ids);
+        let mut inputs = json!({"ENTITY": {"shadow": ent}});
+        let ty = match secs {
+            Some(secs) => {
+                inputs["SECONDS"] = json!({"shadow": self.duration(secs)});
+                "ha_state_for"
+            }
+            None => "ha_is_state",
+        };
+        let mut b = self.block(ty, fields, vec![], extra);
+        b["inputs"] = inputs;
+        b
+    }
+
+    /// Blocks that compile to the same state condition: "the sun is up", "… is home".
+    fn friendlier_state(&mut self, ids: &str, state: &str, secs: Option<f64>) -> Option<Value> {
+        if secs.is_some() || ids.contains(',') {
+            return None;
+        }
+        if ids == "sun.sun" && (state == "above_horizon" || state == "below_horizon") {
+            let place = if state == "above_horizon" { "up" } else { "down" };
+            return Some(self.block("sun_is", json!({"WHERE": place}), vec![], None));
+        }
+        if (ids.starts_with("person.") || ids.starts_with("device_tracker."))
             && (state == "home" || state == "not_home")
         {
             let ent = self.entity(ids);
             let place = if state == "home" { "home" } else { "away" };
             let mut b = self.block("person_is_home", json!({"WHERE": place}), vec![], None);
             b["inputs"] = json!({"ENTITY": {"shadow": ent}});
-            return b;
+            return Some(b);
         }
-        let ent = self.entity(ids);
-        let mut b = self.block("ha_is_state", json!({"STATE": state}), vec![], None);
+        None
+    }
+
+    fn numeric_condition(&mut self, c: &Value, m: &Map<String, Value>) -> Value {
+        let keys_ok = only_keys(m, &with(&["entity_id", "above", "below", "attribute", "value_template"]));
+        let ents = m.get("entity_id").and_then(entity_ids);
+        let bound = |k: &str| match m.get(k) {
+            None => Some(String::new()),
+            Some(v) => threshold_text(v),
+        };
+        let (above, below) = (bound("above"), bound("below"));
+        let text = |k: &str, trimmed: bool| match m.get(k) {
+            None => Some(None),
+            Some(Value::String(s)) if !s.trim().is_empty() && (!trimmed || s.trim() == s) => {
+                Some(Some(s.clone()))
+            }
+            _ => None,
+        };
+        let (true, Some(ents), Some(above), Some(below), Some(attribute), Some(template)) =
+            (keys_ok, ents, above, below, text("attribute", true), text("value_template", false))
+        else {
+            return self.raw_condition(c);
+        };
+        if above.is_empty() && below.is_empty() {
+            return self.raw_condition(c);
+        }
+        let mut fields = json!({"ABOVE": above, "BELOW": below});
+        let mut options = Vec::new();
+        if let Some(a) = attribute {
+            fields["ATTRIBUTE"] = json!(a);
+            options.push("ATTRIBUTE");
+        }
+        if let Some(t) = template {
+            fields["VALUE_TEMPLATE"] = json!(t);
+            options.push("VALUE_TEMPLATE");
+        }
+        let extra = (!options.is_empty()).then(|| json!({"options": options}));
+        let ent = self.entity(&ents.join(","));
+        let mut b = self.block("ha_numeric_state", fields, vec![], extra);
+        b["inputs"] = json!({"ENTITY": {"shadow": ent}});
+        b
+    }
+
+    fn sun_condition(&mut self, c: &Value, m: &Map<String, Value>) -> Value {
+        let event = |k: &str| match m.get(k) {
+            None => Some(None),
+            Some(Value::String(e)) => {
+                let e = e.to_lowercase();
+                (e == "sunrise" || e == "sunset").then_some(Some(e))
+            }
+            _ => None,
+        };
+        let offset = |k: &str| match m.get(k) {
+            None => Some(0.0),
+            Some(v) => signed_seconds(v).filter(|s| s.fract() == 0.0),
+        };
+        let (true, Some(after), Some(before), Some(after_off), Some(before_off)) = (
+            only_keys(m, &with(&["after", "before", "after_offset", "before_offset"])),
+            event("after"),
+            event("before"),
+            offset("after_offset"),
+            offset("before_offset"),
+        ) else {
+            return self.raw_condition(c);
+        };
+        // An offset without its event does nothing in HA; there's no block for that.
+        let lone_offset = (after.is_none() && m.contains_key("after_offset"))
+            || (before.is_none() && m.contains_key("before_offset"));
+        let mut limits: Vec<(&str, String, f64)> = Vec::new();
+        if let Some(e) = after {
+            limits.push(("after", e, after_off));
+        }
+        if let Some(e) = before {
+            limits.push(("before", e, before_off));
+        }
+        if limits.is_empty() || lone_offset {
+            return self.raw_condition(c);
+        }
+        let (when, event, secs) = &limits[0];
+        let mut fields = json!({"WHEN": when, "EVENT": event});
+        let mut inputs = json!({"OFFSET": {"shadow": self.duration(*secs)}});
+        let mut extra = None;
+        if let Some((when, event, secs)) = limits.get(1) {
+            fields["WHEN2"] = json!(when);
+            fields["EVENT2"] = json!(event);
+            inputs["SECOND"] = json!({"shadow": self.duration(*secs)});
+            extra = Some(json!({"options": ["SECOND"]}));
+        }
+        let mut b = self.block("sun_condition", fields, vec![], extra);
+        b["inputs"] = inputs;
+        b
+    }
+
+    fn zone_condition(&mut self, c: &Value, m: &Map<String, Value>) -> Value {
+        let (true, Some(ents), Some(zones)) = (
+            only_keys(m, &with(&["entity_id", "zone"])),
+            m.get("entity_id").and_then(entity_ids),
+            m.get("zone").and_then(entity_ids),
+        ) else {
+            return self.raw_condition(c);
+        };
+        let ent = self.entity(&ents.join(","));
+        let mut b = self.block("zone_condition", json!({"ZONE": zones.join(", ")}), vec![], None);
         b["inputs"] = json!({"ENTITY": {"shadow": ent}});
         b
     }
@@ -444,11 +614,11 @@ impl Builder {
     }
 
     /// Native when the template converts to a block that is always true or false (HA's check is
-    /// "renders `true`"), otherwise a raw template condition.
-    fn template_cond(&mut self, raw: &Value, template: &str) -> Value {
+    /// "renders `true`"), otherwise a template condition block, which HA renders.
+    fn template_cond(&mut self, template: &str) -> Value {
         match self.template_condition(template) {
             Some(b) => b,
-            None => self.raw_condition(raw),
+            None => self.block("ha_template_condition", json!({"TEMPLATE": template}), vec![], None),
         }
     }
 

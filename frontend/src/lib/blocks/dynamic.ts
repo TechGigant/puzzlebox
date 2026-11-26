@@ -81,6 +81,8 @@ const THRESHOLD_TYPES: [string, string][] = [
 
 setDomainResolver((parent, inputName) => {
   const def = defs.get(parent.type);
+  // Light helper blocks only take lights.
+  if (!def && parent.type.startsWith('light_') && inputName === 'TARGET') return { domains: ['light'] };
   if (!def) return { domains: [] };
   if (inputName === 'TARGET') return { domains: def.target?.domains ?? [], deviceClasses: def.target?.device_classes };
   const p = def.params.find((x) => slot(x) === inputName);

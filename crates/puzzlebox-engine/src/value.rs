@@ -151,6 +151,9 @@ fn deg(f: f64) -> f64 {
 }
 
 pub fn builtin(name: &str, args: &[Value]) -> VResult {
+    if let Some(r) = crate::colour::builtin(name, args) {
+        return r;
+    }
     let a = |i: usize| args.get(i).unwrap_or(&Value::Null);
     let n = |i: usize| to_num(a(i));
     Ok(match name {
@@ -473,6 +476,10 @@ pub fn ha_builtin(name: &str, a: &[Value], lookup: &dyn Fn(&str) -> Option<Value
         |e: &str| lookup(e).and_then(|s| s.get("state").and_then(Value::as_str).map(str::to_owned));
     Ok(match name {
         "ha:has_value" => json!(state_of(&to_text(&arg(0))).is_some_and(|s| usable(&s))),
+        "ha:light_colour" => lookup(&to_text(&arg(0))).map_or(Value::Null, |s| crate::colour::of_state(&s)),
+        "ha:light_brightness" => {
+            lookup(&to_text(&arg(0))).map_or(json!(0), |s| crate::colour::brightness_pct(&s))
+        }
         "ha:friendly_name" => {
             let e = to_text(&arg(0));
             lookup(&e)

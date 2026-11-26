@@ -14,6 +14,17 @@ export interface Alternative {
 /** Built-in blocks that can stand in for each other (same shape, mostly the same fields). */
 const GROUPS: [string, string][][] = [
   [
+    ['light_set_colour', 'set to colour'],
+    ['light_set_white', 'set to white'],
+    ['light_set_brightness', 'set brightness'],
+  ],
+  [
+    ['colour_picker', 'colour picker'],
+    ['colour_rgb255', 'colour from RGB'],
+    ['colour_hsv', 'colour from hue'],
+    ['colour_random', 'random colour'],
+  ],
+  [
     ['ha_trigger_state', 'state changes'],
     ['ha_trigger_numeric', 'goes above / below'],
   ],

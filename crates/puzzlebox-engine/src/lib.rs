@@ -1,5 +1,6 @@
 //! puzzlebox runtime.
 
+pub mod colour;
 mod debug;
 mod engine;
 mod ha;

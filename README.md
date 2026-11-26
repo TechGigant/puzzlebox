@@ -15,6 +15,8 @@ error handling, schedules, webhooks, HTTP requests and MQTT.
   and an entity picker. New integrations show up automatically.
 - Your devices' triggers, conditions and actions, grouped by area, and
   Zigbee2MQTT devices and groups as blocks.
+- Simple light blocks: set a colour or white temperature with brightness and
+  fade in one block, dim and brighten, and mix or pick colours.
 - Timers ("turn off 5 minutes after the last motion"), "wait until",
   rate limits, recorder history and scene cycling.
 - Real programming when you need it: variables (also ones that survive a
@@ -122,6 +124,19 @@ for how to build and test the project.
 The editor is built on [Blockly](https://github.com/google/blockly), Google's
 open source library for block-based programming. Puzzlebox is an independent
 project and is not affiliated with or endorsed by Google.
+
+Many editor features are modelled on the Scratch community's editors:
+[TurboWarp](https://turbowarp.org), the
+[Scratch Addons](https://scratchaddons.com) it bundles, and
+[PenguinMod](https://penguinmod.com). Type-to-add, block switching, zebra
+striping, Alt/Ctrl+drag, the backpack, faded loose stacks, searchable
+dropdowns, restore points, switch/case, list filters and section labels all
+come from their ideas. Puzzlebox reimplements them for Blockly and doesn't
+include their code. Thanks to everyone who works on those projects.
+
+The lists of entity states and option attributes come from the
+[Home Assistant frontend](https://github.com/home-assistant/frontend)
+(Apache-2.0).
 
 ## License
 

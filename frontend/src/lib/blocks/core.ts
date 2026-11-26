@@ -310,6 +310,72 @@ export const CORE_BLOCKS: Json[] = [
   expr('yaml_value', 'YAML %1', [multiline('CONFIG', '')], null, 'dict_blocks', 'A list, dictionary or other value written as YAML or JSON. Empty means "not set".'),
 
 
+  // --- lights & colours ----------------------------------------------------------
+  action(
+    'light_set_colour',
+    'set %1 to colour %2 brightness % %3 fade (s) %4',
+    [value('TARGET'), value('COLOUR'), value('BRIGHTNESS', 'Number'), value('TRANSITION', 'Number')],
+    'Turns lights on in a colour (a colour block, "#rrggbb" or a colour name). Leave brightness or fade empty to keep them as they are.',
+    'colour_blocks',
+  ),
+  action(
+    'light_set_white',
+    'set %1 to white (K) %2 brightness % %3 fade (s) %4',
+    [value('TARGET'), value('KELVIN', 'Number'), value('BRIGHTNESS', 'Number'), value('TRANSITION', 'Number')],
+    'Turns lights on in white: about 2200 K is candle-warm, 2700 K cosy, 4000 K neutral and 6500 K daylight.',
+    'colour_blocks',
+  ),
+  action(
+    'light_set_brightness',
+    'set brightness of %1 to % %2 fade (s) %3',
+    [value('TARGET'), value('BRIGHTNESS', 'Number'), value('TRANSITION', 'Number')],
+    'Turns lights on at a brightness, keeping their colour.',
+    'colour_blocks',
+  ),
+  action(
+    'light_step',
+    '%1 %2 by % %3 fade (s) %4',
+    [dropdown('DIRECTION', [['brighten', 'brighten'], ['dim', 'dim']]), value('TARGET'), value('STEP', 'Number'), value('TRANSITION', 'Number')],
+    'Makes lights brighter or dimmer by a step, e.g. for dimmer buttons.',
+    'colour_blocks',
+  ),
+  action(
+    'light_power',
+    '%1 %2 fade (s) %3',
+    [dropdown('MODE', [['turn on', 'on'], ['turn off', 'off'], ['toggle', 'toggle']]), value('TARGET'), value('TRANSITION', 'Number')],
+    'Turns lights on, off or toggles them, optionally fading.',
+    'colour_blocks',
+  ),
+  expr('light_colour', 'colour of %1', [entity('ENTITY', 'light.kitchen', ['light'])], 'Colour', 'colour_blocks', 'The current colour of a light ("#rrggbb"), or empty when it is off.'),
+  expr('light_brightness', 'brightness % of %1', [entity('ENTITY', 'light.kitchen', ['light'])], 'Number', 'colour_blocks', 'Brightness of a light in percent (0 when off).'),
+  expr('colour_picker', '%1', [{ type: 'field_colour', name: 'COLOUR', colour: '#ffcc66' }], 'Colour', 'colour_blocks', 'A colour.'),
+  expr(
+    'colour_rgb255',
+    'colour red %1 green %2 blue %3',
+    [value('RED', 'Number'), value('GREEN', 'Number'), value('BLUE', 'Number')],
+    'Colour',
+    'colour_blocks',
+    'A colour from red, green and blue (0–255).',
+  ),
+  expr(
+    'colour_hsv',
+    'colour hue %1 saturation % %2 brightness % %3',
+    [value('HUE', 'Number'), value('SATURATION', 'Number'), value('VALUE', 'Number')],
+    'Colour',
+    'colour_blocks',
+    'A colour from a hue (0–360: 0 red, 120 green, 240 blue), saturation and brightness.',
+  ),
+  expr('colour_mix', 'mix %1 with %2 by % %3', [value('A'), value('B'), value('RATIO', 'Number')], 'Colour', 'colour_blocks', 'Blends two colours: 0 % is the first, 100 % the second.'),
+  expr('colour_random', 'random colour', [], 'Colour', 'colour_blocks', 'A random bright colour.'),
+  expr(
+    'colour_part',
+    '%1 of colour %2',
+    [dropdown('PART', [['red', 'red'], ['green', 'green'], ['blue', 'blue'], ['hue', 'hue'], ['saturation', 'saturation'], ['brightness', 'value'], ['hex code', 'hex'], ['RGB list', 'rgb']]), value('COLOUR')],
+    null,
+    'colour_blocks',
+    'A part of a colour.',
+  ),
+
   // --- switch / organising ------------------------------------------------------
   {
     type: 'control_switch',

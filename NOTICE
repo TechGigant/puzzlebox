@@ -1,4 +1,14 @@
-ha-blockly
+Puzzlebox
 Copyright 2026 TechGigant
 
 This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product includes software developed by others:
+
+- Blockly and its plugins (https://github.com/google/blockly,
+  https://github.com/google/blockly-samples), Copyright Google LLC,
+  Apache License 2.0. Bundled into the editor.
+- The tables of entity states and option attributes in
+  frontend/src/lib/blocks/field_entity.ts follow the Home Assistant frontend
+  (https://github.com/home-assistant/frontend, src/common/entity/get_states.ts),
+  Copyright Home Assistant contributors, Apache License 2.0.

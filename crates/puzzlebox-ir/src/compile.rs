@@ -508,6 +508,82 @@ impl<'a> Compiler<'a> {
             }
             // A label for organising a stack; does nothing.
             "control_section" => return None,
+            "light_set_colour"
+            | "light_set_white"
+            | "light_set_brightness"
+            | "light_power"
+            | "light_step" => {
+                let opt = |c: &mut Self, slot: &str| {
+                    c.value_opt(&b, slot).unwrap_or_else(|| Expr::lit(b.id(), Value::Null))
+                };
+                let lit_ = |v: Value| Expr::lit(b.id(), v);
+                let (service, args) = match b.ty() {
+                    "light_set_colour" => (
+                        "light.turn_on",
+                        vec![
+                            lit_(json!("colour")),
+                            self.value(&b, "COLOUR"),
+                            opt(self, "BRIGHTNESS"),
+                            opt(self, "TRANSITION"),
+                        ],
+                    ),
+                    "light_set_white" => (
+                        "light.turn_on",
+                        vec![
+                            lit_(json!("white")),
+                            self.value(&b, "KELVIN"),
+                            opt(self, "BRIGHTNESS"),
+                            opt(self, "TRANSITION"),
+                        ],
+                    ),
+                    "light_set_brightness" => (
+                        "light.turn_on",
+                        vec![
+                            lit_(Value::Null),
+                            lit_(Value::Null),
+                            self.value(&b, "BRIGHTNESS"),
+                            opt(self, "TRANSITION"),
+                        ],
+                    ),
+                    "light_power" => {
+                        let service = match b.field_str("MODE") {
+                            Some("off") => "light.turn_off",
+                            Some("toggle") => "light.toggle",
+                            _ => "light.turn_on",
+                        };
+                        (
+                            service,
+                            vec![
+                                lit_(Value::Null),
+                                lit_(Value::Null),
+                                lit_(Value::Null),
+                                opt(self, "TRANSITION"),
+                            ],
+                        )
+                    }
+                    _ => ("light.turn_on", vec![]),
+                };
+                let data = if b.ty() == "light_step" {
+                    let args = vec![
+                        self.value(&b, "STEP"),
+                        lit_(json!(b.field_str("DIRECTION").unwrap_or("brighten"))),
+                        opt(self, "TRANSITION"),
+                    ];
+                    Expr { id: b.id().into(), kind: self.builtin("light_step", args) }
+                } else {
+                    Expr { id: b.id().into(), kind: self.builtin("light_data", args) }
+                };
+                let target = self.value_opt(&b, "TARGET");
+                if target.is_none() {
+                    self.err(&b, "choose the lights");
+                }
+                StmtKind::CallService {
+                    service: service.into(),
+                    target,
+                    data: Some(data),
+                    response_var: None,
+                }
+            }
             "control_switch" => {
                 // The value is computed once, then compared with each case in order.
                 let var = format!("__switch_{}", b.id());
@@ -1163,6 +1239,32 @@ impl<'a> Compiler<'a> {
                     format!(" | select('match', '{domain}\\.')")
                 };
                 ExprKind::Template { template: format!("{{{{ {func}('{name}'){filter} | list }}}}") }
+            }
+            "colour_picker" => lit(json!(b.field_str("COLOUR").unwrap_or("#ffffff").to_lowercase())),
+            "colour_rgb255" => {
+                let args = vec![self.value(b, "RED"), self.value(b, "GREEN"), self.value(b, "BLUE")];
+                self.builtin("colour_rgb", args)
+            }
+            "colour_hsv" => {
+                let args = vec![self.value(b, "HUE"), self.value(b, "SATURATION"), self.value(b, "VALUE")];
+                self.builtin("colour_hsv", args)
+            }
+            "colour_mix" => {
+                let args = vec![self.value(b, "A"), self.value(b, "B"), self.value(b, "RATIO")];
+                self.builtin("colour_blend", args)
+            }
+            "colour_random" => self.builtin("colour_random", vec![]),
+            "colour_part" => {
+                let args = vec![
+                    self.value(b, "COLOUR"),
+                    Expr::lit(b.id(), json!(b.field_str("PART").unwrap_or("hex"))),
+                ];
+                self.builtin("colour_part", args)
+            }
+            "light_colour" | "light_brightness" => {
+                let e = self.entity_expr(b);
+                let name = if b.ty() == "light_colour" { "ha:light_colour" } else { "ha:light_brightness" };
+                self.builtin(name, vec![e])
             }
             "logic_or_default" => {
                 let args = vec![self.value(b, "A"), self.value(b, "B")];

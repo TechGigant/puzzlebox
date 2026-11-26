@@ -32,6 +32,13 @@
 - Collapsed blocks show a summary ("when motion turns on → 6 blocks").
 - Long dropdowns get a filter box; stacks outside any "when" block are
   drawn faded; the editor shows the program's block count.
+- **Lights & colours**: one-block light actions (set to a colour or a white
+  temperature with brightness and fade, set brightness, brighten/dim by a
+  step, on/off/toggle with fade), the current colour and brightness of a
+  light, and colour blocks (picker, RGB, hue, mix, random, parts of a
+  colour). Colours can also be "#rrggbb" text or colour names.
+- Credits for TurboWarp, Scratch Addons and PenguinMod, whose editors many of
+  these features are modelled on (Settings → About and the README).
 
 ## 0.3.0
 

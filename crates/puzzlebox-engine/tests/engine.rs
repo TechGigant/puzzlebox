@@ -648,3 +648,61 @@ async fn switch_filter_map_and_text_helpers() {
     assert_eq!(vars["pct"], json!("42"));
     assert_eq!(vars["fb"], json!(0));
 }
+
+#[tokio::test]
+async fn light_helpers_build_light_actions() {
+    let (engine, ha) = setup().await;
+    let mut events = engine.subscribe();
+    ha.states.lock().unwrap().insert(
+        "light.a".into(),
+        json!({"entity_id": "light.a", "state": "on", "attributes": {"rgb_color": [255, 0, 0], "brightness": 255}}),
+    );
+    let target = || blk(text("tg", "light.a"));
+    let colour = b(
+        "colour_mix",
+        "mix",
+        json!({}),
+        json!({"A": blk(b("light_colour", "lc", json!({"ENTITY": "light.a"}), json!({}))),
+            "B": blk(b("colour_picker", "cp", json!({"COLOUR": "#0000FF"}), json!({}))),
+            "RATIO": blk(num("r", 50.0))}),
+    );
+    let set = b(
+        "light_set_colour",
+        "sc",
+        json!({}),
+        json!({"TARGET": target(), "COLOUR": blk(colour), "BRIGHTNESS": blk(num("br", 30.0)), "TRANSITION": blk(num("tr", 0.0))}),
+    );
+    let white =
+        b("light_set_white", "sw", json!({}), json!({"TARGET": target(), "KELVIN": blk(num("k", 2700.0))}));
+    let dim = b(
+        "light_step",
+        "st",
+        json!({"DIRECTION": "dim"}),
+        json!({"TARGET": target(), "STEP": blk(num("s", 10.0))}),
+    );
+    let off = b(
+        "light_power",
+        "pw",
+        json!({"MODE": "off"}),
+        json!({"TARGET": target(), "TRANSITION": blk(num("t2", 3.0))}),
+    );
+    let (_, errors) = engine
+        .save(program("li", workspace(vec![on_run(chain(vec![set, white, dim, off]))], json!([])), "single"))
+        .await
+        .unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(engine.run_now("li", None, None));
+    let (status, error) = next_finished(&mut events).await;
+    assert_eq!(status, "ok", "{error:?}");
+    let calls: Vec<(String, Option<Value>)> =
+        ha.calls.lock().unwrap().iter().map(|c| (c.0.clone(), c.1.clone())).collect();
+    assert_eq!(
+        calls,
+        [
+            ("light.turn_on".into(), Some(json!({"rgb_color": [128, 0, 128], "brightness_pct": 30.0}))),
+            ("light.turn_on".into(), Some(json!({"color_temp_kelvin": 2700}))),
+            ("light.turn_on".into(), Some(json!({"brightness_step_pct": -10.0}))),
+            ("light.turn_off".into(), Some(json!({"transition": 3.0}))),
+        ]
+    );
+}

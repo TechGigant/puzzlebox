@@ -177,6 +177,20 @@
       {/each}
     {/if}
   </section>
+
+  <section>
+    <h2>About</h2>
+    <p>Puzzlebox is open source under the Apache License 2.0.</p>
+    <p class="muted">
+      The editor is built on <a href="https://github.com/google/blockly" target="_blank" rel="noopener">Blockly</a> by Google.
+      Many editor features are modelled on
+      <a href="https://turbowarp.org" target="_blank" rel="noopener">TurboWarp</a>,
+      <a href="https://scratchaddons.com" target="_blank" rel="noopener">Scratch Addons</a> and
+      <a href="https://penguinmod.com" target="_blank" rel="noopener">PenguinMod</a> (reimplemented, not copied). Entity
+      state lists come from the <a href="https://github.com/home-assistant/frontend" target="_blank" rel="noopener">Home Assistant frontend</a>.
+      Puzzlebox isn't affiliated with any of these projects.
+    </p>
+  </section>
 </div>
 
 <style>

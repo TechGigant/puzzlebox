@@ -14,21 +14,32 @@ const RECENT_MAX = 12;
 let favourites: State[] = [];
 let recent: State[] = [];
 let loaded: Promise<void> | null = null;
+/** Saving is only safe once the stored lists were read; otherwise it would overwrite them. */
+let synced = false;
 
 export function loadFavourites(): Promise<void> {
   loaded ??= Promise.all([api.editorData<State>('favourites'), api.editorData<State>('recent')])
     .then(([f, r]) => {
-      favourites = f;
-      recent = r;
+      // Keep anything added while loading.
+      favourites = [...f, ...favourites.filter((x) => !f.some((y) => key(y) === key(x)))];
+      recent = [...recent, ...r.filter((x) => !recent.some((y) => y.type === x.type))].slice(0, RECENT_MAX);
+      synced = true;
     })
-    .catch(() => {});
+    .catch(() => {
+      // Try again next time the toolbox asks.
+      loaded = null;
+    });
   return loaded;
 }
 
 const timers: Record<string, ReturnType<typeof setTimeout>> = {};
-function persist(key: 'favourites' | 'recent', list: State[]) {
-  clearTimeout(timers[key]);
-  timers[key] = setTimeout(() => api.setEditorData(key, list).catch(() => {}), 800);
+function persist(which: 'favourites' | 'recent', list: State[]) {
+  if (!synced) {
+    loadFavourites();
+    return;
+  }
+  clearTimeout(timers[which]);
+  timers[which] = setTimeout(() => api.setEditorData(which, list).catch(() => {}), 800);
 }
 
 /** The block as a reusable template: no ids, no position, no blocks after it. */

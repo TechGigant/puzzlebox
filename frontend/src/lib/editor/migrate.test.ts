@@ -38,3 +38,23 @@ describe('migrateWorkspace', () => {
     expect(light.inputs.P_rgb_color.shadow).toEqual({ type: 'colour_picker', fields: { COLOUR: '#ff0000' } });
   });
 });
+
+describe('Zigbee2MQTT group units', () => {
+  it('converts 0–254 brightness and mired to % and K', () => {
+    const out = migrateWorkspace(
+      ws({
+        type: 'z2m__zigbee2mqtt__group3__set',
+        extraState: { optional: ['brightness', 'color_temp'] },
+        inputs: {
+          P_brightness: { shadow: { type: 'math_number', fields: { NUM: 254 } } },
+          P_color_temp: { block: { type: 'variables_get', fields: { VAR: { id: 'v' } } } },
+        },
+      }),
+    ) as { blocks: { blocks: { extraState: { optional: string[] }; inputs: Record<string, { shadow?: { fields: { NUM: number } }; block?: { type: string } }> }[] } };
+    const [g] = out.blocks.blocks;
+    expect(g.extraState.optional).toEqual(['brightness_percent', 'color_temp_kelvin']);
+    expect(g.inputs.P_brightness_percent.shadow?.fields.NUM).toBe(100);
+    expect(g.inputs.P_color_temp_kelvin.block?.type).toBe('math_arithmetic');
+    expect(g.inputs.P_brightness).toBeUndefined();
+  });
+});

@@ -678,10 +678,16 @@ impl RunHooks for EngineHooks {
         seconds: f64,
         mode: puzzlebox_ir::TimerMode,
         handler: &str,
+        data: Value,
     ) -> Result<(), String> {
         let started = self.with_program(ctx, |rp| {
-            let idx =
-                rp.program.handlers.iter().position(|h| h.id == handler).ok_or("timer body not found")?;
+            // A loose stack starting with this block shares its id; only the timer body counts.
+            let idx = rp
+                .program
+                .handlers
+                .iter()
+                .position(|h| h.id == handler && matches!(h.kind, HandlerKind::Timer { .. }))
+                .ok_or("timer body not found")?;
             let mut timers = lock(&rp.timers);
             if let Some(t) = timers.get(name) {
                 if !t.is_finished() && mode == puzzlebox_ir::TimerMode::Keep {
@@ -690,8 +696,7 @@ impl RunHooks for EngineHooks {
                 t.abort();
             }
             let (tx, timers_ref, key) = (rp.tx.clone(), rp.timers.clone(), name.to_owned());
-            let trigger =
-                json!({"platform": "timer", "timer": name, "id": handler, "started_by": ctx.trigger.clone()});
+            let trigger = json!({"platform": "timer", "timer": name, "id": handler, "started_by": ctx.trigger.clone(), "data": data});
             let task = tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs_f64(seconds)).await;
                 lock(&timers_ref).remove(&key);

@@ -197,11 +197,22 @@ impl Compiler<'_> {
             }
             "helper_set" => return Some(self.helper_set(b)),
             "device_on_for" => {
-                // Turn on now, and off again after the time with a timer of its own.
+                // Turn on now; a timer per target turns that same target off again later.
                 let on =
                     Stmt { id: b.id().into(), kind: self.service_call(b, "homeassistant.turn_on", vec![]) };
-                let off =
-                    Stmt { id: b.id().into(), kind: self.service_call(b, "homeassistant.turn_off", vec![]) };
+                let target = self.value_opt(b, "TARGET").unwrap_or_else(|| lit(Value::Null));
+                let off = Stmt {
+                    id: b.id().into(),
+                    kind: StmtKind::CallService {
+                        service: "homeassistant.turn_off".into(),
+                        target: Some(Expr {
+                            id: b.id().into(),
+                            kind: ExprKind::TriggerData { path: "data".into() },
+                        }),
+                        data: None,
+                        response_var: None,
+                    },
+                };
                 let name = format!("__on_for_{}", b.id());
                 self.timer_handlers.push(Handler {
                     id: b.id().into(),
@@ -215,6 +226,8 @@ impl Compiler<'_> {
                         seconds: self.value(b, "SECONDS"),
                         if_running: TimerMode::Restart,
                         handler: b.id().into(),
+                        data: Some(target.clone()),
+                        key: Some(target),
                     },
                 };
                 StmtKind::If { branches: vec![(lit(json!(true)), vec![on, start])], otherwise: None }

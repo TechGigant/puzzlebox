@@ -89,6 +89,7 @@ pub trait RunHooks: Send + Sync {
         _seconds: f64,
         _mode: TimerMode,
         _handler: &str,
+        _data: Value,
     ) -> Result<(), String> {
         Err("timers are not available".into())
     }
@@ -459,9 +460,17 @@ impl RunCtx {
             StmtKind::Plugin { plugin, block, args } => {
                 self.plugin_call(frame, id, plugin, block, args).await?;
             }
-            StmtKind::TimerStart { name, seconds, if_running, handler } => {
+            StmtKind::TimerStart { name, seconds, if_running, handler, data, key } => {
                 let secs = to_num(&self.eval(frame, seconds).await?).at(id)?.max(0.0);
-                self.hooks.timer_start(self, name, secs, *if_running, handler).at(id)?;
+                let data = match data {
+                    Some(d) => self.eval(frame, d).await?,
+                    None => Value::Null,
+                };
+                let name = match key {
+                    Some(k) => format!("{name}:{}", self.eval(frame, k).await?),
+                    None => name.clone(),
+                };
+                self.hooks.timer_start(self, &name, secs, *if_running, handler, data).at(id)?;
             }
             StmtKind::TimerCancel { name } => self.hooks.timer_cancel(self, name),
             StmtKind::WaitUntil { cond, hold, timeout } => {
@@ -740,11 +749,20 @@ impl RunCtx {
             ("label_id", "label_entities"),
             ("device_id", "device_entities"),
         ];
-        let is_target =
-            |m: &Map<String, Value>| m.keys().any(|k| k == "entity_id" || KINDS.iter().any(|(t, _)| t == k));
+        // Only what area/floor/label/device blocks make: nothing but target keys, and at least
+        // one that isn't entity_id. Other data (states, records) is left alone.
+        let is_target = |m: &Map<String, Value>| {
+            !m.is_empty()
+                && m.keys().all(|k| k == "entity_id" || KINDS.iter().any(|(t, _)| t == k))
+                && m.keys().any(|k| KINDS.iter().any(|(t, _)| t == k))
+        };
         let has_target = match &v {
             Value::Object(m) => is_target(m),
-            Value::Array(items) => items.iter().any(|i| i.as_object().is_some_and(is_target)),
+            // A list mixing entity ids and area/… blocks.
+            Value::Array(items) => {
+                items.iter().any(|i| i.as_object().is_some_and(is_target))
+                    && items.iter().all(|i| i.is_string() || i.as_object().is_some_and(is_target))
+            }
             _ => false,
         };
         if !has_target {

@@ -136,10 +136,21 @@ pub fn list_get(l: &Value, idx: &Value) -> VResult {
     Ok(items[resolve_index(items.len(), to_num(idx)?)?].clone())
 }
 
+/// "random" (Blockly's "random" position) or a 0-based / negative-from-end index.
+fn list_position(len: usize, key: &Value) -> Result<usize, String> {
+    if key.as_str() == Some("random") {
+        if len == 0 {
+            return Err("the list is empty".into());
+        }
+        return Ok(rand::random_range(0..len));
+    }
+    resolve_index(len, to_num(key)?)
+}
+
 pub fn set_item(container: &mut Value, key: &Value, value: Value) -> Result<(), String> {
     match container {
         Value::Array(items) => {
-            let i = resolve_index(items.len(), to_num(key)?)?;
+            let i = list_position(items.len(), key)?;
             items[i] = value;
         }
         Value::Object(map) => {
@@ -153,6 +164,15 @@ pub fn set_item(container: &mut Value, key: &Value, value: Value) -> Result<(), 
         other => return Err(format!("cannot set an item on {}", short(other))),
     }
     Ok(())
+}
+
+/// Numbers, and text that is a number, for sorting.
+fn sort_num(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => n.as_f64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    }
 }
 
 fn deg(f: f64) -> f64 {
@@ -310,17 +330,17 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
         "list_reverse" => Value::Array(list(a(0))?.iter().rev().cloned().collect()),
         "list_sort" | "list_sort_desc" => {
             let mut l = list(a(0))?.clone();
-            // Optional 2nd arg: "NUMERIC", "TEXT" or "IGNORE_CASE" (Blockly's sort types).
+            // Optional 2nd arg: "TEXT" or "IGNORE_CASE"; otherwise numbers (also numeric
+            // text) come first in numeric order, then everything else as text.
             match args.get(1).map(to_text).as_deref() {
-                Some("NUMERIC") => l.sort_by(|x, y| {
-                    as_num(x)
-                        .unwrap_or(f64::NAN)
-                        .partial_cmp(&as_num(y).unwrap_or(f64::NAN))
-                        .unwrap_or(Ordering::Equal)
-                }),
                 Some("TEXT") => l.sort_by_key(to_text),
                 Some("IGNORE_CASE") => l.sort_by_key(|v| to_text(v).to_lowercase()),
-                _ => l.sort_by(|x, y| loose_cmp(x, y).unwrap_or(Ordering::Equal)),
+                _ => l.sort_by(|x, y| match (sort_num(x), sort_num(y)) {
+                    (Some(p), Some(q)) => p.total_cmp(&q),
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (None, None) => to_text(x).cmp(&to_text(y)),
+                }),
             }
             if name == "list_sort_desc" {
                 l.reverse();
@@ -328,19 +348,26 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
             Value::Array(l)
         }
         "list_insert" => {
-            // Inserts before the item at the index (-1 = append at the end).
+            // Inserts before the item at the position; "LAST" (4th arg) appends.
             let mut l = list(a(0))?.clone();
-            let i = n(1)? as i64;
-            let at = if i < 0 { (l.len() as i64 + i + 1).max(0) as usize } else { (i as usize).min(l.len()) };
+            let at = if args.get(3).map(to_text).as_deref() == Some("LAST") {
+                l.len()
+            } else if a(1).as_str() == Some("random") {
+                rand::random_range(0..=l.len())
+            } else {
+                let i = n(1)? as i64;
+                (if i < 0 { l.len() as i64 + i } else { i }).clamp(0, l.len() as i64) as usize
+            };
             l.insert(at, a(2).clone());
             Value::Array(l)
         }
         "list_remove" => {
             let mut l = list(a(0))?.clone();
-            let i = resolve_index(l.len(), n(1)?)?;
+            let i = list_position(l.len(), a(1))?;
             l.remove(i);
             Value::Array(l)
         }
+        "random_index" => json!("random"),
         "list_join" => json!(list(a(0))?.iter().map(to_text).collect::<Vec<_>>().join(&to_text(a(1)))),
         "text_split" => {
             let delim = to_text(a(1));
@@ -810,5 +837,36 @@ mod tests {
         let mut l = json!([1, 2]);
         set_item(&mut l, &json!(-1), json!(9)).unwrap();
         assert_eq!(l, json!([1, 9]));
+    }
+
+    #[test]
+    fn review_fixes_lists_and_colours() {
+        // Mixed lists sort without panicking: numbers first, then text.
+        let l = json!(["kitchen", "10", 3, "bath", 2.5]);
+        assert_eq!(
+            builtin("list_sort", &[l, json!("NUMERIC")]).unwrap(),
+            json!([2.5, 3, "10", "bath", "kitchen"])
+        );
+        // Insert before the last item ("#1 from end"), append for "last", random works.
+        let abc = json!(["a", "b", "c"]);
+        assert_eq!(
+            builtin("list_insert", &[abc.clone(), json!(-1), json!("X"), json!("FROM_END")]).unwrap(),
+            json!(["a", "b", "X", "c"])
+        );
+        assert_eq!(
+            builtin("list_insert", &[abc.clone(), json!(-1), json!("X"), json!("LAST")]).unwrap(),
+            json!(["a", "b", "c", "X"])
+        );
+        assert_eq!(
+            builtin("list_remove", &[abc.clone(), json!("random")]).unwrap().as_array().unwrap().len(),
+            2
+        );
+        let mut m = abc;
+        set_item(&mut m, &json!("random"), json!("Z")).unwrap();
+        assert!(m.as_array().unwrap().contains(&json!("Z")));
+        // Text that isn't ASCII is simply not a colour.
+        for bad in ["€", "aé€", "ééé"] {
+            assert_eq!(crate::colour::parse(&json!(bad)), None);
+        }
     }
 }

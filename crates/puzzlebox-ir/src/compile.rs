@@ -247,42 +247,125 @@ pub fn compile_partial(workspace: &Value, ext: &dyn BlockLowerer) -> (Program, V
 }
 
 fn check_calls(body: &[Stmt], fns: &BTreeMap<String, Function>, c: &mut Compiler<'_>) {
-    fn expr(e: &Expr, fns: &BTreeMap<String, Function>, errs: &mut Vec<CompileError>) {
-        if let ExprKind::Call { function, .. } = &e.kind
-            && !fns.contains_key(function)
-        {
-            errs.push(CompileError {
-                block_id: Some(e.id.clone()),
-                message: format!("the function \"{function}\" is missing or has a problem"),
-            });
-        }
-    }
+    let mut missing = Vec::new();
     for s in body {
-        match &s.kind {
-            StmtKind::Expr { expr: e } => expr(e, fns, &mut c.errors),
-            StmtKind::If { branches, otherwise } => {
-                for (_, b) in branches {
-                    check_calls(b, fns, c);
-                }
-                if let Some(o) = otherwise {
-                    check_calls(o, fns, c);
-                }
+        stmt_exprs(s, &mut |e| {
+            if let ExprKind::Call { function, .. } = &e.kind
+                && !fns.contains_key(function)
+            {
+                missing.push(CompileError {
+                    block_id: Some(e.id.clone()),
+                    message: format!("the function \"{function}\" is missing or has a problem"),
+                });
             }
-            StmtKind::While { body, .. }
-            | StmtKind::Repeat { body, .. }
-            | StmtKind::For { body, .. }
-            | StmtKind::ForEach { body, .. } => check_calls(body, fns, c),
-            StmtKind::TryCatch { body, handler, .. } => {
-                check_calls(body, fns, c);
-                check_calls(handler, fns, c);
+        });
+    }
+    c.errors.extend(missing);
+}
+
+/// Calls `f` on every expression in a statement, nested statements and sub-expressions included.
+fn stmt_exprs(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
+    let e = |x: &Expr, f: &mut dyn FnMut(&Expr)| walk_expr(x, f);
+    let body = |b: &[Stmt], f: &mut dyn FnMut(&Expr)| b.iter().for_each(|s| stmt_exprs(s, f));
+    match &s.kind {
+        StmtKind::Expr { expr } => e(expr, f),
+        StmtKind::Set { value, .. } => e(value, f),
+        StmtKind::If { branches, otherwise } => {
+            for (cond, b) in branches {
+                e(cond, f);
+                body(b, f);
             }
-            StmtKind::Parallel { branches } => {
-                for b in branches {
-                    check_calls(b, fns, c);
-                }
+            if let Some(o) = otherwise {
+                body(o, f);
             }
-            _ => {}
         }
+        StmtKind::While { cond, body: b, .. } => {
+            e(cond, f);
+            body(b, f);
+        }
+        StmtKind::Repeat { times, body: b } => {
+            e(times, f);
+            body(b, f);
+        }
+        StmtKind::For { from, to, by, body: b, .. } => {
+            e(from, f);
+            e(to, f);
+            e(by, f);
+            body(b, f);
+        }
+        StmtKind::ForEach { list, body: b, .. } => {
+            e(list, f);
+            body(b, f);
+        }
+        StmtKind::Return { value: Some(v) } => e(v, f),
+        StmtKind::TryCatch { body: b, handler, .. } => {
+            body(b, f);
+            body(handler, f);
+        }
+        StmtKind::Throw { message } | StmtKind::Log { message, .. } => e(message, f),
+        StmtKind::Parallel { branches } => branches.iter().for_each(|b| body(b, f)),
+        StmtKind::CallService { target, data, .. } => {
+            target.iter().chain(data.iter()).for_each(|x| e(x, f));
+        }
+        StmtKind::HaScript { args, .. } | StmtKind::Plugin { args, .. } => {
+            args.values().for_each(|x| e(x, f))
+        }
+        StmtKind::Wait { seconds } => e(seconds, f),
+        StmtKind::WaitForTrigger { timeout: Some(t), .. } => e(t, f),
+        StmtKind::FireEvent { event_type, data } => {
+            e(event_type, f);
+            data.iter().for_each(|x| e(x, f));
+        }
+        StmtKind::SetItem { key, value, .. } => {
+            e(key, f);
+            e(value, f);
+        }
+        StmtKind::TimerStart { seconds, data, key, .. } => {
+            e(seconds, f);
+            data.iter().chain(key.iter()).for_each(|x| e(x, f));
+        }
+        StmtKind::WaitUntil { cond, hold, timeout } => {
+            e(cond, f);
+            hold.iter().chain(timeout.iter()).for_each(|x| e(x, f));
+        }
+        _ => {}
+    }
+}
+
+fn walk_expr(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    f(e);
+    match &e.kind {
+        ExprKind::Binary { left, right, .. } => {
+            walk_expr(left, f);
+            walk_expr(right, f);
+        }
+        ExprKind::Not { expr } => walk_expr(expr, f),
+        ExprKind::Ternary { cond, then, otherwise } => {
+            walk_expr(cond, f);
+            walk_expr(then, f);
+            walk_expr(otherwise, f);
+        }
+        ExprKind::List { items } => items.iter().for_each(|x| walk_expr(x, f)),
+        ExprKind::Dict { entries } => entries.iter().for_each(|(_, x)| walk_expr(x, f)),
+        ExprKind::Builtin { args, .. } | ExprKind::Call { args, .. } => {
+            args.iter().for_each(|x| walk_expr(x, f))
+        }
+        ExprKind::Each { list, expr, .. } => {
+            walk_expr(list, f);
+            walk_expr(expr, f);
+        }
+        ExprKind::State { entity, attribute } => {
+            walk_expr(entity, f);
+            attribute.iter().for_each(|x| walk_expr(x, f));
+        }
+        ExprKind::Condition { args, .. } | ExprKind::Plugin { args, .. } => {
+            args.values().for_each(|x| walk_expr(x, f))
+        }
+        ExprKind::Http { url, body, headers, .. } => {
+            walk_expr(url, f);
+            body.iter().chain(headers.iter()).for_each(|x| walk_expr(x, f));
+        }
+        _ => {}
     }
 }
 
@@ -498,18 +581,26 @@ impl<'a> Compiler<'a> {
                     Some("hours") => ("hours", 24),
                     _ => ("minutes", 60),
                 };
-                // HA's time pattern counts from the top of the minute/hour/day.
-                if n >= max || max % n != 0 {
-                    self.err(
-                        &b,
-                        format!(
-                            "every {n} {unit} doesn't fit evenly into {} {}; use {} or a timer that starts itself again",
-                            max,
-                            if unit == "hours" { "hours (a day)" } else if unit == "minutes" { "minutes (an hour)" } else { "seconds (a minute)" },
-                            (1..max).filter(|d| max % d == 0).map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
-                        ),
-                    );
+                // HA's time pattern counts from the top of the minute/hour/day, so a whole number
+                // of the next unit becomes that unit (60 minutes = every hour).
+                if n >= max && n.is_multiple_of(max) {
+                    let m = n / max;
+                    return match unit {
+                        "seconds" => ha(json!({"trigger": "time_pattern", "minutes": format!("/{m}")})),
+                        "minutes" if m < 24 && 24u64.is_multiple_of(m) => {
+                            ha(json!({"trigger": "time_pattern", "hours": format!("/{m}"), "minutes": 0}))
+                        }
+                        "hours" if m == 1 => ha(json!({"trigger": "time", "at": "00:00:00"})),
+                        _ => {
+                            self.err(&b, format!("Home Assistant can't repeat every {n} {unit}; use a timer that starts itself again"));
+                            None
+                        }
+                    };
                 }
+                if n >= max {
+                    self.err(&b, format!("Home Assistant can't repeat every {n} {unit}; use a timer that starts itself again"));
+                }
+                // Values that don't divide evenly (e.g. 7 minutes) restart at the top of the hour.
                 ha(json!({"trigger": "time_pattern", unit: format!("/{n}")}))
             }
             "ha_trigger_raw" => match parse_config(b.field_str("CONFIG").unwrap_or("")) {
@@ -787,8 +878,11 @@ impl<'a> Compiler<'a> {
                 if b.field_str("MODE") == Some("INSERT") {
                     // Inserting "at" an index puts the item before it; "last" appends.
                     let list = Expr { id: b.id().into(), kind: ExprKind::Var { name: name.clone(), scope } };
-                    let inserted =
-                        Expr { id: b.id().into(), kind: self.builtin("list_insert", vec![list, key, value]) };
+                    let position = Expr::lit(b.id(), json!(b.field_str("WHERE").unwrap_or("FROM_START")));
+                    let inserted = Expr {
+                        id: b.id().into(),
+                        kind: self.builtin("list_insert", vec![list, key, value, position]),
+                    };
                     StmtKind::Set { name, scope, value: inserted }
                 } else {
                     StmtKind::SetItem { name, scope, key, value }
@@ -844,6 +938,8 @@ impl<'a> Compiler<'a> {
                         TimerMode::Restart
                     },
                     handler: b.id().into(),
+                    data: None,
+                    key: None,
                 }
             }
             "device_action" => {

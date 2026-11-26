@@ -204,6 +204,12 @@ pub enum StmtKind {
         seconds: Expr,
         if_running: TimerMode,
         handler: BlockId,
+        /// Evaluated when the timer starts and handed to its body as `trigger.data`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        data: Option<Expr>,
+        /// Evaluated when the timer starts and appended to the name, for one timer per value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        key: Option<Expr>,
     },
     TimerCancel {
         name: String,

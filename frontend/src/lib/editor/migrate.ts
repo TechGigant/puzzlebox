@@ -55,6 +55,13 @@ const duration = (n: unknown) => ({
   fields: { UNIT: 'seconds' },
 });
 
+const num = (n: number) => ({ shadow: { type: 'math_number', fields: { NUM: n } } as State });
+const divide = (a: { block?: State; shadow?: State }, b: { block?: State; shadow?: State }): State => ({
+  type: 'math_arithmetic',
+  fields: { OP: 'DIVIDE' },
+  inputs: { A: a, B: b },
+});
+
 function migrateBlock(b: State) {
   b.inputs ??= {};
   if (ENTITY_SOCKET.has(b.type) && b.fields && 'ENTITY' in b.fields && !b.inputs.ENTITY) {
@@ -94,6 +101,27 @@ function migrateBlock(b: State) {
     if (p.input === 'color' && b.fields && typeof b.fields[slot] === 'string' && !b.inputs[slot]) {
       b.inputs[slot] = { shadow: { type: 'colour_picker', fields: { COLOUR: b.fields[slot] } } };
       delete b.fields[slot];
+    }
+  }
+  // Zigbee2MQTT group brightness (0–254) and white (mired) became % and kelvin.
+  if (/^z2m__.+__group\d+__set$/.test(b.type)) {
+    // [old name, new name, convert a number, block that converts a calculation]
+    const convert: [string, string, (n: number) => number, (e: State) => State][] = [
+      ['brightness', 'brightness_percent', (n) => Math.round(n / 2.54), (e) => divide({ block: e }, num(2.54))],
+      ['color_temp', 'color_temp_kelvin', (n) => Math.round(1_000_000 / Math.max(n, 1)), (e) => divide(num(1_000_000), { block: e })],
+    ];
+    const extra = b.extraState as { optional?: string[] } | undefined;
+    for (const [from, to, fn, wrap] of convert) {
+      const slot = b.inputs[`P_${from}`];
+      if (!slot) continue;
+      if (slot.block) {
+        b.inputs[`P_${to}`] = { block: wrap(slot.block) };
+      } else {
+        const n = Number(slot.shadow?.fields?.NUM);
+        b.inputs[`P_${to}`] = { shadow: { type: 'math_number', fields: { NUM: Number.isFinite(n) ? fn(n) : 0 } } };
+      }
+      delete b.inputs[`P_${from}`];
+      if (extra?.optional) extra.optional = extra.optional.map((o) => (o === from ? to : o));
     }
   }
   if (!Object.keys(b.inputs).length) delete b.inputs;

@@ -869,3 +869,100 @@ async fn areas_expand_to_entities_and_review_fixes() {
     assert_eq!(v["lst"], json!([1, 2, 3]));
     assert_eq!(v["neg"], json!(-4));
 }
+
+#[tokio::test]
+async fn timers_in_loose_stacks_and_per_target_on_for() {
+    let (engine, ha) = setup().await;
+    let mut events = engine.subscribe();
+    // A loose stack starting with a timer: the timer must run its body, not the stack again.
+    let mut timer = b(
+        "timer_start",
+        "lt",
+        json!({"NAME": "t", "MODE": "restart"}),
+        json!({"SECONDS": blk(num("s", 0.2)), "DO": blk(call("off", "light.turn_off", "light.a"))}),
+    );
+    timer["x"] = json!(400);
+    // "turn on … for … then off" in a loop: each light gets its own timer.
+    let mut list = b(
+        "lists_create_with",
+        "l",
+        json!({}),
+        json!({"ADD0": blk(text("a", "light.x")), "ADD1": blk(text("b", "light.y"))}),
+    );
+    list["extraState"] = json!({"itemCount": 2});
+    let on_for = b(
+        "device_on_for",
+        "of",
+        json!({}),
+        json!({
+        "TARGET": blk(b("variables_get", "g", json!({"VAR": {"id": "it"}}), json!({}))),
+        "SECONDS": blk(num("d", 0.2))}),
+    );
+    let each = b(
+        "controls_forEach",
+        "fe",
+        json!({"VAR": {"id": "it"}}),
+        json!({"LIST": blk(list), "DO": blk(on_for)}),
+    );
+    let ws = workspace(vec![on_run(each), timer], json!([{"name": "it", "id": "it"}]));
+    let (_, errors) = engine.save(program("lt", ws, "parallel")).await.unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    let idx = engine.handler_index("lt", "lt").unwrap();
+    assert!(engine.run_now("lt", Some(idx), None));
+    assert!(engine.run_now("lt", None, None));
+    for _ in 0..5 {
+        next_finished(&mut events).await;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let calls: Vec<(String, Option<Value>)> =
+        ha.calls.lock().unwrap().iter().map(|c| (c.0.clone(), c.2.clone())).collect();
+    let offs: Vec<_> =
+        calls.iter().filter(|(s, _)| s == "homeassistant.turn_off").map(|(_, t)| t.clone()).collect();
+    assert_eq!(offs.len(), 2, "{calls:?}");
+    assert!(offs.contains(&Some(json!({"entity_id": ["light.x"]}))), "{offs:?}");
+    assert!(offs.contains(&Some(json!({"entity_id": ["light.y"]}))), "{offs:?}");
+    assert_eq!(
+        calls.iter().filter(|(s, _)| s == "light.turn_off").count(),
+        1,
+        "the loose timer fired its body once"
+    );
+}
+
+#[tokio::test]
+async fn loops_keep_records_and_nested_calls_to_broken_functions_are_caught() {
+    let (engine, _ha) = setup().await;
+    let mut events = engine.subscribe();
+    let records =
+        b("yaml_value", "y", json!({"CONFIG": "[{entity_id: light.a, brightness: 50}]"}), json!({}));
+    let get = b(
+        "dict_get",
+        "dg",
+        json!({}),
+        json!({"KEY": blk(text("k", "brightness")),
+        "DICT": blk(b("variables_get", "g", json!({"VAR": {"id": "it"}}), json!({})))}),
+    );
+    let each = b(
+        "controls_forEach",
+        "fe",
+        json!({"VAR": {"id": "it"}}),
+        json!({"LIST": blk(records), "DO": blk(set("s", "got", get))}),
+    );
+    let vars = json!([{"name": "it", "id": "it"}, {"name": "got", "id": "got"}]);
+    engine.save(program("rec", workspace(vec![on_run(each)], vars.clone()), "single")).await.unwrap();
+    assert!(engine.run_now("rec", None, None));
+    let (status, error) = next_finished(&mut events).await;
+    assert_eq!(status, "ok", "{error:?}");
+    let run = engine.store().list_runs("rec", 1).await.unwrap().remove(0);
+    let v = engine.store().get_run(&run.id).await.unwrap().unwrap().trace.unwrap()["variables"].clone();
+    assert_eq!(v["got"], json!(50), "records are looped over as they are");
+
+    // A function with a problem, called inside "set": that handler is reported and left out.
+    let broken_fn = json!({"type": "procedures_defreturn", "id": "f", "x": 300, "fields": {"NAME": "f"}, "extraState": {"params": []},
+        "inputs": {"STACK": {"block": {"type": "controls_if", "id": "emptyif"}}}});
+    let call_f = b("procedures_callreturn", "cf", json!({}), json!({}));
+    let mut call_f = call_f;
+    call_f["extraState"] = json!({"name": "f", "params": []});
+    let ws = workspace(vec![on_run(set("s2", "got", call_f)), broken_fn], vars);
+    let (_, errors) = engine.save(program("bf", ws, "single")).await.unwrap();
+    assert!(errors.iter().any(|e| e.message.contains("function \"f\"")), "{errors:?}");
+}

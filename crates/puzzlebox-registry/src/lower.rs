@@ -16,7 +16,7 @@ pub struct RegistryLowerer {
 
 fn hex_to_rgb(hex: &str) -> Option<Value> {
     let h = hex.trim().trim_start_matches('#');
-    if h.len() != 6 {
+    if h.len() != 6 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
     let p = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).ok();
@@ -283,6 +283,16 @@ impl BlockLowerer for RegistryLowerer {
                         _ => (k, e),
                     };
                     entries.push((k, e));
+                }
+                // Group blocks saved before brightness/white moved to % and K still hold the raw
+                // Zigbee2MQTT values under their old names; pass those on unchanged.
+                for legacy in ["brightness", "color_temp"] {
+                    if def.params.iter().all(|p| p.name != legacy)
+                        && !entries.iter().any(|(k, _)| k == legacy)
+                        && let Some(e) = c.value_opt(&b, &format!("P_{legacy}"))
+                    {
+                        entries.push((legacy.to_owned(), e));
+                    }
                 }
                 let mut a = BTreeMap::new();
                 a.insert("topic".to_owned(), Expr::lit(b.id(), json!(topic)));

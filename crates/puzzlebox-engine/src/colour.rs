@@ -34,6 +34,9 @@ pub fn parse(v: &Value) -> Option<[u8; 3]> {
                 return Some(*rgb);
             }
             let hex = s.trim_start_matches('#');
+            if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
             let full: String = match hex.len() {
                 3 => hex.chars().flat_map(|c| [c, c]).collect(),
                 6 => hex.to_owned(),

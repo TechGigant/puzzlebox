@@ -160,7 +160,17 @@ fn trigger_durations_are_sockets_and_every_is_checked() {
     assert_eq!(config["to"], serde_json::Value::Null, "only state changes, not attribute changes");
     assert!(config.as_object().unwrap().contains_key("to"));
 
-    let every = json!({"type": "ha_trigger_every", "id": "e", "fields": {"N": 7, "UNIT": "minutes"}});
-    let errors = compile(&ws(every), &NoExternals).unwrap_err();
-    assert!(errors[0].message.contains("doesn't fit evenly"), "{}", errors[0].message);
+    let every =
+        |n: u32, unit: &str| json!({"type": "ha_trigger_every", "id": "e", "fields": {"N": n, "UNIT": unit}});
+    let config = |t: serde_json::Value| {
+        let p = compile(&ws(t), &NoExternals).unwrap();
+        let HandlerKind::Triggers { triggers } = &p.handlers[0].kind else { panic!() };
+        let Trigger::Ha { config, .. } = &triggers[0] else { panic!() };
+        config.clone()
+    };
+    assert_eq!(config(every(60, "minutes"))["hours"], "/1");
+    assert_eq!(config(every(24, "hours"))["at"], "00:00:00");
+    assert_eq!(config(every(7, "minutes"))["minutes"], "/7");
+    let errors = compile(&ws(every(90, "minutes")), &NoExternals).unwrap_err();
+    assert!(errors[0].message.contains("can't repeat"), "{}", errors[0].message);
 }

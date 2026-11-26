@@ -357,12 +357,15 @@
     });
     backpack.init();
     // The backpack is shared by all programs and kept by the app, not in this program.
+    // Until the stored backpack has been read, changes aren't saved (they would overwrite it).
     let restoring = true;
     api
       .editorData<string>('backpack')
-      .then((c) => backpack.setContents(c))
-      .catch(() => {})
-      .finally(() => (restoring = false));
+      .then((c) => {
+        backpack.setContents([...c, ...backpack.getContents().filter((x) => !c.includes(x))]);
+        restoring = false;
+      })
+      .catch(() => {});
 
     const wsId = workspace.id;
     runStackHandlers.set(wsId, (id) => onrunstack?.(id));

@@ -48,6 +48,7 @@ const CATEGORIES: Record<string, { light: string; dark: string }> = {
   http: { light: '#3949ab', dark: '#7986cb' },
   stored: { light: '#c2185b', dark: '#f06292' },
   plugin: { light: '#00838f', dark: '#26c6da' },
+  favourite: { light: '#f9a825', dark: '#fdd835' },
 };
 
 /** Stable colour for runtime-contributed categories (HA domains, plugins). */

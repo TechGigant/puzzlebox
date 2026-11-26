@@ -54,6 +54,8 @@ export interface Program {
   mode: RunMode;
   max_runs: number;
   workspace?: object;
+  /** "" = no folder; "/" separates nested folders. */
+  folder: string;
   created_at: number;
   updated_at: number;
   status: ProgramStatus | null;
@@ -118,8 +120,9 @@ export const api = {
   remove: (id: string) => request<{ ok: boolean }>('DELETE', `api/programs/${id}`),
   run: (id: string, handler?: number) => request<{ ok: boolean }>('POST', `api/programs/${id}/run`, { handler }),
   runStack: (id: string, block: string) => request<{ ok: boolean }>('POST', `api/programs/${id}/run`, { block }),
-  backpack: () => request<string[]>('GET', 'api/backpack'),
-  setBackpack: (contents: string[]) => request<{ ok: boolean }>('PUT', 'api/backpack', contents),
+  editorData: <T = unknown>(key: 'backpack' | 'favourites' | 'recent') => request<T[]>('GET', `api/editor/${key}`),
+  setEditorData: (key: 'backpack' | 'favourites' | 'recent', contents: unknown[]) =>
+    request<{ ok: boolean }>('PUT', `api/editor/${key}`, contents),
   cancel: (id: string) => request<{ ok: boolean }>('POST', `api/programs/${id}/cancel`, {}),
   setEnabled: (id: string, enabled: boolean) => request<Program>('POST', `api/programs/${id}/enabled`, { enabled }),
   runs: (id: string) => request<RunRecord[]>('GET', `api/programs/${id}/runs`),

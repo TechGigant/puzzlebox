@@ -40,6 +40,7 @@ pub struct ProgramInput {
     mode: Option<String>,
     max_runs: Option<u32>,
     workspace: Option<Value>,
+    folder: Option<String>,
 }
 
 const MODES: [&str; 4] = ["single", "restart", "queued", "parallel"];
@@ -70,6 +71,10 @@ fn apply(rec: &mut ProgramRecord, input: ProgramInput) -> Result<(), ApiError> {
     if let Some(w) = input.workspace {
         rec.workspace = w;
     }
+    if let Some(f) = input.folder {
+        // Normalise "a / b/" to "a/b"; empty means no folder.
+        rec.folder = f.split('/').map(str::trim).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("/");
+    }
     Ok(())
 }
 
@@ -89,6 +94,7 @@ pub async fn create(State(st): State<AppState>, Json(input): Json<ProgramInput>)
         mode: "single".into(),
         max_runs: 10,
         workspace: json!({}),
+        folder: String::new(),
         created_at: 0,
         updated_at: 0,
     };

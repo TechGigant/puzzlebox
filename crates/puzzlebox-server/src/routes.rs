@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, Path, Request, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
@@ -97,7 +97,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plugins/reload", post(plugins_reload))
         .route("/api/settings", get(settings))
         .route("/api/variables", get(variables).put(set_variable))
-        .route("/api/backpack", get(backpack).put(set_backpack))
+        .route("/api/editor/{key}", get(editor_data).put(set_editor_data))
         .route("/api/bridge", get(bridge::upgrade))
         .route("/api/webhook/{id}", axum::routing::any(webhooks::receive))
         .route("/api/registry/reload", post(registry_reload))
@@ -281,20 +281,34 @@ async fn settings(State(st): State<AppState>) -> Json<Value> {
     }))
 }
 
-/// Editor backpack: saved block snippets (serialized blocks), shared by every program.
-async fn backpack(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
-    let all = st.engine.store().kv_all("editor").await.map_err(ApiError::from)?;
-    Ok(Json(all.get("backpack").cloned().unwrap_or_else(|| json!([]))))
+/// Editor data shared by every program and browser: the backpack, favourite and recently
+/// used blocks (lists of serialized blocks).
+const EDITOR_KEYS: [&str; 3] = ["backpack", "favourites", "recent"];
+
+fn editor_key(key: &str) -> Result<&str, ApiError> {
+    EDITOR_KEYS
+        .iter()
+        .copied()
+        .find(|k| *k == key)
+        .ok_or_else(|| ApiError(StatusCode::NOT_FOUND, "unknown editor data".into()))
 }
 
-async fn set_backpack(
+async fn editor_data(State(st): State<AppState>, Path(key): Path<String>) -> Result<Json<Value>, ApiError> {
+    let key = editor_key(&key)?;
+    let all = st.engine.store().kv_all("editor").await.map_err(ApiError::from)?;
+    Ok(Json(all.get(key).cloned().unwrap_or_else(|| json!([]))))
+}
+
+async fn set_editor_data(
     State(st): State<AppState>,
+    Path(key): Path<String>,
     Json(contents): Json<Value>,
 ) -> Result<Json<Value>, ApiError> {
-    if !contents.is_array() {
-        return Err(ApiError(StatusCode::BAD_REQUEST, "expected a list of blocks".into()));
+    let key = editor_key(&key)?;
+    if !contents.as_array().is_some_and(|a| a.len() <= 500) {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "expected a list of up to 500 blocks".into()));
     }
-    st.engine.store().kv_set("editor", "backpack", &contents).await.map_err(ApiError::from)?;
+    st.engine.store().kv_set("editor", key, &contents).await.map_err(ApiError::from)?;
     Ok(Json(json!({"ok": true})))
 }
 

@@ -9,7 +9,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const MIGRATIONS: &[&str] = &[r#"
+const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE programs (
     id          TEXT PRIMARY KEY,
     name        TEXT NOT NULL,
@@ -38,7 +39,11 @@ CREATE TABLE runs (
     trace       TEXT
 );
 CREATE INDEX runs_by_program ON runs(program_id, started_at DESC);
-"#];
+"#,
+    r#"
+ALTER TABLE programs ADD COLUMN folder TEXT NOT NULL DEFAULT '';
+"#,
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProgramRecord {
@@ -50,6 +55,9 @@ pub struct ProgramRecord {
     pub mode: String,
     pub max_runs: u32,
     pub workspace: Value,
+    /// Folder on the program list ("" = none); "/" separates nested folders.
+    #[serde(default)]
+    pub folder: String,
     #[serde(default)]
     pub created_at: i64,
     #[serde(default)]
@@ -123,7 +131,7 @@ impl Store {
     pub async fn list_programs(&self) -> Result<Vec<ProgramRecord>> {
         self.with(|c| {
             let mut st = c.prepare(
-                "SELECT id, name, description, enabled, mode, max_runs, workspace, created_at, updated_at
+                "SELECT id, name, description, enabled, mode, max_runs, workspace, created_at, updated_at, folder
                  FROM programs ORDER BY name COLLATE NOCASE",
             )?;
             let rows = st.query_map([], row_to_program)?;
@@ -136,7 +144,7 @@ impl Store {
         let id = id.to_owned();
         self.with(move |c| {
             Ok(c.query_row(
-                "SELECT id, name, description, enabled, mode, max_runs, workspace, created_at, updated_at
+                "SELECT id, name, description, enabled, mode, max_runs, workspace, created_at, updated_at, folder
                  FROM programs WHERE id = ?1",
                 [id],
                 row_to_program,
@@ -155,11 +163,11 @@ impl Store {
             p.created_at = created.unwrap_or(now);
             p.updated_at = now;
             c.execute(
-                "INSERT INTO programs (id, name, description, enabled, mode, max_runs, workspace, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                "INSERT INTO programs (id, name, description, enabled, mode, max_runs, workspace, created_at, updated_at, folder)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
                  ON CONFLICT(id) DO UPDATE SET name=excluded.name, description=excluded.description,
                    enabled=excluded.enabled, mode=excluded.mode, max_runs=excluded.max_runs,
-                   workspace=excluded.workspace, updated_at=excluded.updated_at",
+                   workspace=excluded.workspace, updated_at=excluded.updated_at, folder=excluded.folder",
                 params![
                     p.id,
                     p.name,
@@ -169,7 +177,8 @@ impl Store {
                     p.max_runs,
                     p.workspace.to_string(),
                     p.created_at,
-                    p.updated_at
+                    p.updated_at,
+                    p.folder
                 ],
             )?;
             Ok(p)
@@ -319,6 +328,7 @@ fn row_to_program(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProgramRecord> {
         workspace: serde_json::from_str(&ws).unwrap_or(Value::Null),
         created_at: r.get(7)?,
         updated_at: r.get(8)?,
+        folder: r.get(9)?,
     })
 }
 
@@ -329,6 +339,7 @@ mod tests {
 
     fn program(id: &str) -> ProgramRecord {
         ProgramRecord {
+            folder: String::new(),
             id: id.into(),
             name: format!("P {id}"),
             description: String::new(),
@@ -378,5 +389,14 @@ mod tests {
         let runs = s.list_runs("p", 10).await.unwrap();
         assert_eq!(runs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["r4", "r3", "r2"]);
         assert_eq!(s.get_run("r4").await.unwrap().unwrap().trace, Some(json!([4])));
+    }
+
+    #[tokio::test]
+    async fn folder_round_trips() {
+        let s = Store::open_in_memory().unwrap();
+        let mut p = program("f1");
+        p.folder = "Lights/Outside".into();
+        s.save_program(p).await.unwrap();
+        assert_eq!(s.get_program("f1").await.unwrap().unwrap().folder, "Lights/Outside");
     }
 }

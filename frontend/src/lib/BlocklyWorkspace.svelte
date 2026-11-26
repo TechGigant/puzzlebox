@@ -8,12 +8,14 @@
   import { registry } from './registry.svelte';
   import { registerSwitchMenu } from './editor/switching';
   import { registerUsageMenu } from './editor/usages';
+  import { noteUsed, registerFavourites, registerFavouritesMenu } from './editor/favourites';
 
   Blockly.setLocale(En as unknown as Record<string, string>);
   registerCoreBlocks();
   registerDeviceBlocks();
   registerSwitchMenu();
   registerUsageMenu();
+  registerFavouritesMenu();
 
   /** Per-workspace callbacks for the editor that owns it (menus are registered globally). */
   const runStackHandlers = new Map<string, (topBlockId: string) => void>();
@@ -102,6 +104,8 @@
   import QuickAdd from './editor/QuickAdd.svelte';
   import { insert, toolboxEntries, workspaceEntries, type Entry } from './editor/quickadd';
   import { applyZebra, loadPrefs, rendererName } from './editor/appearance';
+  import { installDragTricks } from './editor/drag';
+  import { installSummaries } from './editor/summaries';
 
   let {
     initial,
@@ -296,7 +300,7 @@
     // The backpack is shared by all programs and kept by the app, not in this program.
     let restoring = true;
     api
-      .backpack()
+      .editorData<string>('backpack')
       .then((c) => backpack.setContents(c))
       .catch(() => {})
       .finally(() => (restoring = false));
@@ -322,6 +326,9 @@
       openQuickAdd();
     };
     host.addEventListener('mousemove', onMouse);
+    registerFavourites(workspace);
+    const stopDrag = installDragTricks(workspace, host, () => (mouse.clientX ? mouse : null));
+    const stopSummaries = installSummaries(workspace);
     host.addEventListener('keydown', onKey);
     host.addEventListener('mousedown', onMiddle);
 
@@ -347,9 +354,13 @@
 
     workspace.addChangeListener((e) => {
       if (e.type === 'backpack_change' && !restoring) {
-        api.setBackpack(backpack.getContents()).catch(() => {});
+        api.setEditorData('backpack', backpack.getContents()).catch(() => {});
       }
       if (!e.isUiEvent || e.type === Blockly.Events.THEME_CHANGE) zebra();
+      if (e.type === Blockly.Events.BLOCK_CREATE && !loading && workspace) {
+        const created = workspace.getBlockById((e as Blockly.Events.BlockCreate).blockId ?? '');
+        if (created && !created.getParent()) noteUsed(created);
+      }
       if (loading || e.isUiEvent || !onchange || !workspace) return;
       if (e.type === Blockly.Events.BLOCK_DELETE) {
         for (const id of (e as Blockly.Events.BlockDelete).ids ?? []) breakpoints.delete(id);
@@ -365,6 +376,8 @@
     return () => {
       resize.disconnect();
       host.removeEventListener('mousemove', onMouse);
+      stopDrag();
+      stopSummaries();
       host.removeEventListener('keydown', onKey);
       host.removeEventListener('mousedown', onMiddle);
       runStackHandlers.delete(wsId);

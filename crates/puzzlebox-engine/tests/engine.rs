@@ -112,6 +112,7 @@ fn workspace(tops: Vec<Value>, vars: Value) -> Value {
 }
 fn program(id: &str, ws: Value, mode: &str) -> ProgramRecord {
     ProgramRecord {
+        folder: String::new(),
         id: id.into(),
         name: id.into(),
         description: String::new(),

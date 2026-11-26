@@ -40,6 +40,7 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
   return {
     kind: 'categoryToolbox',
     contents: [
+      cat('Favourites', 'favourite', [], { custom: 'PB_FAVOURITES' }),
       cat('Triggers', 'trigger', [
         block('ha_when'),
         block('ha_on_start'),

@@ -1,0 +1,82 @@
+- id: '1700000000001'
+  alias: Hallway motion light
+  description: ''
+  triggers:
+  - trigger: state
+    entity_id:
+    - binary_sensor.hallway_motion
+    to: 'on'
+  conditions: []
+  actions:
+  - action: light.turn_on
+    metadata: {}
+    data:
+      brightness_pct: 80
+    target:
+      entity_id: light.hallway
+  mode: single
+- id: '1700000000002'
+  alias: Legacy notify on low battery
+  initial_state: 'off'
+  trace:
+    stored_traces: 20
+  trigger:
+    - platform: numeric_state
+      entity_id: sensor.phone_battery
+      below: 15
+  condition:
+    - condition: template
+      value_template: "{{ is_state('person.me', 'home') }}"
+  action:
+    - service: notify.mobile_app_phone
+      data:
+        title: Battery low
+        message: Charge your phone
+    - service: notify.alexa_media
+      data:
+        target: media_player.kitchen_echo
+        message: Phone battery is low
+        data:
+          type: announce
+    - service: browser_mod.popup
+      data:
+        title: Battery
+        content: Phone battery is low
+    - service: homeassistant.delete_all_orphaned_entities
+    - service: pyscript.notify_all
+      data:
+        level: warning
+    - action: rest_command.webhook
+      data:
+        token: !secret webhook_token
+  mode: queued
+  max: 3
+  max_exceeded: silent
+- id: '1700000000003'
+  alias: Motion light (blueprint)
+  use_blueprint:
+    path: homeassistant/motion_light.yaml
+    input:
+      motion_entity: binary_sensor.kitchen_motion
+      light_target:
+        entity_id: light.kitchen
+- id: '1700000000004'
+  alias: With anchors
+  trigger_variables:
+    room: office
+  variables:
+    level: &level 40
+  triggers:
+    - &motion
+      trigger: state
+      entity_id: binary_sensor.office_motion
+      to: "on"
+    - <<: *motion
+      to: "off"
+      for: "00:05:00"
+  actions:
+    - action: light.turn_on
+      target:
+        entity_id: light.office
+      data:
+        brightness_pct: *level

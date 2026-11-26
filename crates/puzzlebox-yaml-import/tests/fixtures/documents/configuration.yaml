@@ -1,0 +1,76 @@
+# Loads default set of integrations. Do not remove.
+default_config:
+
+homeassistant:
+  name: Home
+  latitude: !secret home_latitude
+  longitude: !secret home_longitude
+  packages:
+    from_file: !include packages/garage.yaml
+    everything: !include_dir_named packages/more
+    inline_lights:
+      input_boolean:
+        night_mode:
+          name: Night mode
+      automation:
+        - id: night_mode_on
+          alias: Night mode on at 23:00
+          trigger:
+            platform: time
+            at: "23:00:00"
+          action:
+            service: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.night_mode
+      script:
+        all_off:
+          alias: All lights off
+          sequence:
+            - action: light.turn_off
+              target:
+                entity_id: all
+
+http:
+  ssl_certificate: !env_var SSL_CERT /ssl/fullchain.pem
+  api_password: !secret http_password
+
+frontend:
+  themes: !include_dir_merge_named themes
+
+automation: !include automations.yaml
+automation manual:
+  - alias: Porch light at sunset
+    trigger:
+      - platform: sun
+        event: sunset
+    action:
+      - service: light.turn_on
+        entity_id: light.porch
+automation old:
+  alias: Single legacy automation
+  trigger:
+    platform: state
+    entity_id: binary_sensor.door
+    to: "on"
+  condition:
+    condition: state
+    entity_id: alarm_control_panel.home
+    state: armed_away
+  action:
+    service: notify.mobile_app_phone
+    data:
+      message: Door opened!
+
+script: !include scripts.yaml
+script more:
+  goodnight:
+    alias: Goodnight
+    icon: mdi:weather-night
+    mode: Queued
+    max: "5"
+    sequence:
+      - action: script.all_off
+scene: !include scenes.yaml
+sensor:
+  - platform: template
+    sensors: {}

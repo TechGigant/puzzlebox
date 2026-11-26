@@ -140,7 +140,7 @@ export const api = {
   importYaml: (yaml: string) => request<ImportedProgram[]>('POST', 'api/import', { yaml }),
   automations: () => request<{ entity_id: string; name: string; state: string }[]>('GET', 'api/import/automations'),
   importAutomations: (entity_ids: string[]) =>
-    request<(ImportedProgram & { entity_id: string; error?: string })[]>('POST', 'api/import/automations', { entity_ids }),
+    request<(ImportedProgram & { entity_id: string })[]>('POST', 'api/import/automations', { entity_ids }),
   settings: () => request<Settings>('GET', 'api/settings'),
   plugins: () => request<PluginsInfo>('GET', 'api/plugins'),
   reloadPlugins: () => request<{ ok: boolean; errors: { path: string; error: string }[] }>('POST', 'api/plugins/reload', {}),
@@ -156,6 +156,9 @@ export interface ImportedProgram {
   max_runs: number;
   workspace: object;
   raw_blocks: number;
+  /** Things to check, such as `!secret` placeholders or an expanded blueprint. */
+  warnings?: string[];
+  error?: string;
 }
 
 export interface Settings {

@@ -38,22 +38,28 @@ pub struct Documents {
 }
 
 /// The automations/scripts in a document, with their key when they came from a map.
+#[cfg(test)]
 pub(crate) fn configs(text: &str) -> Result<Vec<(Option<String>, Value)>, String> {
     let docs = documents(text)?;
-    let ok: Vec<(Option<String>, Value)> =
-        docs.items.iter().filter(|d| d.error.is_none()).map(|d| (d.key.clone(), d.config.clone())).collect();
-    if ok.is_empty() {
-        let reasons: Vec<&str> = docs
-            .items
-            .iter()
-            .filter_map(|d| d.error.as_deref())
-            .chain(docs.warnings.iter().map(String::as_str))
-            .collect();
-        if !reasons.is_empty() {
-            return Err(format!("no automations or scripts could be imported: {}", reasons.join(" ")));
-        }
+    if let Some(err) = nothing_importable(&docs) {
+        return Err(err);
     }
-    Ok(ok)
+    Ok(docs.items.iter().filter(|d| d.error.is_none()).map(|d| (d.key.clone(), d.config.clone())).collect())
+}
+
+/// Why nothing in `docs` can be imported, if that's the case and there is a reason to give.
+pub(crate) fn nothing_importable(docs: &Documents) -> Option<String> {
+    if docs.items.iter().any(|d| d.error.is_none()) {
+        return None;
+    }
+    let reasons: Vec<&str> = docs
+        .items
+        .iter()
+        .filter_map(|d| d.error.as_deref())
+        .chain(docs.warnings.iter().map(String::as_str))
+        .collect();
+    (!reasons.is_empty())
+        .then(|| format!("no automations or scripts could be imported: {}", reasons.join(" ")))
 }
 
 /// Finds every automation and script in `text`, however it is laid out.

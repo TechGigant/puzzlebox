@@ -101,6 +101,11 @@
               <span class="ok">fully converted</span>
             {/if}
           </label>
+          {#if item.warnings?.length}
+            <ul class="warnings">
+              {#each item.warnings as w, j (j)}<li>{w}</li>{/each}
+            </ul>
+          {/if}
         {/each}
       </div>
       <p class="muted note">Imported programs start <b>disabled</b>. Turn off the original automation before enabling its program, or both will run.</p>
@@ -205,5 +210,11 @@
   }
   .note {
     margin: 0;
+  }
+  .warnings {
+    margin: -2px 0 6px 30px;
+    padding-left: 16px;
+    color: #ef6c00;
+    font-size: 13px;
   }
 </style>

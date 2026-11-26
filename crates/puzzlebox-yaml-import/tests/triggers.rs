@@ -329,8 +329,15 @@ fn triggers_without_blocks_stay_raw() {
 
 #[test]
 fn base_options() {
-    // Ids stay in the raw YAML (native blocks report their block id as trigger.id).
-    check_raw("- {trigger: state, entity_id: light.a, to: 'on', id: light_on}");
+    // A unique id becomes the block id, which the compiler sends as the trigger's id.
+    let out = import("- {trigger: state, entity_id: light.a, to: 'on', id: light_on}");
+    assert_eq!(out.types, ["ha_trigger_becomes"]);
+    assert_eq!(out.blocks[0]["id"], "light_on");
+    // Repeated ids can't be block ids, so they stay in the raw YAML.
+    let out = import(
+        "- {trigger: state, entity_id: light.a, to: 'on', id: x}\n- {trigger: state, entity_id: light.b, to: 'on', id: x}",
+    );
+    assert_eq!(out.types, ["ha_trigger_raw", "ha_trigger_raw"]);
     check_raw("- {trigger: state, entity_id: light.a, to: 'on', alias: Light on}");
     check_raw("- {trigger: state, entity_id: light.a, to: 'on', variables: {room: kitchen}}");
     check_raw("- {trigger: event, event_type: x, enabled: \"{{ true }}\"}");
@@ -366,5 +373,5 @@ fn every_trigger_form_compiles() {
     let out = import_triggers(&text);
     let native = out.types.iter().filter(|t| *t != "ha_trigger_raw").count();
     assert_eq!(out.types.len(), native + out.raw);
-    assert_eq!((native, out.raw), (30, 33), "{:?}", out.types);
+    assert_eq!((native, out.raw), (31, 32), "{:?}", out.types);
 }

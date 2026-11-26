@@ -60,8 +60,8 @@ fn imports_and_compiles_automation() {
     let imp = &out[0];
     assert_eq!(imp.name, "Hallway motion light");
     assert_eq!(imp.mode, "restart");
-    // zone trigger, template condition and repeat-until stay raw.
-    assert_eq!(imp.raw_blocks, 3);
+    // The template condition and repeat-until stay raw.
+    assert_eq!(imp.raw_blocks, 2);
 
     let program = compile(&imp.workspace, &NoExternals).expect("imported workspace compiles");
     let h = &program.handlers[0];

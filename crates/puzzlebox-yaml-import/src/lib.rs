@@ -5,12 +5,14 @@
 
 mod actions;
 mod conditions;
-mod documents;
+pub mod documents;
 mod templates;
 mod triggers;
 
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+
+pub use documents::{Document, Documents, documents};
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Imported {
@@ -21,16 +23,55 @@ pub struct Imported {
     pub workspace: Value,
     /// Constructs kept as raw YAML blocks (still work, just not editable as blocks).
     pub raw_blocks: usize,
+    /// Things the user should check (placeholders for secrets, expanded blueprints, …).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Set when the item was found but can't be imported (e.g. its blueprint is missing).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
-/// Accepts a single automation/script, a list of them, or a `{script_id: {...}}` map.
+/// Imports every automation and script found in `text` (see [`documents`] for the layouts it
+/// understands). Items that can't be imported are returned with `error` set (an error when no
+/// item can be imported at all); warnings about the whole paste go on the first item.
 pub fn import_yaml(text: &str) -> Result<Vec<Imported>, String> {
-    let out: Vec<Imported> =
-        documents::configs(text)?.into_iter().map(|(key, v)| import_one(&v, key.as_deref())).collect();
-    if out.is_empty() {
+    let docs = documents(text)?;
+    if let Some(err) = documents::nothing_importable(&docs) {
+        return Err(err);
+    }
+    if docs.items.is_empty() {
         return Err("no automations or scripts found".into());
     }
+    let mut out: Vec<Imported> = docs
+        .items
+        .into_iter()
+        .map(|d| {
+            let mut imp = match &d.error {
+                None => import_one(&d.config, d.key.as_deref()),
+                Some(_) => Imported {
+                    name: name_of(&d.config, d.key.as_deref()),
+                    description: String::new(),
+                    mode: "single".into(),
+                    max_runs: 10,
+                    workspace: json!({}),
+                    raw_blocks: 0,
+                    warnings: vec![],
+                    error: None,
+                },
+            };
+            imp.warnings.extend(d.warnings);
+            imp.error = d.error;
+            imp
+        })
+        .collect();
+    let first = &mut out[0].warnings;
+    first.splice(0..0, docs.warnings);
     Ok(out)
+}
+
+fn name_of(cfg: &Value, key: Option<&str>) -> String {
+    let id = cfg["id"].as_str().filter(|_| key.is_none());
+    cfg["alias"].as_str().or(key).or(id).map(str::to_owned).unwrap_or_else(|| "Imported".into())
 }
 
 pub(crate) fn is_config(v: &Value) -> bool {
@@ -39,11 +80,7 @@ pub(crate) fn is_config(v: &Value) -> bool {
 
 pub fn import_one(cfg: &Value, key: Option<&str>) -> Imported {
     let mut b = Builder::default();
-    let name = cfg["alias"]
-        .as_str()
-        .map(str::to_owned)
-        .or(key.map(str::to_owned))
-        .unwrap_or_else(|| "Imported".into());
+    let name = name_of(cfg, key);
 
     let mut body = Vec::new();
     if let Some(vars) = cfg.get("variables").and_then(Value::as_object) {
@@ -69,7 +106,7 @@ pub fn import_one(cfg: &Value, key: Option<&str>) -> Imported {
         // Scripts have no triggers: run them manually (Run button / service).
         b.block("ha_on_run", json!({}), vec![("DO", chain(body))], None)
     } else {
-        let trig = b.triggers(&triggers);
+        let trig = b.automation_triggers(&triggers);
         b.block("ha_when", json!({}), vec![("TRIGGERS", chain(trig)), ("DO", chain(body))], None)
     };
     let mut top = top;
@@ -84,6 +121,8 @@ pub fn import_one(cfg: &Value, key: Option<&str>) -> Imported {
         max_runs: cfg["max"].as_u64().unwrap_or(10) as u32,
         workspace: json!({"blocks": {"languageVersion": 0, "blocks": [top]}, "variables": variables}),
         raw_blocks: b.raw,
+        warnings: vec![],
+        error: None,
     }
 }
 
@@ -236,19 +275,5 @@ impl Builder {
                 self.block("variables_set", json!({"VAR": {"id": id}}), vec![("VALUE", Some(val))], None)
             })
             .collect()
-    }
-}
-
-/// `"-00:30:00"` / `"01:00:00"` / seconds → signed seconds.
-pub(crate) fn offset_seconds(v: &Value) -> Option<f64> {
-    match v {
-        Value::String(s) => {
-            let (sign, rest) = match s.strip_prefix('-') {
-                Some(r) => (-1.0, r),
-                None => (1.0, s.strip_prefix('+').unwrap_or(s)),
-            };
-            seconds(&json!(rest)).map(|x| sign * x)
-        }
-        other => seconds(other),
     }
 }

@@ -16,7 +16,7 @@ fn import(name: &str) -> Vec<String> {
             panic!("{name} / {}: {errors:?}\n{:#}", item.name, item.workspace);
         }
     }
-    items.into_iter().map(|i| i.name).collect()
+    items.into_iter().filter(|i| i.error.is_none()).map(|i| i.name).collect()
 }
 
 #[test]
@@ -35,7 +35,9 @@ fn configuration_yaml_with_packages() {
 
 #[test]
 fn automations_yaml() {
-    // The `use_blueprint` automation is skipped: its blueprint isn't in the paste.
+    // The `use_blueprint` automation can't be imported: its blueprint isn't in the paste.
+    let items = import_yaml(&fixture("automations.yaml")).unwrap();
+    assert!(items.iter().any(|i| i.name == "Motion light (blueprint)" && i.error.is_some()));
     assert_eq!(
         import("automations.yaml"),
         ["Hallway motion light", "Legacy notify on low battery", "With anchors"]

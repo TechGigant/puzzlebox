@@ -31,7 +31,6 @@ impl Builder {
     /// YAML, so `triggered_by` with `X` matches them too. Ids that are used more than once, or
     /// that look like the importer's own block (`imp<N>`) or variable (`var_<N>`) ids, stay raw
     /// so block ids remain unique; so does a trigger with an id that would need several blocks.
-    #[allow(dead_code)] // until lib.rs calls it for the automation's triggers
     pub(crate) fn automation_triggers(&mut self, list: &[Value]) -> Vec<Value> {
         let flat = flatten(list);
         let mut counts: HashMap<String, usize> = HashMap::new();

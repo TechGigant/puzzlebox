@@ -1,0 +1,235 @@
+# One automation using every kind of script action Home Assistant 2026.11 accepts.
+alias: Every action
+mode: queued
+max: 5
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.door
+    to: "on"
+variables:
+  greeting: hello
+actions:
+  - action: light.turn_on
+    target:
+      entity_id: [light.a, light.b]
+      area_id: kitchen
+      floor_id: ground
+      label_id: [evening]
+      device_id: abc123
+    data:
+      brightness: 120
+      transition: 2.0
+    data_template:
+      color_name: "{{ 'red' if greeting == 'hello' else 'blue' }}"
+  - service: switch.turn_on
+    entity_id: switch.fan, switch.heater
+  - action: "{{ 'light.turn_off' }}"
+    target: {entity_id: light.a}
+  - action: light.turn_off
+    target: {entity_id: all}
+  - action: light.turn_off
+    target: "{{ {'entity_id': 'light.a'} }}"
+  - action: light.turn_on
+    target: {entity_id: "{{ trigger.entity_id | replace('binary_sensor', 'light') }}"}
+  - sequence:
+      - action: weather.get_forecasts
+        target: {entity_id: weather.home}
+        data: {type: daily}
+        response_variable: forecast
+      - action: notify.mobile_app_phone
+        data:
+          title: Door
+          message: "Forecast: {{ forecast['weather.home'].forecast[0].condition }}"
+  - action: notify.mobile_app_phone
+    data: {title: Door, message: "Opened at {{ now().strftime('%H:%M') }}"}
+  - action: persistent_notification.create
+    data: {message: Opened}
+  - action: notify.send_message
+    target: {entity_id: notify.kitchen_display}
+    data: {message: Opened}
+  - action: tts.speak
+    target: {entity_id: tts.piper}
+    data: {message: Welcome, media_player_entity_id: media_player.kitchen}
+  - action: input_number.set_value
+    target: {entity_id: input_number.level}
+    data: {value: 3}
+  - action: input_select.select_option
+    target: {entity_id: input_select.mode}
+    data: {option: away}
+  - action: input_boolean.turn_on
+    target: {entity_id: input_boolean.guest}
+  - action: input_datetime.set_datetime
+    target: {entity_id: input_datetime.alarm}
+    data: {time: "07:00:00"}
+  - action: light.turn_on
+    target: {entity_id: light.a}
+    data: {brightness_pct: 40, transition: 3}
+  - action: light.turn_on
+    target: {entity_id: light.a}
+    data: {color_temp_kelvin: 2700}
+  - action: light.turn_on
+    target: {entity_id: light.a}
+    data: {rgb_color: [255, 128, 0], brightness_pct: 80}
+  - action: light.turn_on
+    target: {entity_id: light.a}
+    data: {brightness_step_pct: -10}
+  - action: light.toggle
+    target: {entity_id: light.a}
+  - action: cover.open_cover
+    target: {area_id: living_room}
+  - action: cover.set_cover_position
+    target: {entity_id: cover.blind}
+    data: {position: "{{ 50 }}"}
+  - action: climate.set_hvac_mode
+    target: {entity_id: climate.lounge}
+    data: {hvac_mode: heat}
+  - action: climate.set_temperature
+    target: {entity_id: climate.lounge}
+    data: {temperature: 21.5}
+  - action: media_player.volume_set
+    target: {entity_id: media_player.kitchen}
+    data: {volume_level: 0.25}
+  - action: media_player.media_pause
+    target: {entity_id: media_player.kitchen}
+  - action: homeassistant.turn_off
+    target: {label_id: away_off}
+  - action: lock.lock
+    target: {entity_id: lock.front}
+  - action: vacuum.return_to_base
+    target: {entity_id: vacuum.robot}
+  - action: counter.increment
+    target: {entity_id: counter.visits}
+  - action: fan.set_percentage
+    target: {entity_id: fan.ceiling}
+    data: {percentage: 30}
+  - action: script.turn_on
+    target: {entity_id: script.welcome}
+    data:
+      variables: {who: "{{ trigger.to_state.name }}"}
+  - action: script.welcome
+    data: {who: guest}
+  - scene: scene.evening
+  - action: scene.turn_on
+    target: {entity_id: scene.night}
+    data: {transition: 5}
+  - delay: "00:00:05"
+  - delay: "00:01"
+  - delay: 2.5
+  - delay: {minutes: 1, seconds: 30}
+  - delay: "{{ 3 }}"
+  - delay: {seconds: "{{ 2 }}"}
+  - wait_for_trigger:
+      - trigger: state
+        entity_id: binary_sensor.door
+        to: "off"
+    timeout: {minutes: 2}
+  - if: "{{ wait.trigger is none }}"
+    then:
+      - action: notify.notify
+        data: {message: Still open}
+  - wait_for_trigger:
+      - trigger: event
+        event_type: confirm
+    timeout: 30
+    continue_on_timeout: false
+  - event: door_opened
+    event_data: {by: door}
+  - event: door_opened
+    event_data_template: {who: "{{ trigger.entity_id }}"}
+  - choose:
+      - conditions: "{{ greeting == 'hello' }}"
+        sequence:
+          - action: light.turn_on
+            target: {entity_id: light.a}
+      - alias: Night
+        conditions:
+          - condition: state
+            entity_id: sun.sun
+            state: below_horizon
+        sequence: []
+    default:
+      - action: light.turn_off
+        target: {entity_id: light.a}
+  - if:
+      - condition: state
+        entity_id: input_boolean.guest
+        state: "on"
+    then:
+      - condition: template
+        value_template: "{{ greeting != '' }}"
+      - action: light.turn_on
+        target: {entity_id: light.guest}
+    else:
+      - action: light.turn_off
+        target: {entity_id: light.guest}
+  - repeat:
+      count: 3
+      sequence:
+        - action: light.toggle
+          target: {entity_id: light.a}
+  - repeat:
+      while: "{{ is_state('light.a', 'on') }}"
+      sequence:
+        - delay: 1
+  - repeat:
+      until:
+        - condition: state
+          entity_id: light.a
+          state: "off"
+      sequence:
+        - action: light.turn_off
+          target: {entity_id: light.a}
+  - repeat:
+      for_each: [light.a, light.b]
+      sequence:
+        - action: light.turn_off
+          target: {entity_id: "{{ repeat.item }}"}
+  - repeat:
+      count: "{{ 2 }}"
+      sequence:
+        - action: light.toggle
+          target: {entity_id: light.a}
+  - parallel:
+      - action: light.turn_on
+        target: {entity_id: light.a}
+      - sequence:
+          - delay: 1
+          - action: light.turn_on
+            target: {entity_id: light.b}
+      - - action: light.turn_on
+          target: {entity_id: light.c}
+  - sequence:
+      - action: light.turn_on
+        target: {entity_id: light.d}
+  - variables:
+      count: 1
+      label: "{{ greeting }} world"
+  - set_conversation_response: "{{ label }}"
+  - device_id: abc123
+    domain: light
+    entity_id: 0123456789abcdef0123456789abcdef
+    type: turn_on
+  - alias: Careful
+    action: light.turn_on
+    target: {entity_id: light.a}
+    continue_on_error: true
+  - action: light.turn_on
+    target: {entity_id: light.a}
+    continue_on_error: false
+  - action: light.turn_on
+    target: {entity_id: light.z}
+    enabled: false
+  - action: light.turn_on
+    target: {entity_id: light.y}
+    enabled: "{{ greeting == 'hello' }}"
+  - wait_template: "{{ is_state('binary_sensor.door', 'off') }}"
+    timeout: "00:01:00"
+  - condition: state
+    entity_id: input_boolean.armed
+    state: "on"
+  - and:
+      - "{{ true }}"
+  - stop: Done
+    response_variable: greeting
+  - action: light.turn_on
+    target: {entity_id: light.never}

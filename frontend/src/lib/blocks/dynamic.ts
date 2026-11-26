@@ -110,7 +110,7 @@ function shadowFor(p: Param): Blockly.serialization.blocks.State | null {
 
 function labelFor(p: Param): string {
   if (p.input === 'number' && p.unit) return `${p.label} (${p.unit})`;
-  if (p.input === 'duration') return `${p.label} (s)`;
+  if (p.input === 'duration') return `${p.label} (seconds)`;
   return p.label;
 }
 

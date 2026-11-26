@@ -5,11 +5,17 @@ import * as Blockly from 'blockly/core';
 import { allBlockDefs, blockDef } from '../blocks/dynamic';
 import { deviceAlternatives } from '../blocks/devices';
 import { optionNames } from '../blocks/conditions';
+import { hasTriggerSettings } from '../blocks/trigger_settings';
+import { applyConversion, conversion } from './integration_switch';
 
 export interface Alternative {
   label: string;
   type: string;
   extraState?: unknown;
+  /** Finishes the new block (after the carried fields and inner blocks are in). */
+  apply?: (block: Blockly.BlockSvg) => void;
+  /** Inputs whose blocks the new block took over in another form; they are deleted. */
+  drop?: string[];
 }
 
 /** Built-in blocks that can stand in for each other (same shape, mostly the same fields). */
@@ -95,6 +101,12 @@ const GROUPS: [string, string][][] = [
 ];
 
 export function alternatives(block: Blockly.Block): Alternative[] {
+  if (block.type === 'ha_trigger_integration' || block.type === 'ha_condition_integration') {
+    const c = conversion(block);
+    if (!c) return [];
+    const extraState = c.optional.length ? { optional: c.optional } : undefined;
+    return [{ label: c.def.title, type: c.def.type, extraState, apply: (b) => applyConversion(b, c), drop: ['OPTIONS'] }];
+  }
   if (block.type.startsWith('device_')) {
     return deviceAlternatives(block).map((a) => ({ label: a.label, type: block.type, extraState: a.extraState }));
   }
@@ -142,7 +154,15 @@ export function switchBlock(old: Blockly.BlockSvg, alt: Alternative): Blockly.Bl
       children.push({ name: input.name, child: child && !child.isShadow() ? child : null, shadow: c.getShadowState(true) });
     }
     const next = old.getNextBlock() as Blockly.BlockSvg | null;
-    const extraState = alt.extraState ?? carriedExtraState(old, alt.type);
+    let extraState = alt.extraState ?? carriedExtraState(old, alt.type);
+    // The trigger id and name stay when the new block has them too.
+    const settings = (old.saveExtraState?.() as { triggerSettings?: string[] } | null)?.triggerSettings;
+    if (settings && hasTriggerSettings(alt.type)) extraState = { ...(extraState ?? {}), triggerSettings: settings };
+    for (const c of children) {
+      if (!alt.drop?.includes(c.name)) continue;
+      c.child?.dispose(false);
+      c.child = null;
+    }
     for (const { child } of children) child?.unplug(false);
     next?.unplug(false);
     old.unplug(false);
@@ -170,6 +190,7 @@ export function switchBlock(old: Blockly.BlockSvg, alt: Alternative): Blockly.Bl
       if (shadow) c.setShadowState(shadow);
       if (child) link(c, child.outputConnection ?? child.previousConnection);
     }
+    alt.apply?.(block);
     if (next) link(block.nextConnection, next.previousConnection);
     if (!(parent && link(parent, block.outputConnection ?? block.previousConnection))) block.moveTo(xy);
     block.select();

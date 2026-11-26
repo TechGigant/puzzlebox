@@ -3,7 +3,10 @@
 
 use serde_json::{Map, Value, json};
 
+use std::collections::HashMap;
+
 use super::{Block, Compiler, duration_or_none, number};
+use crate::ir::{Expr, ExprKind, Trigger, normalize_target};
 
 /// HA's `WEEKDAYS`, in its order.
 const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -41,6 +44,47 @@ fn attribute_value(s: &str) -> Value {
     }
 }
 
+/// The id and name (alias) a trigger block can be given, as HA config keys.
+const SETTINGS: [(&str, &str); 2] = [("TRIGGER_ID", "id"), ("TRIGGER_ALIAS", "alias")];
+
+fn setting<'a>(b: &Block<'a>, field: &str) -> Option<&'a str> {
+    b.field_str(field).filter(|s| !s.trim().is_empty())
+}
+
+/// Every block with a trigger id set (anywhere in the workspace), by block id.
+pub(super) fn explicit_ids(workspace: &Value) -> HashMap<String, String> {
+    fn walk(v: &Value, out: &mut HashMap<String, String>) {
+        match v {
+            Value::Object(m) => {
+                if let (Some(Value::String(id)), Some(own)) = (m.get("id"), setting(&Block(v), "TRIGGER_ID"))
+                {
+                    out.insert(id.clone(), own.to_owned());
+                }
+                m.values().for_each(|x| walk(x, out));
+            }
+            Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+            _ => {}
+        }
+    }
+    let mut out = HashMap::new();
+    walk(workspace, &mut out);
+    out
+}
+
+/// The value of a socket that holds only fixed blocks (text, numbers, lists, dictionaries…).
+pub(super) fn fixed(e: &Expr) -> Option<Value> {
+    match &e.kind {
+        ExprKind::Lit { value } => Some(value.clone()),
+        ExprKind::List { items } => items.iter().map(fixed).collect::<Option<Vec<_>>>().map(Value::Array),
+        ExprKind::Dict { entries } => entries
+            .iter()
+            .map(|(k, v)| Some((k.clone(), fixed(v)?)))
+            .collect::<Option<Map<_, _>>>()
+            .map(Value::Object),
+        _ => None,
+    }
+}
+
 fn checked(b: &Block<'_>, field: &str, default: bool) -> bool {
     match b.field_str(field) {
         Some(v) => v == "TRUE",
@@ -49,6 +93,55 @@ fn checked(b: &Block<'_>, field: &str, default: bool) -> bool {
 }
 
 impl Compiler<'_> {
+    /// A trigger block with its id and name, if set.
+    pub(super) fn trigger(&mut self, b: Block<'_>) -> Option<Trigger> {
+        let mut t = self.trigger_block(b)?;
+        let set: Vec<(&str, &str)> =
+            SETTINGS.iter().filter_map(|(field, key)| Some((*key, setting(&b, field)?))).collect();
+        if set.is_empty() {
+            return Some(t);
+        }
+        match &mut t {
+            Trigger::Ha { config: Value::Object(cfg), .. } => {
+                for (key, v) in set {
+                    cfg.insert(key.into(), json!(v));
+                }
+            }
+            _ => self.err(&b, "only Home Assistant triggers can have an id or a name"),
+        }
+        Some(t)
+    }
+
+    /// The target socket of an integration trigger or condition; an untouched, empty entity
+    /// picker means no target.
+    pub(super) fn integration_target(&mut self, b: &Block<'_>) -> Option<Expr> {
+        let empty = b.input("TARGET").is_some_and(|t| {
+            t.ty() == "ha_entity" && t.field_str("ENTITY").is_none_or(|e| e.trim().is_empty())
+        });
+        if empty { None } else { self.value_opt(b, "TARGET") }
+    }
+
+    /// `{"trigger": "light.turned_on", "target": …, "options": …}`, for any integration's trigger.
+    fn integration_trigger(&mut self, b: &Block<'_>) -> Option<Value> {
+        let mut cfg = json!({"trigger": self.required_str(b, "NAME")});
+        if let Some(t) = self.integration_target(b) {
+            match fixed(&t).map(|v| normalize_target(&v)) {
+                Some(Ok(t)) => cfg["target"] = t,
+                Some(Err(e)) => self.err(b, e),
+                None => {
+                    self.err(b, "the trigger target must be fixed entities, areas, floors, labels or devices")
+                }
+            }
+        }
+        match self.value_opt(b, "OPTIONS").map(|e| fixed(&e)) {
+            None | Some(Some(Value::Null)) => {}
+            Some(Some(o @ Value::Object(_))) => cfg["options"] = o,
+            Some(Some(_)) => self.err(b, "the options must be a dictionary"),
+            Some(None) => self.err(b, "a trigger needs fixed options, not a variable or calculation"),
+        }
+        Some(cfg)
+    }
+
     /// HA trigger blocks; `None` if `b` isn't one, `Some(None)` if it has errors.
     pub(super) fn ha_trigger(&mut self, b: &Block<'_>) -> Option<Option<Value>> {
         Some(match b.ty() {
@@ -56,6 +149,7 @@ impl Compiler<'_> {
             "ha_trigger_numeric" => Some(self.numeric_trigger(b)),
             "ha_trigger_time" => self.time_trigger(b),
             "ha_trigger_time_pattern" => self.time_pattern_trigger(b),
+            "ha_trigger_integration" => self.integration_trigger(b),
             "ha_trigger_ha_start" => {
                 let event = if b.field_str("EVENT") == Some("shutdown") { "shutdown" } else { "start" };
                 Some(json!({"trigger": "homeassistant", "event": event}))

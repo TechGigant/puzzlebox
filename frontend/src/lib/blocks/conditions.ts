@@ -215,6 +215,16 @@ export const CONDITION_BLOCKS: Json[] = [
     style: 'condition_blocks',
     tooltip: 'A Home Assistant template condition: true only when the template renders as "true".',
   },
+  {
+    type: 'ha_condition_integration',
+    message0: 'Home Assistant condition %1 %2 on %3 with options %4',
+    args0: [text('NAME', 'light.is_on'), { type: 'input_dummy' }, value('TARGET'), { type: 'input_value', name: 'OPTIONS', check: ['Dict', 'Object'] }],
+    output: 'Boolean',
+    style: 'condition_blocks',
+    inputsInline: false,
+    tooltip:
+      'Any condition an integration offers, by its name (like light.is_on): what it checks (entities, areas, floors, labels or devices; leave it empty if the condition has none) and its options as a dictionary. The blocks for your own Home Assistant\'s conditions are under Home Assistant.',
+  },
 ];
 
 let registered = false;

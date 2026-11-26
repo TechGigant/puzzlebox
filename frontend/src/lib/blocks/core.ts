@@ -3,6 +3,7 @@ import { registerFieldMultilineInput } from '@blockly/field-multilineinput';
 import { registerFieldColour } from '@blockly/field-colour';
 import { registerFieldEntity } from './field_entity';
 import { registerConditionOptions } from './conditions';
+import { haTriggerTypes, installTriggerSettings } from './trigger_settings';
 
 type Json = Record<string, unknown>;
 
@@ -21,9 +22,11 @@ const time = (name: string, value = '') => ({ type: 'field_time', name, text: va
 const COLOUR = ['Colour', 'String'];
 const dummy = { type: 'input_dummy' };
 
-/** Short description of a trigger block for the "triggered by" dropdown. */
+/** Short description of a trigger block for the "triggered by" dropdown: its name or id if set. */
 function describeTrigger(b: Blockly.Block): string {
-  const t = b.toString(42).replace(/\s+/g, ' ').trim();
+  const own = [b.getFieldValue('TRIGGER_ALIAS'), b.getFieldValue('TRIGGER_ID')].find((v) => typeof v === 'string' && v.trim());
+  if (own) return own;
+  const t = b.toString(42).replace(/＋ (option|more settings)/g, '').replace(/\s+/g, ' ').trim();
   return t || b.type;
 }
 
@@ -281,6 +284,15 @@ export const CORE_BLOCKS: Json[] = [
     'Fires on requests to /api/webhook/<id> on your Home Assistant URL (Home Assistant\'s own webhooks). "trigger detail" json, data or query has what was sent.',
   ),
   trigger('ha_trigger_raw', 'HA trigger (YAML) %1', [multiline('CONFIG', 'trigger: state\nentity_id: sun.sun')], 'Any native Home Assistant trigger, written as YAML.'),
+  {
+    ...trigger(
+      'ha_trigger_integration',
+      'Home Assistant trigger %1 %2 on %3 with options %4',
+      [text('NAME', 'light.turned_on'), dummy, value('TARGET'), value('OPTIONS', ['Dict', 'Object'])],
+      'Any trigger an integration offers, by its name (like light.turned_on): what it watches (entities, areas, floors, labels or devices; leave it empty if the trigger has none) and its options as a dictionary. The blocks for your own Home Assistant\'s triggers are under Home Assistant.',
+    ),
+    inputsInline: false,
+  },
 
   // --- actions --------------------------------------------------------------
   action(
@@ -727,4 +739,5 @@ export function registerCoreBlocks(): void {
     if ((b as { nextStatement?: unknown }).nextStatement === undefined) delete (b as Json).nextStatement;
   }
   Blockly.common.defineBlocksWithJsonArray(CORE_BLOCKS);
+  installTriggerSettings(haTriggerTypes(CORE_BLOCKS));
 }

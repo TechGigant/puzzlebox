@@ -15,39 +15,15 @@ const BASE_KEYS: [&str; 7] = ["trigger", "platform", "id", "alias", "variables",
 /// What a trigger's base keys mean for the blocks made from it.
 struct Base {
     disabled: bool,
+    /// The trigger id and name (alias), as the block's settings (field, value).
+    settings: Vec<(&'static str, String)>,
 }
 
 impl Builder {
-    /// Triggers anywhere (also `wait_for_trigger`): a trigger with an `id` stays raw, because
-    /// only the compiler's automation triggers report the block id as `trigger.id`.
+    /// Triggers anywhere (automations and `wait_for_trigger`). An `id` or `alias` becomes the
+    /// block's trigger id or name setting, which the compiler sends as is.
     pub(crate) fn triggers(&mut self, list: &[Value]) -> Vec<Value> {
-        flatten(list).iter().flat_map(|t| self.trigger_blocks(t, None, true)).collect()
-    }
-
-    /// The automation's own triggers. A native block made from a trigger with `id: X` gets the
-    /// Blockly block id `X`: the compiler injects the block id as the HA config's `id` (and the
-    /// engine reports it for its own triggers), so `trigger.id` stays exactly `X`, and a
-    /// `triggered_by` block with `TRIGGER: X` matches it. Raw triggers keep `id: X` in their
-    /// YAML, so `triggered_by` with `X` matches them too. Ids that are used more than once, or
-    /// that look like the importer's own block (`imp<N>`) or variable (`var_<N>`) ids, stay raw
-    /// so block ids remain unique; so does a trigger with an id that would need several blocks.
-    pub(crate) fn automation_triggers(&mut self, list: &[Value]) -> Vec<Value> {
-        let flat = flatten(list);
-        let mut counts: HashMap<String, usize> = HashMap::new();
-        for t in &flat {
-            if let Some(id) = t.get("id").and_then(Value::as_str) {
-                *counts.entry(id.to_owned()).or_default() += 1;
-            }
-        }
-        flat.iter()
-            .flat_map(|t| {
-                let id = t
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .filter(|id| counts.get(*id) == Some(&1) && usable_block_id(id));
-                self.trigger_blocks(t, id, true)
-            })
-            .collect()
+        flatten(list).iter().flat_map(|t| self.trigger_blocks(t, true)).collect()
     }
 
     pub(crate) fn raw_trigger(&mut self, t: &Value) -> Value {
@@ -55,13 +31,12 @@ impl Builder {
         self.block("ha_trigger_raw", json!({"CONFIG": yaml(t)}), vec![], None)
     }
 
-    /// Blocks for one trigger. `id` is the user's trigger id when it may become the block id;
-    /// `split` allows one block per list item (`at: [...]`, `event_type: [...]`), which HA
-    /// treats exactly like separate triggers.
-    fn trigger_blocks(&mut self, t: &Value, id: Option<&str>, split: bool) -> Vec<Value> {
+    /// Blocks for one trigger. `split` allows one block per list item (`at: [...]`,
+    /// `event_type: [...]`), which HA treats exactly like separate triggers (with the same id).
+    fn trigger_blocks(&mut self, t: &Value, split: bool) -> Vec<Value> {
         let Some(m) = t.as_object() else { return vec![self.raw_trigger(t)] };
-        let Some(base) = base(m, id.is_some()) else { return vec![self.raw_trigger(t)] };
-        let Some(mut blocks) = self.native(m, split && id.is_none()) else {
+        let Some(base) = base(m) else { return vec![self.raw_trigger(t)] };
+        let Some(mut blocks) = self.native(m, split) else {
             return vec![self.raw_trigger(t)];
         };
         for b in &mut blocks {
@@ -71,8 +46,15 @@ impl Builder {
             if base.disabled {
                 b["disabledReasons"] = json!(["MANUALLY_DISABLED"]);
             }
-            if let Some(id) = id {
-                b["id"] = json!(id);
+            if !base.settings.is_empty() {
+                for (field, v) in &base.settings {
+                    b["fields"][*field] = json!(v);
+                }
+                let names: Vec<&str> = base.settings.iter().map(|(f, _)| *f).collect();
+                if b.get("extraState").is_none() {
+                    b["extraState"] = json!({});
+                }
+                b["extraState"]["triggerSettings"] = json!(names);
             }
         }
         blocks
@@ -106,6 +88,7 @@ impl Builder {
             "tag" => one(self.tag(&rest)?),
             "conversation" => one(self.conversation(&rest)?),
             "device" => one(self.device(m, &rest)?),
+            p if p.contains('.') => one(self.integration_trigger(p, &rest)?),
             _ => None,
         }
     }
@@ -499,6 +482,100 @@ impl Builder {
         ))
     }
 
+    /// The newer form of integration triggers (`trigger: light.turned_on`, with `target` and
+    /// `options`).
+    fn integration_trigger(&mut self, name: &str, m: &Map<String, Value>) -> Option<Value> {
+        let (target, options) = self.integration_parts(name, m)?;
+        Some(self.block(
+            "ha_trigger_integration",
+            json!({"NAME": name}),
+            vec![("TARGET", target), ("OPTIONS", options)],
+            None,
+        ))
+    }
+
+    /// The target and options blocks of an integration trigger or condition; `None` for what
+    /// the blocks can't send exactly.
+    pub(crate) fn integration_parts(
+        &mut self,
+        name: &str,
+        m: &Map<String, Value>,
+    ) -> Option<(Option<Value>, Option<Value>)> {
+        let options = match m.get("options") {
+            None => None,
+            Some(Value::Object(o)) => Some(o),
+            Some(_) => return None,
+        };
+        if !plain(name) || !only_keys(m, &["target", "options"]) {
+            return None;
+        }
+        let snapshot = self.snapshot();
+        let target = match m.get("target").map(|t| self.target_block(t)) {
+            None => None,
+            Some(Some(t)) => Some(t),
+            Some(None) => {
+                self.restore(snapshot);
+                return None;
+            }
+        };
+        Some((target, options.map(|o| self.options_block(o))))
+    }
+
+    /// Entity, area, floor, label and device blocks (in a list when there are several kinds).
+    fn target_block(&mut self, t: &Value) -> Option<Value> {
+        let m = t.as_object().filter(|m| !m.is_empty())?;
+        let kinds = [
+            ("entity_id", "ha_entity", "ENTITY"),
+            ("area_id", "ha_area", "ID"),
+            ("floor_id", "ha_floor", "ID"),
+            ("label_id", "ha_label", "ID"),
+            ("device_id", "ha_device", "ID"),
+        ];
+        if !only_keys(m, &kinds.map(|(k, _, _)| k)) {
+            return None;
+        }
+        let mut blocks = Vec::new();
+        for (key, ty, field) in kinds {
+            let Some(v) = m.get(key) else { continue };
+            let ids = comma_field(v)?;
+            // "all" and "none" are HA keywords, not ids.
+            if ids.split(", ").any(|id| ["all", "none"].contains(&id.to_lowercase().as_str())) {
+                return None;
+            }
+            blocks.push(self.block(ty, json!({field: ids}), vec![], None));
+        }
+        if blocks.len() == 1 {
+            return blocks.pop();
+        }
+        let n = blocks.len();
+        let inputs = blocks.into_iter().enumerate().map(|(i, b)| (format!("ADD{i}"), json!({"block": b})));
+        let mut list = self.block("lists_create_with", json!({}), vec![], Some(json!({"itemCount": n})));
+        list["inputs"] = Value::Object(inputs.collect());
+        Some(list)
+    }
+
+    /// A dictionary block when every value is one the blocks keep exactly (text without
+    /// templates, numbers, true/false, nothing, lists, dictionaries), else the options as YAML.
+    fn options_block(&mut self, o: &Map<String, Value>) -> Value {
+        fn exact(v: &Value) -> bool {
+            match v {
+                Value::String(s) => !is_tpl(s),
+                // Whole numbers written as 5.0 would be sent as 5.
+                Value::Number(n) => {
+                    n.is_i64() || n.as_f64().is_some_and(|f| f.is_finite() && f.fract() != 0.0)
+                }
+                Value::Bool(_) | Value::Null => true,
+                Value::Array(a) => a.iter().all(exact),
+                Value::Object(m) => m.values().all(exact),
+            }
+        }
+        if o.values().all(exact) {
+            return self.dict(o);
+        }
+        let json = serde_json::to_string(o).unwrap_or_default();
+        self.block("yaml_value", json!({"CONFIG": json}), vec![], None)
+    }
+
     /// A raw block for one entry of a split list: the original trigger with only that entry.
     fn raw_part(&mut self, all: &Map<String, Value>, key: &str, item: &Value) -> Value {
         let mut cfg = all.clone();
@@ -529,22 +606,59 @@ fn flatten(list: &[Value]) -> Vec<Value> {
 }
 
 /// Checks the base keys; `None` if one of them needs the raw block.
-fn base(m: &Map<String, Value>, id_ok: bool) -> Option<Base> {
+fn base(m: &Map<String, Value>) -> Option<Base> {
     if m.contains_key("trigger") == m.contains_key("platform") {
         return None;
     }
-    // `alias` is visible to templates as `trigger.alias`; variables and options have no block.
-    if ["alias", "variables", "options"].iter().any(|k| m.contains_key(*k)) {
+    // Trigger variables have no block.
+    if m.contains_key("variables") {
         return None;
     }
-    if m.contains_key("id") && !id_ok {
-        return None;
+    let mut settings = Vec::new();
+    for (key, field) in [("id", "TRIGGER_ID"), ("alias", "TRIGGER_ALIAS")] {
+        match m.get(key) {
+            None => {}
+            // HA takes text only; the settings leave out empty ones.
+            Some(Value::String(s)) if !s.trim().is_empty() => settings.push((field, s.clone())),
+            Some(_) => return None,
+        }
     }
     let disabled = match m.get("enabled") {
         None => false,
         Some(v) => !boolean(v)?,
     };
-    Some(Base { disabled })
+    Some(Base { disabled, settings })
+}
+
+/// Points the `triggered_by` blocks at the first of the automation's triggers with that id
+/// (they compare with its id), so the editor shows which trigger they mean.
+pub(crate) fn link_triggered_by(top: &mut Value) {
+    let mut first: HashMap<String, String> = HashMap::new();
+    let mut cur = top.pointer("/inputs/TRIGGERS/block");
+    while let Some(b) = cur {
+        if let (Some(own), Some(id)) =
+            (b.pointer("/fields/TRIGGER_ID").and_then(Value::as_str), b["id"].as_str())
+        {
+            first.entry(own.to_owned()).or_insert_with(|| id.to_owned());
+        }
+        cur = b.pointer("/next/block");
+    }
+    fn walk(v: &mut Value, first: &HashMap<String, String>) {
+        match v {
+            Value::Object(m) => {
+                if m.get("type").and_then(Value::as_str) == Some("triggered_by")
+                    && let Some(t) = m.get_mut("fields").and_then(|f| f.get_mut("TRIGGER"))
+                    && let Some(id) = t.as_str().and_then(|t| first.get(t))
+                {
+                    *t = json!(id);
+                }
+                m.values_mut().for_each(|x| walk(x, first));
+            }
+            Value::Array(a) => a.iter_mut().for_each(|x| walk(x, first)),
+            _ => {}
+        }
+    }
+    walk(top, &first);
 }
 
 /// HA's `cv.boolean` (templates are rendered by HA, so they stay raw).
@@ -561,11 +675,9 @@ fn boolean(v: &Value) -> Option<bool> {
     }
 }
 
-fn usable_block_id(id: &str) -> bool {
-    let generated = |prefix: &str| {
-        id.strip_prefix(prefix).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-    };
-    !id.is_empty() && !generated("imp") && !generated("var_")
+/// Ids like the importer's own block ids (`imp<N>`), which "triggered by" would take for one.
+pub(crate) fn looks_like_block_id(id: &str) -> bool {
+    id.strip_prefix("imp").is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// HA's template check (`is_template_string`).
@@ -747,67 +859,35 @@ mod tests {
     }
 
     #[test]
-    fn automation_triggers_keep_unique_ids_as_block_ids() {
+    fn ids_and_aliases_become_settings() {
         let list: Vec<Value> = serde_yaml::from_str(
             r#"
-- {trigger: state, entity_id: light.a, to: "on", id: arrived}
+- {trigger: state, entity_id: light.a, to: "on", id: twice, alias: Light on}
 - {trigger: state, entity_id: light.b, to: "on", id: twice}
-- {trigger: state, entity_id: light.c, to: "on", id: twice}
-- {trigger: state, entity_id: light.d, to: "on", id: imp7}
-- {trigger: state, entity_id: light.e, to: "on", id: var_1}
 - {trigger: time, at: ["07:00", "08:00"], id: split}
-- {trigger: event, event_type: x}
+- {trigger: state, entity_id: light.c, to: "on", id: ""}
+- {trigger: state, entity_id: light.c, to: "on", alias: [x]}
 "#,
         )
         .unwrap();
         let mut b = Builder::default();
-        let blocks = b.automation_triggers(&list);
+        let blocks = b.triggers(&list);
         assert_eq!(
             types(&blocks),
             [
                 "ha_trigger_becomes",
+                "ha_trigger_becomes",
+                "ha_trigger_time",
+                "ha_trigger_time",
                 "ha_trigger_raw",
-                "ha_trigger_raw",
-                "ha_trigger_raw",
-                "ha_trigger_raw",
-                "ha_trigger_raw",
-                "ha_trigger_event"
+                "ha_trigger_raw"
             ]
         );
-        assert_eq!(blocks[0]["id"], "arrived");
-        assert!(blocks[1]["fields"]["CONFIG"].as_str().unwrap().contains("id: twice"));
-        assert!(blocks[6]["id"].as_str().unwrap().starts_with("imp"));
-
-        let ws = json!({"blocks": {"blocks": [{
-            "type": "ha_when", "id": "w",
-            "inputs": {"TRIGGERS": {"block": chain(blocks).unwrap()}},
-        }]}});
-        let p = puzzlebox_ir::compile(&ws, &puzzlebox_ir::NoExternals).unwrap();
-        let puzzlebox_ir::HandlerKind::Triggers { triggers } = &p.handlers[0].kind else { panic!() };
-        let ids: Vec<&Value> = triggers
-            .iter()
-            .map(|t| match t {
-                puzzlebox_ir::Trigger::Ha { config, .. } => &config["id"],
-                _ => panic!(),
-            })
-            .collect();
-        assert_eq!(
-            ids[..6],
-            [
-                &json!("arrived"),
-                &json!("twice"),
-                &json!("twice"),
-                &json!("imp7"),
-                &json!("var_1"),
-                &json!("split")
-            ]
-        );
-    }
-
-    #[test]
-    fn plain_triggers_keep_ids_raw() {
-        let mut b = Builder::default();
-        let t = json!({"trigger": "state", "entity_id": "light.a", "to": "on", "id": "x"});
-        assert_eq!(types(&b.triggers(&[t])), ["ha_trigger_raw"]);
+        assert_eq!(blocks[0]["fields"]["TRIGGER_ID"], "twice");
+        assert_eq!(blocks[0]["fields"]["TRIGGER_ALIAS"], "Light on");
+        assert_eq!(blocks[0]["extraState"], json!({"triggerSettings": ["TRIGGER_ID", "TRIGGER_ALIAS"]}));
+        assert_eq!(blocks[1]["extraState"], json!({"triggerSettings": ["TRIGGER_ID"]}));
+        assert_eq!(blocks[2]["fields"]["TRIGGER_ID"], "split");
+        assert_eq!(blocks[3]["fields"]["TRIGGER_ID"], "split");
     }
 }

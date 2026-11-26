@@ -154,10 +154,11 @@ fn time_value(v: &Value) -> Option<String> {
     }
 }
 
-/// A trigger id that the engine's `==` compares as plain text (it compares numbers numerically).
+/// A trigger id that the engine's `==` compares as plain text (it compares numbers numerically),
+/// and that "triggered by" can't take for a block id.
 fn plain_id(v: &Value) -> Option<String> {
     let s = v.as_str()?;
-    s.trim().parse::<f64>().is_err().then(|| s.to_owned())
+    (s.trim().parse::<f64>().is_err() && !crate::triggers::looks_like_block_id(s)).then(|| s.to_owned())
 }
 
 /// A state for the state box. Attribute values keep their type when the block compiles
@@ -291,6 +292,7 @@ impl Builder {
                         self.raw_condition(&Value::Object(cfg))
                     }
                 }
+                t if t.contains('.') => self.integration_condition(c, t, m),
                 _ => self.raw_condition(c),
             },
             // `condition: [...]` is a shorthand AND.
@@ -589,10 +591,29 @@ impl Builder {
             _ => None,
         };
         let (true, Some(ids)) = (only_keys(m, &with(&["id"])), ids) else { return self.raw_condition(c) };
-        // Imported triggers keep the YAML's id as their block id, which "triggered by" refers to.
+        // Linked to the trigger with this id once the automation's triggers are built.
         let parts: Vec<Value> =
             ids.iter().map(|id| self.block("triggered_by", json!({"TRIGGER": id}), vec![], None)).collect();
         self.join("OR", parts).expect("ids is not empty")
+    }
+
+    /// The newer form of integration conditions (`condition: light.is_on`, with `target` and
+    /// `options`).
+    fn integration_condition(&mut self, c: &Value, name: &str, m: &Map<String, Value>) -> Value {
+        let rest: Map<String, Value> = m
+            .iter()
+            .filter(|(k, _)| !BASE.contains(&k.as_str()))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        match self.integration_parts(name, &rest) {
+            Some((target, options)) => self.block(
+                "ha_condition_integration",
+                json!({"NAME": name}),
+                vec![("TARGET", target), ("OPTIONS", options)],
+                None,
+            ),
+            None => self.raw_condition(c),
+        }
     }
 
     fn device_condition(&mut self, c: &Value, m: &Map<String, Value>) -> Value {

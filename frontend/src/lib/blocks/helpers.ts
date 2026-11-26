@@ -4,6 +4,7 @@
 import * as Blockly from 'blockly/core';
 import { allBlockDefs } from './dynamic';
 import { FieldOptions } from './field_entity';
+import { haTriggerTypes, installTriggerSettings } from './trigger_settings';
 
 type Json = Record<string, unknown>;
 const value = (name: string, check?: string) => ({ type: 'input_value', name, ...(check ? { check } : {}) });
@@ -220,4 +221,5 @@ export function registerHelperBlocks() {
   registered = true;
   Blockly.fieldRegistry.register('field_notify_target', FieldNotifyTarget);
   Blockly.common.defineBlocksWithJsonArray(HELPER_BLOCKS);
+  installTriggerSettings(haTriggerTypes(HELPER_BLOCKS));
 }

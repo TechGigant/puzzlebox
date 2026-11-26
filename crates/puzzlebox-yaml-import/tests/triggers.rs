@@ -390,7 +390,6 @@ fn sun_zone_event_homeassistant() {
         json!([{"trigger": "sun", "event": "sunrise"}]),
     );
     check_raw("- {trigger: sun, event: sunrise, offset: 0.5}");
-    check_raw("- {trigger: sun.dusk, options: {type: civil}}");
 
     check(
         "- {trigger: zone, entity_id: person.me, zone: zone.home, event: leave}",
@@ -536,7 +535,6 @@ fn calendar_tag_conversation() {
     );
     for raw in [
         "- {trigger: calendar, event: start, entity_id: calendar.work, offset: 0.5}",
-        "- {trigger: calendar.event_started, target: {entity_id: calendar.work}, options: {offset: '00:05'}}",
         "- {trigger: tag, tag_id: 'a,b'}",
         "- {trigger: tag, tag_id: []}",
         "- {trigger: conversation, command: []}",
@@ -551,25 +549,62 @@ fn triggers_without_blocks_stay_raw() {
     for raw in [
         "- {trigger: geo_location, source: feed, zone: zone.alert, event: enter}",
         "- {trigger: persistent_notification, update_type: [added, removed], notification_id: x}",
-        "- {trigger: light.turned_on, target: {area_id: kitchen}, options: {behavior: any}}",
         "- {trigger: some_custom.thing, foo: bar}",
+        "- {trigger: light.turned_on, target: {entity_id: all}}",
+        "- {trigger: light.turned_on, target: {area_id: '{{ room }}'}}",
+        "- {trigger: light.turned_on, target: {entity_id: light.a, exclude: {entity_id: light.b}}}",
+        "- {trigger: light.turned_on, target: {}}",
+        "- {trigger: light.turned_on, options: on}",
     ] {
         check_raw(raw);
     }
 }
 
 #[test]
-fn base_options() {
-    // A unique id becomes the block id, which the compiler sends as the trigger's id.
-    let out = import("- {trigger: state, entity_id: light.a, to: 'on', id: light_on}");
-    assert_eq!(out.types, ["ha_trigger_becomes"]);
-    assert_eq!(out.blocks[0]["id"], "light_on");
-    // Repeated ids can't be block ids, so they stay in the raw YAML.
-    let out = import(
-        "- {trigger: state, entity_id: light.a, to: 'on', id: x}\n- {trigger: state, entity_id: light.b, to: 'on', id: x}",
+fn integration_triggers() {
+    check(
+        "- {trigger: light.turned_on, target: {area_id: kitchen}, options: {behavior: any}}",
+        &["ha_trigger_integration"],
+        json!([{"trigger": "light.turned_on", "target": {"area_id": ["kitchen"]}, "options": {"behavior": "any"}}]),
     );
-    assert_eq!(out.types, ["ha_trigger_raw", "ha_trigger_raw"]);
-    check_raw("- {trigger: state, entity_id: light.a, to: 'on', alias: Light on}");
+    check(
+        "- {trigger: sun.dusk, options: {type: civil}}",
+        &["ha_trigger_integration"],
+        json!([{"trigger": "sun.dusk", "options": {"type": "civil"}}]),
+    );
+    check(
+        "- {trigger: calendar.event_started, target: {entity_id: [calendar.work, calendar.home]}, options: {offset: '00:05'}}",
+        &["ha_trigger_integration"],
+        json!([{"trigger": "calendar.event_started", "target": {"entity_id": ["calendar.work", "calendar.home"]},
+            "options": {"offset": "00:05"}}]),
+    );
+    check(
+        "- {trigger: switch.turned_off, target: {label_id: [a, b], device_id: d}, options: {}, id: off, alias: Switched off}",
+        &["ha_trigger_integration"],
+        json!([{"trigger": "switch.turned_off", "target": {"label_id": ["a", "b"], "device_id": ["d"]}, "options": {},
+            "id": "off", "alias": "Switched off"}]),
+    );
+    // Options a dictionary block can't keep exactly stay as YAML in the options socket.
+    let out = import("- {trigger: x.y, options: {for: 5.0, value: '{{ 1 }}'}}");
+    assert_eq!(out.blocks[0]["inputs"]["OPTIONS"]["block"]["type"], "yaml_value");
+    assert_eq!(out.configs, [json!({"trigger": "x.y", "options": {"for": 5.0, "value": "{{ 1 }}"}})]);
+}
+
+#[test]
+fn base_options() {
+    // Ids (also repeated ones) and aliases become the block's trigger id and name.
+    check(
+        "- {trigger: state, entity_id: light.a, to: 'on', id: x, alias: Light on}\n- {trigger: state, entity_id: light.b, to: 'on', id: x}",
+        &["ha_trigger_becomes", "ha_trigger_becomes"],
+        json!([{"trigger": "state", "entity_id": "light.a", "to": "on", "id": "x", "alias": "Light on"},
+            {"trigger": "state", "entity_id": "light.b", "to": "on", "id": "x"}]),
+    );
+    let out = import("- {trigger: state, entity_id: light.a, to: 'on', id: light_on}");
+    assert!(out.blocks[0]["id"].as_str().unwrap().starts_with("imp"));
+    assert_eq!(out.blocks[0]["extraState"], json!({"triggerSettings": ["TRIGGER_ID"]}));
+    // HA only takes text; empty ones can't be set.
+    check_raw("- {trigger: state, entity_id: light.a, to: 'on', id: ''}");
+    check_raw("- {trigger: state, entity_id: light.a, to: 'on', id: 5}");
     check_raw("- {trigger: state, entity_id: light.a, to: 'on', variables: {room: kitchen}}");
     check_raw("- {trigger: event, event_type: x, enabled: \"{{ true }}\"}");
 
@@ -604,5 +639,73 @@ fn every_trigger_form_compiles() {
     let out = import_triggers(&text);
     let native = out.types.iter().filter(|t| *t != "ha_trigger_raw").count();
     assert_eq!(out.types.len(), native + out.raw);
-    assert_eq!((native, out.raw), (53, 14), "{:?}", out.types);
+    assert_eq!((native, out.raw), (57, 10), "{:?}", out.types);
+}
+
+/// Every block in the workspace, depth first.
+fn all_blocks(v: &Value, out: &mut Vec<Value>) {
+    match v {
+        Value::Object(m) => {
+            if m.contains_key("type") && m.contains_key("id") {
+                out.push(v.clone());
+            }
+            m.values().for_each(|x| all_blocks(x, out));
+        }
+        Value::Array(a) => a.iter().for_each(|x| all_blocks(x, out)),
+        _ => {}
+    }
+}
+
+#[test]
+fn trigger_ids_reach_conditions_and_waits() {
+    let yaml = r#"
+triggers:
+  - {trigger: state, entity_id: binary_sensor.door, to: "on", id: door}
+  - {trigger: state, entity_id: binary_sensor.back_door, to: "on", id: door}
+  - {trigger: time, at: "07:00", id: morning}
+conditions:
+  - condition: trigger
+    id: [door, raw_only]
+  - condition: trigger
+    id: imp1
+actions:
+  - wait_for_trigger:
+      - {trigger: event, event_type: confirm, id: confirmed, alias: Confirmed}
+"#;
+    let imp = import_yaml(yaml).unwrap().remove(0);
+    let mut blocks = Vec::new();
+    all_blocks(&imp.workspace, &mut blocks);
+    let of = |ty: &str| blocks.iter().filter(|b| b["type"] == ty).cloned().collect::<Vec<_>>();
+    let doors: Vec<Value> =
+        of("ha_trigger_becomes").into_iter().filter(|b| b["fields"]["TRIGGER_ID"] == "door").collect();
+    assert_eq!(doors.len(), 2);
+    // "triggered by" points at the first trigger with the id; ids no trigger block has stay as
+    // they are, and one that looks like a block id keeps the condition raw.
+    let by: Vec<Value> = of("triggered_by").iter().map(|b| b["fields"]["TRIGGER"].clone()).collect();
+    assert_eq!(by, [doors[0]["id"].clone(), json!("raw_only")]);
+    assert_eq!(of("ha_condition_raw").len(), 1);
+    assert_eq!(imp.raw_blocks, 1);
+
+    let t = &of("ha_wait_for_trigger")[0]["inputs"]["TRIGGERS"]["block"];
+    assert_eq!(t["type"], "ha_trigger_event");
+    assert_eq!(
+        (&t["fields"]["TRIGGER_ID"], &t["fields"]["TRIGGER_ALIAS"]),
+        (&json!("confirmed"), &json!("Confirmed"))
+    );
+
+    let p = compile(&imp.workspace, &NoExternals).unwrap();
+    let HandlerKind::Triggers { triggers } = &p.handlers[0].kind else { panic!() };
+    let ids: Vec<&Value> = triggers
+        .iter()
+        .map(|t| match t {
+            Trigger::Ha { config, .. } => &config["id"],
+            _ => panic!(),
+        })
+        .collect();
+    assert_eq!(ids, [&json!("door"), &json!("door"), &json!("morning")]);
+    // The comparisons use the ids, and the wait sends its id and alias.
+    let body = serde_json::to_string(&p.handlers[0].body).unwrap();
+    for want in [r#"{"op":"lit","value":"door"}"#, r#""id":"confirmed""#, r#""alias":"Confirmed""#] {
+        assert!(body.contains(want), "{want} in {body}");
+    }
 }

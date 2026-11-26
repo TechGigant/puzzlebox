@@ -280,6 +280,8 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
           DATA: { block: { type: 'dict_create', inputs: { ITEMS: { block: { type: 'dict_pair', fields: { KEY: 'type' }, inputs: { VALUE: txt('daily') } } } } } },
         }),
         block('ha_fire_event', { EVENT_TYPE: txt('my_event') }),
+        block('ha_trigger_integration', { TARGET: ent(), OPTIONS: { block: { type: 'dict_create' } } }),
+        block('ha_condition_integration', { TARGET: ent(), OPTIONS: { block: { type: 'dict_create' } } }),
         block('ha_trigger_template', { FOR: dur(0) }),
         block('ha_trigger_raw'),
         block('ha_action_raw'),

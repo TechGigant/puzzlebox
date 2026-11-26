@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
+use super::triggers::fixed;
 use super::{Block, Compiler, arg_placeholder, number};
 use crate::ir::*;
 
@@ -62,6 +63,39 @@ impl Compiler<'_> {
         if with_for {
             args.insert("for".to_owned(), self.value(b, "SECONDS"));
             config["for"] = json!({"seconds": arg_placeholder("for")});
+        }
+        ExprKind::Condition { config, args }
+    }
+
+    /// `{"condition": "light.is_on", "target": …, "options": …}`, for any integration's
+    /// condition. Fixed parts are written into the config; variables are filled in each time.
+    fn integration_condition(&mut self, b: &Block<'_>) -> ExprKind {
+        let mut config = json!({"condition": self.required_str(b, "NAME")});
+        let mut args = BTreeMap::new();
+        if let Some(t) = self.integration_target(b) {
+            match fixed(&t).map(|v| normalize_target(&v)) {
+                Some(Ok(v)) => config["target"] = v,
+                Some(Err(e)) => self.err(b, e),
+                None => {
+                    config["target"] = arg_placeholder("target");
+                    let id = t.id.clone();
+                    args.insert(
+                        "target".to_owned(),
+                        Expr { id, kind: ExprKind::Builtin { name: "to_target".into(), args: vec![t] } },
+                    );
+                }
+            }
+        }
+        if let Some(o) = self.value_opt(b, "OPTIONS") {
+            match fixed(&o) {
+                Some(Value::Null) => {}
+                Some(v @ Value::Object(_)) => config["options"] = v,
+                Some(_) => self.err(b, "the options must be a dictionary"),
+                None => {
+                    config["options"] = arg_placeholder("options");
+                    args.insert("options".to_owned(), o);
+                }
+            }
         }
         ExprKind::Condition { config, args }
     }
@@ -139,6 +173,7 @@ impl Compiler<'_> {
                     args,
                 }
             }
+            "ha_condition_integration" => self.integration_condition(b),
             "ha_template_condition" => {
                 let template = b.field_str("TEMPLATE").unwrap_or("").to_owned();
                 if template.trim().is_empty() {

@@ -106,10 +106,11 @@ pub fn import_one(cfg: &Value, key: Option<&str>) -> Imported {
         // Scripts have no triggers: run them manually (Run button / service).
         b.block("ha_on_run", json!({}), vec![("DO", chain(body))], None)
     } else {
-        let trig = b.automation_triggers(&triggers);
+        let trig = b.triggers(&triggers);
         b.block("ha_when", json!({}), vec![("TRIGGERS", chain(trig)), ("DO", chain(body))], None)
     };
     let mut top = top;
+    triggers::link_triggered_by(&mut top);
     top["x"] = json!(40);
     top["y"] = json!(40);
 

@@ -92,6 +92,8 @@ pub struct Compiler<'a> {
     item_vars: Vec<String>,
     /// Number of loops around the block being compiled.
     loops: usize,
+    /// Trigger block id → the trigger id set on it, for "triggered by".
+    trigger_ids: HashMap<String, String>,
 }
 
 pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec<CompileError>> {
@@ -110,6 +112,7 @@ pub fn compile_partial(workspace: &Value, ext: &dyn BlockLowerer) -> (Program, V
         timer_handlers: Vec::new(),
         item_vars: Vec::new(),
         loops: 0,
+        trigger_ids: triggers::explicit_ids(workspace),
     };
     for v in workspace.get("variables").and_then(Value::as_array).into_iter().flatten() {
         let (Some(id), Some(name)) =
@@ -213,7 +216,7 @@ pub fn compile_partial(workspace: &Value, ext: &dyn BlockLowerer) -> (Program, V
     program.handlers.append(&mut loose);
     program.persistent = std::mem::take(&mut c.persistent);
     program.handlers.append(&mut c.timer_handlers);
-    // Every HA trigger reports its block id as `trigger.id`, for "triggered by".
+    // An HA trigger without its own id reports its block id as `trigger.id`, for "triggered by".
     for h in &mut program.handlers {
         if let HandlerKind::Triggers { triggers } = &mut h.kind {
             for t in triggers {
@@ -529,7 +532,7 @@ impl<'a> Compiler<'a> {
             .collect()
     }
 
-    fn trigger(&mut self, b: Block<'_>) -> Option<Trigger> {
+    fn trigger_block(&mut self, b: Block<'_>) -> Option<Trigger> {
         let id: BlockId = b.id().into();
         let ha = |config: Value| Some(Trigger::Ha { id: id.clone(), config });
         match b.ty() {
@@ -1547,7 +1550,8 @@ impl<'a> Compiler<'a> {
                 ExprKind::TriggerData { path }
             }
             "triggered_by" => {
-                let id = b.field_str("TRIGGER").unwrap_or("").to_owned();
+                let id = b.field_str("TRIGGER").unwrap_or("");
+                let id = self.trigger_ids.get(id).cloned().unwrap_or_else(|| id.to_owned());
                 ExprKind::Binary {
                     bin: BinOp::Eq,
                     left: Box::new(Expr {

@@ -4,6 +4,7 @@ import * as Blockly from 'blockly/core';
 import type { ExtraCategory } from '../toolbox';
 import { ENTITY_DOMAINS, HELPER_DOMAINS } from './helpers';
 import { FieldOptions, FieldRegistry, FieldStateValue, setDomainResolver } from './field_entity';
+import { addTriggerSettings, chooseTriggerSetting, triggerSettingItems } from './trigger_settings';
 
 export interface SelectOption {
   label: string;
@@ -194,8 +195,11 @@ function appendParam(block: DynBlock, p: Param, withShadow: boolean, removable: 
   }
 }
 
+/** The whole extra state, which undo restores (it also has the trigger settings). */
+const extraState = (block: DynBlock) => JSON.stringify(block.saveExtraState?.() ?? null);
+
 function fireMutation(block: DynBlock, before: string) {
-  const after = JSON.stringify({ optional: block.optional });
+  const after = extraState(block);
   if (before === after) return;
   const Change = Blockly.Events.get(Blockly.Events.BLOCK_CHANGE);
   Blockly.Events.fire(new Change(block, 'mutation', null, before, after));
@@ -204,7 +208,7 @@ function fireMutation(block: DynBlock, before: string) {
 function addOptional(block: DynBlock, name: string) {
   const p = block.hab.params.find((x) => x.name === name);
   if (!p || block.optional.includes(name)) return;
-  const before = JSON.stringify({ optional: block.optional });
+  const before = extraState(block);
   block.optional.push(name);
   appendParam(block, p, true, true);
   fireMutation(block, before);
@@ -213,7 +217,7 @@ function addOptional(block: DynBlock, name: string) {
 function removeOptional(block: DynBlock, name: string) {
   const p = block.hab.params.find((x) => x.name === name);
   if (!p) return;
-  const before = JSON.stringify({ optional: block.optional });
+  const before = extraState(block);
   block.optional = block.optional.filter((n) => n !== name);
   for (const input of [...block.inputList]) {
     if (input.name === slot(p) || input.name.startsWith(`${slot(p)}__`)) block.removeInput(input.name, true);
@@ -230,6 +234,8 @@ function tooltip(def: BlockDef): string {
 export function defineBlock(def: BlockDef) {
   defs.set(def.type, def);
   const optionalParams = def.params.filter((p) => !p.required);
+  // Home Assistant's own triggers can have an id and name; plugin triggers may not be HA's.
+  const settings = def.kind === 'trigger' && def.source === 'ha';
   Blockly.Blocks[def.type] = {
     init(this: DynBlock) {
       this.hab = def;
@@ -246,9 +252,10 @@ export function defineBlock(def: BlockDef) {
         const menu = (): [string, string][] => [
           ['＋ more settings', '__add__'],
           ...optionalParams.filter((p) => !this.optional.includes(p.name)).map((p) => [p.label, p.name] as [string, string]),
+          ...(settings ? triggerSettingItems(this) : []),
         ];
         const dd = new Blockly.FieldDropdown(menu, (value) => {
-          if (value && value !== '__add__') setTimeout(() => addOptional(this, value));
+          if (value && value !== '__add__') setTimeout(() => (settings && chooseTriggerSetting(this, value)) || addOptional(this, value));
           return null;
         });
         this.appendDummyInput('ADD').appendField(dd, 'ADD_OPTION');
@@ -265,6 +272,7 @@ export function defineBlock(def: BlockDef) {
         case 'trigger':
           this.setPreviousStatement(true, 'Trigger');
           this.setNextStatement(true, 'Trigger');
+          if (settings) addTriggerSettings(this, this.getInput('ADD') ? 'ADD' : undefined);
           break;
         case 'condition':
           this.setOutput(true, 'Boolean');

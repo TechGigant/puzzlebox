@@ -5,6 +5,7 @@ import * as Blockly from 'blockly/core';
 import { getJson } from '../api';
 import type { ExtraCategory } from '../toolbox';
 import type { HaRegistry } from './field_entity';
+import { addTriggerSettings } from './trigger_settings';
 
 interface DeviceParam {
   name: string;
@@ -79,6 +80,7 @@ function defineDeviceBlock(type: string, kind: DeviceAutomation['kind']) {
         this.setPreviousStatement(true, 'Trigger');
         this.setNextStatement(true, 'Trigger');
         this.setStyle('trigger_blocks');
+        addTriggerSettings(this);
       } else if (kind === 'condition') {
         this.setOutput(true, 'Boolean');
         this.setStyle('condition_blocks');

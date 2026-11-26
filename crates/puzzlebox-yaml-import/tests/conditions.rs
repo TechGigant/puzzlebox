@@ -265,7 +265,7 @@ fn numeric_state_sun_and_zone() {
 }
 
 #[test]
-fn numeric_state_sun_zone_and_integrations_kept_raw() {
+fn numeric_state_sun_and_zone_kept_raw() {
     for c in [
         "- condition: numeric_state\n  entity_id: sensor.t\n  above: \"{{ limit }}\"",
         "- condition: numeric_state\n  entity_id: sensor.t\n  above: light.x",
@@ -273,10 +273,14 @@ fn numeric_state_sun_zone_and_integrations_kept_raw() {
         "- condition: sun\n  after: sunset\n  before_offset: \"00:10:00\"",
         "- condition: sun\n  after: sunset\n  after_offset: 0.5",
         "- condition: sun\n  before: sunset\n  before_offset: {minutes: -45}",
-        "- condition: sun.is_up",
         "- condition: zone\n  entity_id: person.anna\n  zone: \"{{ z }}\"",
-        "- condition: zone.in_zone\n  target: {entity_id: person.anna}\n  options: {zone: zone.work}",
-        "- condition: light.is_on\n  target: {area_id: kitchen}\n  options: {behavior: any}",
+        // Integration conditions with something their block can't send.
+        "- condition: sun.is_up\n  extra: 1",
+        "- condition: zone.in_zone\n  target: {entity_id: all}\n  options: {zone: zone.work}",
+        "- condition: light.is_on\n  target: {entity_id: \"{{ which }}\"}",
+        "- condition: light.is_on\n  target: {area_id: []}",
+        "- condition: light.is_on\n  target: {exclude: {entity_id: light.a}}",
+        "- condition: light.is_on\n  options: [behavior]",
     ] {
         let imp = import(c);
         let b = cond_block(&imp);
@@ -285,6 +289,42 @@ fn numeric_state_sun_zone_and_integrations_kept_raw() {
         let e = cond_expr(&imp);
         assert_eq!(ha_config(&e), want);
     }
+}
+
+#[test]
+fn integration_conditions() {
+    let check = |c: &str, want: Value| {
+        let imp = import(c);
+        assert_eq!(ty(cond_block(&imp)), "ha_condition_integration", "{c}");
+        assert_eq!(imp.raw_blocks, 0);
+        assert_eq!(ha_config(&cond_expr(&imp)), want, "{c}");
+        imp
+    };
+    // Targets become lists, as HA reads them.
+    let imp = check(
+        "- condition: light.is_on\n  target: {area_id: kitchen}\n  options: {behavior: any}",
+        json!({"condition": "light.is_on", "target": {"area_id": ["kitchen"]}, "options": {"behavior": "any"}}),
+    );
+    let b = cond_block(&imp);
+    assert_eq!(b["fields"]["NAME"], "light.is_on");
+    assert_eq!((ty(input(b, "TARGET")), &input(b, "TARGET")["fields"]["ID"]), ("ha_area", &json!("kitchen")));
+    assert_eq!(ty(input(b, "OPTIONS")), "dict_create");
+    check("- condition: sun.is_up", json!({"condition": "sun.is_up"}));
+    check(
+        "- condition: light.brightness\n  target: {entity_id: [light.a, light.b], floor_id: up, label_id: [x], device_id: d}\n  options: {threshold: {type: above, value: {number: 50.5}}, list: [1, true, null], empty: {}}",
+        json!({"condition": "light.brightness",
+            "target": {"entity_id": ["light.a", "light.b"], "floor_id": ["up"], "label_id": ["x"], "device_id": ["d"]},
+            "options": {"threshold": {"type": "above", "value": {"number": 50.5}}, "list": [1, true, null], "empty": {}}}),
+    );
+    // Values a dictionary block would change (5.0 → 5, templates) keep the options as YAML.
+    let imp = check(
+        "- condition: x.y\n  options: {a: 5.0, b: \"{{ c }}\"}",
+        json!({"condition": "x.y", "options": {"a": 5.0, "b": "{{ c }}"}}),
+    );
+    assert_eq!(ty(input(cond_block(&imp), "OPTIONS")), "yaml_value");
+    // The alias becomes the block's comment, like on other conditions.
+    let imp = check("- condition: sun.is_up\n  alias: Daytime", json!({"condition": "sun.is_up"}));
+    assert_eq!(cond_block(&imp)["icons"]["comment"]["text"], "Daytime");
 }
 
 #[test]
@@ -446,7 +486,7 @@ fn and_or_not() {
 
 #[test]
 fn all_raw_parts_stay_one_raw_condition() {
-    let c = "- or:\n  - condition: sun.is_up\n  - condition: sun.is_set";
+    let c = "- or:\n  - condition: sun.is_up\n    extra: 1\n  - condition: sun.is_set\n    extra: 1";
     let imp = import(c);
     assert_eq!(imp.raw_blocks, 1);
     let cfg = raw_yaml(cond_block(&imp));
@@ -455,7 +495,7 @@ fn all_raw_parts_stay_one_raw_condition() {
 
     // A whole list of raw conditions becomes one raw AND.
     let imp = import(
-        "- condition: sun.is_up\n- condition: zone.in_zone\n  target: {entity_id: person.a}\n  options: {zone: zone.home}",
+        "- condition: sun.is_up\n  extra: 1\n- condition: zone.in_zone\n  target: {entity_id: all}\n  options: {zone: zone.home}",
     );
     assert_eq!(imp.raw_blocks, 1);
     let cfg = raw_yaml(cond_block(&imp));
@@ -464,7 +504,7 @@ fn all_raw_parts_stay_one_raw_condition() {
 
     // Mixed: native parts stay native.
     let imp = import(
-        "- or:\n  - condition: state\n    entity_id: light.a\n    state: \"on\"\n  - condition: sun.is_up",
+        "- or:\n  - condition: state\n    entity_id: light.a\n    state: \"on\"\n  - condition: sun.is_up\n    extra: 1",
     );
     assert_eq!(imp.raw_blocks, 1);
     let blk = cond_block(&imp);
@@ -518,7 +558,7 @@ fn alias_becomes_a_comment() {
     cond_expr(&imp);
 
     // Raw blocks keep the alias in their YAML.
-    let imp = import("- condition: sun.is_set\n  alias: After dark");
+    let imp = import("- condition: sun.is_set\n  extra: 1\n  alias: After dark");
     let b = cond_block(&imp);
     assert!(b.get("icons").is_none());
     assert_eq!(raw_yaml(b)["alias"], "After dark");
@@ -549,6 +589,7 @@ fn imports_every_condition_form() {
         "ha_numeric_state",
         "sun_condition",
         "zone_condition",
+        "ha_condition_integration",
     ] {
         assert!(types.contains(&want.to_owned()), "{want} missing");
     }
@@ -558,9 +599,7 @@ fn imports_every_condition_form() {
     let templates = raw.iter().filter(|k| *k == "template").count();
     assert!(templates <= 4, "{raw:?}");
     raw.retain(|k| k != "template");
-    let want =
-        ["state", "time", "sun", "sun.is_up", "zone.in_zone", "trigger", "light.is_on", "light.brightness"];
-    assert_eq!(raw, want);
+    assert_eq!(raw, ["state", "time", "sun", "trigger"]);
     let json = serde_json::to_string(&imp.workspace).unwrap();
     assert!(!json.contains("light.disabled"), "disabled conditions are left out");
     assert!(!json.contains("ha_cnd__"));

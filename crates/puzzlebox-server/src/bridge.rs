@@ -22,11 +22,11 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{info, warn};
 
+use crate::compat::{self, Peer};
 use crate::registry::RegistryService;
 use crate::routes::AppState;
 use crate::webhooks::Webhooks;
 
-pub const PROTOCOL_VERSION: u32 = 1;
 const INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct Bridge {
@@ -38,7 +38,14 @@ pub struct Bridge {
     conn: Mutex<Option<(u64, mpsc::UnboundedSender<Value>)>>,
     pending: Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>,
     next_id: AtomicU64,
+    /// The connected integration's handshake; `None` while disconnected.
+    peer: std::sync::Mutex<Option<Peer>>,
+    /// Bumped when the connection or the peer changes (the UI shows it).
+    changed: tokio::sync::watch::Sender<()>,
 }
+
+/// How long the app waits for the integration's hello before treating it as a pre-0.3.0 one.
+const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn load_or_create_token(path: &std::path::Path) -> std::io::Result<String> {
     if let Ok(t) = std::fs::read_to_string(path)
@@ -70,6 +77,8 @@ impl Bridge {
             conn: Mutex::new(None),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
+            peer: std::sync::Mutex::new(None),
+            changed: tokio::sync::watch::Sender::new(()),
         });
         bridge.load_cached_packs().await;
         Ok(bridge)
@@ -77,6 +86,31 @@ impl Bridge {
 
     pub async fn connected(&self) -> bool {
         self.conn.lock().await.is_some()
+    }
+
+    fn peer(&self) -> Option<Peer> {
+        self.peer.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    fn set_peer(&self, peer: Option<Peer>) {
+        *self.peer.lock().unwrap_or_else(|p| p.into_inner()) = peer;
+        self.changed.send_replace(());
+    }
+
+    pub fn watch(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
+    }
+
+    /// Connection and compatibility of the integration, for the UI.
+    pub fn status(&self) -> Value {
+        match self.peer() {
+            Some(p) => {
+                let mut v = p.status();
+                v["connected"] = json!(true);
+                v
+            }
+            None => json!({"connected": false}),
+        }
     }
 
     /// Python packs from the last session, so programs compile before HA reconnects.
@@ -315,12 +349,50 @@ async fn session(mut socket: WebSocket, bridge: Arc<Bridge>) {
     *bridge.conn.lock().await = Some((conn_id, tx.clone()));
     info!("Puzzlebox bridge integration connected");
 
-    let _ = tx.send(
-        json!({"type": "hello", "version": PROTOCOL_VERSION, "app_version": env!("CARGO_PKG_VERSION")}),
-    );
-    let _ = tx.send(bridge.programs_snapshot().await);
-    let _ = tx.send(json!({"type": "webhooks", "webhooks": bridge.webhooks.ids()}));
-    let _ = tx.send(json!({"type": "variables", "variables": bridge.engine.globals()}));
+    // Both sides start with their hello; nothing else is sent before the versions are compared.
+    if socket.send(Message::Text(compat::hello().to_string().into())).await.is_err() {
+        return;
+    }
+    let (peer, first) = match tokio::time::timeout(HELLO_TIMEOUT, socket.recv()).await {
+        Ok(Some(Ok(Message::Text(t)))) => match serde_json::from_str::<Value>(&t) {
+            Ok(v) if v["type"] == "hello" => (Peer::from_hello(&v), None),
+            Ok(v) => (Peer::legacy(), Some(v)),
+            Err(_) => (Peer::legacy(), None),
+        },
+        Ok(Some(Ok(_))) | Err(_) => (Peer::legacy(), None),
+        Ok(None) | Ok(Some(Err(_))) => {
+            *bridge.conn.lock().await = None;
+            return;
+        }
+    };
+    let compatible = peer.compatible();
+    match (compatible, peer.outdated()) {
+        (false, who) => warn!(
+            integration = ?peer.version, protocol = peer.protocol,
+            "the Puzzlebox integration and app can't work together; update the {}", who.unwrap_or("older one")
+        ),
+        (true, Some(who)) => {
+            info!(integration = ?peer.version, "Puzzlebox {who} is out of date; update it to use every feature")
+        }
+        (true, None) => info!(integration = ?peer.version, "Puzzlebox integration is up to date"),
+    }
+    let has = |f: &str| compatible && peer.shared(f).is_some();
+    let (programs, run_events, webhooks, variables) =
+        (has("programs"), has("run_events"), has("webhooks"), has("variables"));
+    bridge.set_peer(Some(peer));
+
+    if programs {
+        let _ = tx.send(bridge.programs_snapshot().await);
+    }
+    if webhooks {
+        let _ = tx.send(json!({"type": "webhooks", "webhooks": bridge.webhooks.ids()}));
+    }
+    if variables {
+        let _ = tx.send(json!({"type": "variables", "variables": bridge.engine.globals()}));
+    }
+    if compatible && let Some(v) = first {
+        bridge.handle(v).await;
+    }
 
     let mut events = bridge.engine.subscribe();
     let mut hooks_changed = bridge.webhooks.watch();
@@ -328,7 +400,9 @@ async fn session(mut socket: WebSocket, bridge: Arc<Bridge>) {
         tokio::select! {
             changed = hooks_changed.changed() => {
                 if changed.is_err() { break }
-                let _ = tx.send(json!({"type": "webhooks", "webhooks": bridge.webhooks.ids()}));
+                if webhooks {
+                    let _ = tx.send(json!({"type": "webhooks", "webhooks": bridge.webhooks.ids()}));
+                }
             }
             out = rx.recv() => {
                 let Some(out) = out else { break };
@@ -337,13 +411,13 @@ async fn session(mut socket: WebSocket, bridge: Arc<Bridge>) {
             ev = events.recv() => {
                 let Ok(ev) = ev else { continue };
                 match &ev {
-                    EngineEvent::Status { .. } | EngineEvent::Removed { .. } => {
+                    EngineEvent::Status { .. } | EngineEvent::Removed { .. } if programs => {
                         let _ = tx.send(bridge.programs_snapshot().await);
                     }
-                    EngineEvent::RunStarted { .. } | EngineEvent::RunFinished { .. } => {
+                    EngineEvent::RunStarted { .. } | EngineEvent::RunFinished { .. } if run_events => {
                         let _ = tx.send(serde_json::to_value(&ev).unwrap_or_default());
                     }
-                    EngineEvent::GlobalChanged { name, value } => {
+                    EngineEvent::GlobalChanged { name, value } if variables => {
                         let _ = tx.send(json!({"type": "variable", "name": name, "value": value}));
                     }
                     _ => {}
@@ -352,7 +426,9 @@ async fn session(mut socket: WebSocket, bridge: Arc<Bridge>) {
             incoming = socket.recv() => {
                 match incoming {
                     Some(Ok(Message::Text(t))) => {
-                        if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                        if let Ok(v) = serde_json::from_str::<Value>(&t)
+                            && compatible
+                        {
                             bridge.handle(v).await;
                         }
                     }
@@ -368,6 +444,7 @@ async fn session(mut socket: WebSocket, bridge: Arc<Bridge>) {
         *conn = None;
     }
     drop(conn);
+    bridge.set_peer(None);
     for (_, tx) in bridge.pending.lock().await.drain() {
         let _ = tx.send(Err("bridge disconnected".into()));
     }

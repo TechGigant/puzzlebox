@@ -4,7 +4,7 @@
   import ProgramList from './lib/ProgramList.svelte';
   import ImportDialog from './lib/ImportDialog.svelte';
   import Settings from './lib/Settings.svelte';
-  import { events, type Status } from './lib/api';
+  import { events, updateNotice, type Status } from './lib/api';
   import { applyCssTokens, readHaTokens, watchTheme } from './lib/theme';
   import { loadRegistry, registry } from './lib/registry.svelte';
 
@@ -50,6 +50,7 @@
     };
   });
 
+  const notice = $derived(updateNotice(status));
   const label = $derived(
     status === null ? 'App offline' : status.ha_connected ? `HA ${status.ha_version ?? ''}` : 'HA disconnected',
   );
@@ -72,6 +73,9 @@
     <span class="dot"></span>{label}
   </span>
 </header>
+{#if notice}
+  <div class="notice" class:error={status?.bridge?.compatible === false} role="status">{notice}</div>
+{/if}
 <main>
   {#if route.view === 'program'}
     {#key route.id}
@@ -158,6 +162,17 @@
   }
   .chip.ok .dot {
     background: #43a047;
+  }
+  .notice {
+    flex-shrink: 0;
+    padding: 8px 16px;
+    font-size: 14px;
+    color: var(--pb-text);
+    background: color-mix(in srgb, #ffa600 18%, var(--pb-card));
+    border-bottom: 1px solid var(--pb-divider);
+  }
+  .notice.error {
+    background: color-mix(in srgb, #db4437 18%, var(--pb-card));
   }
   main {
     position: relative;

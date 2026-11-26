@@ -1,7 +1,34 @@
+export interface BridgeStatus {
+  connected: boolean;
+  integration_version?: string | null;
+  protocol?: number;
+  compatible?: boolean;
+  /** Which side should be updated, if the versions differ. */
+  outdated?: 'app' | 'integration' | null;
+  /** App features the integration lacks or has only in an older version. */
+  missing?: string[];
+}
+
 export interface Status {
   version: string;
   ha_connected: boolean;
   ha_version: string | null;
+  bridge?: BridgeStatus;
+}
+
+/** A sentence asking to update the older side, or null when versions match. */
+export function updateNotice(status: Status | null): string | null {
+  const b = status?.bridge;
+  if (!status || !b?.connected || !b.outdated) return null;
+  const integration = b.integration_version ? `(${b.integration_version})` : '(from before 0.3.0)';
+  if (b.outdated === 'integration') {
+    return b.compatible
+      ? `The Puzzlebox integration ${integration} is older than this app (${status.version}). Update it in HACS and restart Home Assistant to use every feature.`
+      : `The Puzzlebox integration ${integration} is too old for this app (${status.version}); programs don't appear in Home Assistant until you update it in HACS.`;
+  }
+  return b.compatible
+    ? `This app (${status.version}) is older than the Puzzlebox integration ${integration}. Update the app under Settings → Apps to use every feature.`
+    : `This app (${status.version}) is too old for the Puzzlebox integration ${integration}. Update the app under Settings → Apps.`;
 }
 
 export interface CompileError {
@@ -119,6 +146,7 @@ export interface ImportedProgram {
 export interface Settings {
   bridge_token: string;
   bridge_connected: boolean;
+  bridge: BridgeStatus;
   mqtt_enabled: boolean;
   supervised: boolean;
   webhooks: string[];

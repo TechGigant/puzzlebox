@@ -31,6 +31,10 @@ react to runs with the `puzzlebox_program_started` and
 `puzzlebox_program_finished` events. Webhook triggers are reachable on your
 Home Assistant URL, and other integrations can add their own blocks.
 
+Keep the app and the integration on the same version. If one is older, the
+app shows a banner and Home Assistant lists it under **Settings → Repairs**;
+everything both versions support keeps working until you update.
+
 ## Extending
 
 Put block packs (`*.yaml`) in `/addon_configs/<this app>/packs` and WASM

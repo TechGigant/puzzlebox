@@ -43,9 +43,11 @@ class ProgramEntity(Entity):
 
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(async_dispatcher_connect(self.hass, SIGNAL_PROGRAMS, self.async_write_ha_state))
-        self.async_on_remove(
-            async_dispatcher_connect(self.hass, SIGNAL_CONNECTION, lambda _: self.async_write_ha_state())
-        )
+        self.async_on_remove(async_dispatcher_connect(self.hass, SIGNAL_CONNECTION, self._connection_changed))
+
+    @callback
+    def _connection_changed(self, _connected: bool) -> None:
+        self.async_write_ha_state()
 
 
 def setup_program_platform(

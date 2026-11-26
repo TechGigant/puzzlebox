@@ -105,13 +105,35 @@ export function registerDeviceBlocks() {
   for (const [kind, type] of Object.entries(BLOCK_TYPE)) defineDeviceBlock(type, kind as DeviceAutomation['kind']);
 }
 
-/** Devices category with one sub-category per area. */
+/** Devices that can have device automations: named, and with at least one entity. */
+function usableDevices(reg: HaRegistry) {
+  const withEntities = new Set(reg.entities.map((e) => e.device_id).filter(Boolean));
+  return reg.devices
+    .filter((d) => d.name && withEntities.has(d.id))
+    .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+}
+
+/** Devices → one sub-category per area → one per device (its flyout loads when opened). */
 export function devicesCategory(reg: HaRegistry | null): ExtraCategory | null {
-  if (!reg || !reg.devices.length) return null;
-  const used = new Set(reg.devices.map((d) => d.area_id ?? ''));
+  if (!reg) return null;
+  const devices = usableDevices(reg);
+  if (!devices.length) return null;
+  const deviceCat = (d: (typeof devices)[number]): ExtraCategory => ({
+    name: d.name ?? d.id,
+    style: 'action',
+    blocks: [],
+    custom: PREFIX + d.id,
+  });
+  const used = new Set(devices.map((d) => d.area_id ?? ''));
   const areas = reg.areas.filter((a) => used.has(a.area_id)).sort((a, b) => a.name.localeCompare(b.name));
-  const subs: ExtraCategory[] = areas.map((a) => ({ name: a.name, style: 'action', blocks: [], custom: PREFIX + a.area_id }));
-  if (used.has('')) subs.push({ name: 'No area', style: 'action', blocks: [], custom: PREFIX });
+  const subs: ExtraCategory[] = areas.map((a) => ({
+    name: a.name,
+    style: 'action',
+    blocks: [],
+    subcategories: devices.filter((d) => d.area_id === a.area_id).map(deviceCat),
+  }));
+  const loose = devices.filter((d) => !d.area_id);
+  if (loose.length) subs.push({ name: 'No area', style: 'action', blocks: [], subcategories: loose.map(deviceCat) });
   return { name: 'Devices', style: 'action', blocks: [], subcategories: subs };
 }
 
@@ -128,49 +150,45 @@ function shadowsFor(params: DeviceParam[]) {
   return inputs;
 }
 
-function flyout(ws: Blockly.WorkspaceSvg, reg: HaRegistry, areaId: string): Blockly.utils.toolbox.FlyoutItemInfo[] {
-  const devices = reg.devices
-    .filter((d) => (d.area_id ?? '') === areaId && d.name)
-    .sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
-  const missing = devices.filter((d) => !automations.has(d.id) && !pending.has(d.id));
-  if (missing.length) {
-    missing.forEach((d) => pending.add(d.id));
-    Promise.all(
-      missing.map((d) =>
-        getJson<DeviceAutomation[]>(`api/ha/devices/${encodeURIComponent(d.id)}/automations`)
-          .then((list) => automations.set(d.id, list))
-          .catch(() => automations.set(d.id, []))
-          .finally(() => pending.delete(d.id)),
-      ),
-    ).then(() => (ws.getToolbox() as Blockly.Toolbox | null)?.refreshSelection());
-  }
-  const items: Blockly.utils.toolbox.FlyoutItemInfo[] = [];
-  for (const d of devices) {
-    const list = automations.get(d.id);
-    if (!list) {
-      items.push({ kind: 'label', text: `${d.name} (loading…)` } as Blockly.utils.toolbox.FlyoutItemInfo);
-      continue;
+type FlyoutItem = Blockly.utils.toolbox.FlyoutItemInfo;
+const label = (text: string) => ({ kind: 'label', text }) as FlyoutItem;
+const KIND_LABEL = { trigger: 'Triggers', condition: 'Conditions', action: 'Actions' } as const;
+
+function flyout(ws: Blockly.WorkspaceSvg, deviceId: string): FlyoutItem[] {
+  const list = automations.get(deviceId);
+  if (!list) {
+    if (!pending.has(deviceId)) {
+      pending.add(deviceId);
+      getJson<DeviceAutomation[]>(`api/ha/devices/${encodeURIComponent(deviceId)}/automations`)
+        .then((l) => automations.set(deviceId, l))
+        .catch(() => automations.set(deviceId, []))
+        .finally(() => {
+          pending.delete(deviceId);
+          (ws.getToolbox() as Blockly.Toolbox | null)?.refreshSelection();
+        });
     }
-    if (!list.length) continue;
-    items.push({ kind: 'label', text: d.name ?? d.id } as Blockly.utils.toolbox.FlyoutItemInfo);
-    const order = { trigger: 0, condition: 1, action: 2 };
-    const sorted = [...list].sort((a, b) => order[a.kind] - order[b.kind] || Number(a.secondary) - Number(b.secondary));
-    for (const a of sorted) {
+    return [label('Loading…')];
+  }
+  if (!list.length) return [label('This device has no device triggers, conditions or actions')];
+  const items: FlyoutItem[] = [];
+  for (const kind of ['trigger', 'condition', 'action'] as const) {
+    const of = list.filter((a) => a.kind === kind).sort((a, b) => Number(a.secondary) - Number(b.secondary));
+    if (!of.length) continue;
+    items.push(label(KIND_LABEL[kind]));
+    for (const a of of) {
       items.push({
         kind: 'block',
         type: BLOCK_TYPE[a.kind],
         extraState: { config: a.config, label: a.label, params: a.params },
         inputs: shadowsFor(a.params),
-      } as Blockly.utils.toolbox.FlyoutItemInfo);
+      } as FlyoutItem);
     }
   }
-  if (!items.length) items.push({ kind: 'label', text: 'No device triggers, conditions or actions' } as Blockly.utils.toolbox.FlyoutItemInfo);
   return items;
 }
 
-/** Registers the flyout callbacks for the Devices sub-categories. */
+/** Registers the flyout callbacks for the per-device categories. */
 export function registerDeviceCallbacks(ws: Blockly.WorkspaceSvg, reg: HaRegistry | null) {
   if (!reg) return;
-  const ids = new Set(reg.devices.map((d) => d.area_id ?? ''));
-  for (const id of ids) ws.registerToolboxCategoryCallback(PREFIX + id, () => flyout(ws, reg, id));
+  for (const d of usableDevices(reg)) ws.registerToolboxCategoryCallback(PREFIX + d.id, () => flyout(ws, d.id));
 }

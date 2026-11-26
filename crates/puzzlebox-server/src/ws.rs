@@ -35,10 +35,11 @@ async fn session(mut socket: WebSocket, st: AppState) {
     let engine = st.engine.clone();
     let dbg = engine.debugger();
     let mut conn = st.ha.state_watch();
+    let mut bridge_changed = st.bridge.watch();
     let mut events = engine.subscribe();
     let mut watches: HashMap<String, WatchGuard<'_>> = HashMap::new();
 
-    if !send(&mut socket, json!({"type": "status", "status": status_json(&st.ha)})).await {
+    if !send(&mut socket, json!({"type": "status", "status": status_json(&st)})).await {
         return;
     }
     let statuses = serde_json::to_value(engine.statuses()).unwrap_or_default();
@@ -50,7 +51,11 @@ async fn session(mut socket: WebSocket, st: AppState) {
         tokio::select! {
             changed = conn.changed() => {
                 if changed.is_err() { return }
-                if !send(&mut socket, json!({"type": "status", "status": status_json(&st.ha)})).await { return }
+                if !send(&mut socket, json!({"type": "status", "status": status_json(&st)})).await { return }
+            }
+            changed = bridge_changed.changed() => {
+                if changed.is_err() { return }
+                if !send(&mut socket, json!({"type": "status", "status": status_json(&st)})).await { return }
             }
             ev = events.recv() => match ev {
                 Ok(ev) => {

@@ -14,9 +14,11 @@ from aiohttp import ClientWSTimeout, WSMsgType, web
 
 from homeassistant.components import webhook
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 
+from .compat import AppInfo, hello
 from .const import (
     DOMAIN,
     EVENT_RUN_FINISHED,
@@ -34,8 +36,10 @@ Handler = Callable[[HomeAssistant, dict[str, Any], dict[str, Any]], Any | Awaita
 class BridgeClient:
     """Keeps a connection to the app and mirrors its state into Home Assistant."""
 
-    def __init__(self, hass: HomeAssistant, url: str, token: str) -> None:
+    def __init__(self, hass: HomeAssistant, url: str, token: str, version: str = "0.0.0") -> None:
         self.hass = hass
+        self.version = version
+        self.app: AppInfo | None = None
         self.url = url.rstrip("/")
         self.token = token
         self.programs: dict[str, dict[str, Any]] = {}
@@ -53,6 +57,7 @@ class BridgeClient:
         self._task = self.hass.async_create_background_task(self._run(), f"{DOMAIN}_bridge")
 
     async def async_stop(self) -> None:
+        self._update_issues(None)
         if self._task:
             self._task.cancel()
         for wid in list(self._webhooks):
@@ -86,16 +91,56 @@ class BridgeClient:
             timeout=ClientWSTimeout(ws_close=10),
         ) as ws:
             self._ws = ws
-            self._set_connected(True)
-            _LOGGER.info("Connected to the Puzzlebox app at %s", self.url)
-            for pack, _ in self._packs.values():
-                await self._send({"type": "register_pack", "pack": pack})
+            # Our hello goes first; everything else waits for the app's hello (see compat.py).
+            await ws.send_json(hello(self.version))
             async for msg in ws:
                 if msg.type == WSMsgType.TEXT:
                     self._handle(msg.json())
                 elif msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
                     break
         self._ws = None
+
+    @callback
+    def _on_hello(self, msg: dict[str, Any]) -> None:
+        app = AppInfo.from_hello(msg)
+        self.app = app
+        self._update_issues(app)
+        if not app.compatible():
+            _LOGGER.error(
+                "Puzzlebox app %s and integration %s can't work together; update the %s",
+                app.version,
+                self.version,
+                app.outdated(self.version) or "older one",
+            )
+            return
+        _LOGGER.info("Connected to the Puzzlebox app %s at %s", app.version, self.url)
+        self._set_connected(True)
+        if app.has("packs"):
+            for pack, _ in self._packs.values():
+                self.hass.async_create_task(self._send({"type": "register_pack", "pack": pack}))
+
+    @callback
+    def _update_issues(self, app: AppInfo | None) -> None:
+        """Repairs entries asking to update whichever side is older."""
+        outdated = app.outdated(self.version) if app else None
+        for side in ("app", "integration"):
+            issue_id = f"update_{side}"
+            if app is None or outdated != side:
+                ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+                continue
+            required = not app.compatible()
+            ir.async_create_issue(
+                self.hass,
+                DOMAIN,
+                issue_id,
+                is_fixable=False,
+                severity=ir.IssueSeverity.ERROR if required else ir.IssueSeverity.WARNING,
+                translation_key=f"{issue_id}_required" if required else issue_id,
+                translation_placeholders={
+                    "app_version": app.version or "unknown",
+                    "integration_version": self.version,
+                },
+            )
 
     @callback
     def _set_connected(self, value: bool) -> None:
@@ -119,6 +164,12 @@ class BridgeClient:
     @callback
     def _handle(self, msg: dict[str, Any]) -> None:
         kind = msg.get("type")
+        if kind == "hello":
+            self._on_hello(msg)
+            return
+        if not self.connected:
+            # Before a compatible hello, nothing else is acted on.
+            return
         if kind == "programs":
             self.programs = {p["id"]: p for p in msg.get("programs", [])}
             async_dispatcher_send(self.hass, SIGNAL_PROGRAMS)
@@ -138,8 +189,6 @@ class BridgeClient:
             self._sync_webhooks(set(msg.get("webhooks", [])))
         elif kind == "pack_rejected":
             _LOGGER.error("Puzzlebox rejected block pack %s: %s", msg.get("pack"), msg.get("error"))
-        elif kind == "hello":
-            _LOGGER.debug("Puzzlebox app %s, protocol %s", msg.get("app_version"), msg.get("version"))
 
     @callback
     def _fire(self, event: str, msg: dict[str, Any], keys: tuple[str, ...]) -> None:
@@ -226,11 +275,12 @@ class BridgeClient:
     def register_pack(self, pack: dict[str, Any], handlers: dict[str, Handler]) -> Callable[[], None]:
         pack_id = pack["pack"]
         self._packs[pack_id] = (pack, handlers)
-        self.hass.async_create_task(self._send({"type": "register_pack", "pack": pack}))
+        if self.connected and self.app and self.app.has("packs"):
+            self.hass.async_create_task(self._send({"type": "register_pack", "pack": pack}))
 
         @callback
         def unregister() -> None:
-            if self._packs.pop(pack_id, None) is not None:
+            if self._packs.pop(pack_id, None) is not None and self.connected:
                 self.hass.async_create_task(self._send({"type": "unregister_pack", "pack": pack_id}))
 
         return unregister

@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.3.0
+
+- **Version check between the app and the integration.** On connecting, both
+  exchange their version and the features they support, and only use what
+  both have, so a mixed setup keeps working. The older side is named in a
+  banner in the app and in Home Assistant's Repairs, with how to update it.
+  If they can't work together at all, programs don't appear in Home
+  Assistant until you update.
+- Devices section: each device has its own category under its area, with
+  its triggers, conditions and actions listed separately. Devices without
+  entities are left out.
+- Fix: the integration updated entities from a worker thread when the
+  connection to the app changed.
+
 ## 0.2.0
 
 - **Setup is automatic.** The integration finds the app through the

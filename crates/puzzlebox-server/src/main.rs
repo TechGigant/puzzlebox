@@ -1,4 +1,5 @@
 mod bridge;
+mod compat;
 mod config;
 mod devices;
 mod http;

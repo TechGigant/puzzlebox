@@ -13,6 +13,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.loader import async_get_integration
 
 from .bridge import BridgeClient
 from .const import CONF_TOKEN, CONF_URL, DOMAIN, PENDING_PACKS
@@ -59,7 +60,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    client = BridgeClient(hass, entry.data[CONF_URL], entry.data[CONF_TOKEN])
+    integration = await async_get_integration(hass, DOMAIN)
+    client = BridgeClient(hass, entry.data[CONF_URL], entry.data[CONF_TOKEN], str(integration.version))
     hass.data[DOMAIN] = client
     # Integrations may have registered blocks before the bridge was ready.
     for pack, handlers in hass.data.get(PENDING_PACKS, {}).values():

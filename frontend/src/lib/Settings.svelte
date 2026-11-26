@@ -55,9 +55,15 @@
         <b class:ok={settings.bridge_connected} class:bad={!settings.bridge_connected}>
           {settings.bridge_connected ? 'connected' : 'not connected'}
         </b>
+        {#if settings.bridge.connected}
+          <span class="muted">· integration {settings.bridge.integration_version ?? 'from before 0.3.0'}, protocol {settings.bridge.protocol}</span>
+        {/if}
       </p>
+      {#if settings.bridge.connected && settings.bridge.missing?.length}
+        <p class="muted">Not available until the integration is updated: {settings.bridge.missing.join(', ')}.</p>
+      {/if}
       {#if settings.supervised}
-        <p class="muted">Home Assistant discovers this app automatically: install the <b>Puzzlebox</b> integration (HACS), then accept the discovered device under Settings → Devices &amp; services.</p>
+        <p class="muted">Install the <b>Puzzlebox</b> integration (HACS) and restart Home Assistant; it finds this app and sets itself up.</p>
       {:else}
         <p class="muted">Install the <b>Puzzlebox</b> integration in Home Assistant and enter this app's URL and the token below.</p>
       {/if}

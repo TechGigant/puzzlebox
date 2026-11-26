@@ -23,18 +23,51 @@
       "name": "Run program",
       "description": "Runs a Puzzlebox program now.",
       "fields": {
-        "program": { "name": "Program", "description": "Program name or id." },
-        "variables": { "name": "Variables", "description": "Data available to the program as trigger variables." }
+        "program": {
+          "name": "Program",
+          "description": "Program name or id."
+        },
+        "variables": {
+          "name": "Variables",
+          "description": "Data available to the program as trigger variables."
+        }
       }
     },
     "set_variable": {
       "name": "Set stored variable",
       "description": "Sets a stored variable that programs can read.",
       "fields": {
-        "name": { "name": "Name", "description": "Variable name." },
-        "value": { "name": "Value", "description": "New value." },
-        "program": { "name": "Program", "description": "Program name or id. Leave empty for a global variable." }
+        "name": {
+          "name": "Name",
+          "description": "Variable name."
+        },
+        "value": {
+          "name": "Value",
+          "description": "New value."
+        },
+        "program": {
+          "name": "Program",
+          "description": "Program name or id. Leave empty for a global variable."
+        }
       }
+    }
+  },
+  "issues": {
+    "update_app": {
+      "title": "Update the Puzzlebox app",
+      "description": "The Puzzlebox app ({app_version}) is older than the integration ({integration_version}). Everything keeps working, but some features are unavailable until you update the app under **Settings → Apps → Puzzlebox**."
+    },
+    "update_app_required": {
+      "title": "The Puzzlebox app needs an update",
+      "description": "The Puzzlebox app ({app_version}) is too old for this integration ({integration_version}), so programs don't appear in Home Assistant. Update the app under **Settings → Apps → Puzzlebox**."
+    },
+    "update_integration": {
+      "title": "Update the Puzzlebox integration",
+      "description": "The Puzzlebox integration ({integration_version}) is older than the app ({app_version}). Everything keeps working, but some features are unavailable until you update the integration in HACS and restart Home Assistant."
+    },
+    "update_integration_required": {
+      "title": "The Puzzlebox integration needs an update",
+      "description": "The Puzzlebox integration ({integration_version}) is too old for this app ({app_version}), so programs don't appear in Home Assistant. Update the integration in HACS and restart Home Assistant."
     }
   }
 }

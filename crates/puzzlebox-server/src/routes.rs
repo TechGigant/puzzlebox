@@ -121,16 +121,17 @@ async fn peer_guard(
     }
 }
 
-pub fn status_json(ha: &HaClient) -> Value {
+pub fn status_json(st: &AppState) -> Value {
     json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "ha_connected": ha.state() == ConnectionState::Connected,
-        "ha_version": ha.ha_version(),
+        "ha_connected": st.ha.state() == ConnectionState::Connected,
+        "ha_version": st.ha.ha_version(),
+        "bridge": st.bridge.status(),
     })
 }
 
 async fn health(State(st): State<AppState>) -> Json<Value> {
-    Json(status_json(&st.ha))
+    Json(status_json(&st))
 }
 
 pub struct ApiError(pub StatusCode, pub String);
@@ -272,6 +273,7 @@ async fn settings(State(st): State<AppState>) -> Json<Value> {
     Json(json!({
         "bridge_token": st.bridge.token,
         "bridge_connected": st.bridge.connected().await,
+        "bridge": st.bridge.status(),
         "mqtt_enabled": st.mqtt.enabled(),
         "supervised": st.cfg.supervisor_token.is_some(),
         "webhooks": st.webhooks.ids(),

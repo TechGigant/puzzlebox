@@ -76,7 +76,8 @@ export abstract class FieldSuggest extends Blockly.FieldTextInput {
     if (!input) return;
     input.addEventListener('input', () => this.renderList(input.value));
     input.addEventListener('keydown', (ev) => this.onKey(ev as KeyboardEvent));
-    this.load().then(() => this.renderList(input.value));
+    // Show every option at first, like a dropdown; typing narrows the list.
+    this.load().then(() => this.renderList(''));
   }
 
   private onKey(ev: KeyboardEvent) {
@@ -107,7 +108,9 @@ export abstract class FieldSuggest extends Blockly.FieldTextInput {
 
   private renderList(query: string) {
     this.matches = this.suggestions(query.trim().toLowerCase()).slice(0, 80);
-    this.active = 0;
+    // With nothing typed yet, start at the current value.
+    const current = query ? -1 : this.matches.findIndex((m) => m.value === this.getValue());
+    this.active = Math.max(current, 0);
 
     const content = Blockly.DropDownDiv.getContentDiv();
     content.replaceChildren();
@@ -121,7 +124,7 @@ export abstract class FieldSuggest extends Blockly.FieldTextInput {
     }
     this.matches.forEach((s, i) => {
       const item = document.createElement('div');
-      item.className = 'pb-entity-item' + (i === 0 ? ' active' : '');
+      item.className = 'pb-entity-item' + (i === this.active ? ' active' : '');
       const name = document.createElement('div');
       name.className = 'pb-entity-name';
       name.textContent = s.label;
@@ -144,6 +147,7 @@ export abstract class FieldSuggest extends Blockly.FieldTextInput {
     Blockly.DropDownDiv.setColour('var(--pb-card)', 'var(--pb-divider)');
     // The text editor (WidgetDiv) already holds ephemeral focus; the list must not take it too.
     Blockly.DropDownDiv.showPositionedByField(this, () => (this.list = null), undefined, false);
+    this.highlight();
   }
 }
 
@@ -194,6 +198,17 @@ export class FieldEntity extends FieldSuggest {
     if (v.includes('{')) return null;
     const names = v.split(',').map((id) => entityState(id.trim())?.attributes.friendly_name ?? id.trim());
     return names.join(', ');
+  }
+}
+
+/** Redraws entity and registry fields so they show names once the lists have loaded. */
+export function refreshNameFields(ws: Blockly.Workspace) {
+  for (const b of ws.getAllBlocks(false)) {
+    for (const input of b.inputList) {
+      for (const f of input.fieldRow) {
+        if (f instanceof FieldEntity || f instanceof FieldRegistry) f.forceRerender();
+      }
+    }
   }
 }
 

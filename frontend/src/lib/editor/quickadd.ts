@@ -39,7 +39,12 @@ function describe(state: State): string | null {
   try {
     const b = Blockly.serialization.blocks.append(state, scratch, { recordUndo: false });
     // Drop the "＋ option" menus of generated blocks; they're not what the block does.
-    const text = b.toString(80).replace(/[＋+] option/g, '').replace(/\s+/g, ' ').trim();
+    const text = b
+      .toString(80)
+      .replace(/[＋+] (option|more settings)/g, '')
+      .replace(/choose…/g, '…')
+      .replace(/\s+/g, ' ')
+      .trim();
     b.dispose(false);
     return text || state.type;
   } catch {

@@ -111,7 +111,7 @@
   import { installDragTricks } from './editor/drag';
   import { installSummaries } from './editor/summaries';
   import { migrateWorkspace } from './editor/migrate';
-  import { FieldEntity, knownEntities, loadEntities } from './blocks/field_entity';
+  import { FieldEntity, knownEntities, loadEntities, loadRegistry as loadHaNames, refreshNameFields } from './blocks/field_entity';
 
   let {
     initial,
@@ -138,8 +138,9 @@
   function openQuickAdd() {
     if (!workspace || !toolboxDef) return;
     const rect = host.getBoundingClientRect();
-    const x = Math.min(Math.max(mouse.x, 16), rect.width - 300);
-    const y = Math.min(Math.max(mouse.y, 16), rect.height - 200);
+    const x = Math.min(Math.max(mouse.x, 16), Math.max(16, rect.width - 480));
+    // The popup is up to ~400px tall (search box and results); keep all of it on screen.
+    const y = Math.min(Math.max(mouse.y, 16), Math.max(16, rect.height - 420));
     // Where the block lands if nothing is selected: under the mouse.
     const at = mouse.clientX
       ? Blockly.utils.svgMath.screenToWsCoordinates(workspace, new Blockly.utils.Coordinate(mouse.clientX, mouse.clientY))
@@ -435,6 +436,8 @@
     });
 
     load(initial);
+    // Pickers show names, which need the entity and area lists.
+    Promise.all([loadEntities(), loadHaNames()]).then(() => workspace && refreshNameFields(workspace));
 
     const resize = new ResizeObserver(() => workspace && Blockly.svgResize(workspace));
     resize.observe(host);

@@ -37,18 +37,28 @@ error handling, schedules, webhooks, HTTP requests and MQTT.
 
 ## Screenshots
 
-All your programs in one list, with their status and when they last ran:
+Programs live in folders, with their status and when they last ran:
 
-![Program list](docs/images/programs.png)
+![Program list with folders](docs/images/programs.png)
 
-Every trigger, condition and action from your installation, grouped by
-integration:
+Everyday devices have one-line blocks, so "open the blinds" or "set the
+thermostat to 21 °" is a single block:
 
-![Generated blocks for lights](docs/images/blocks.png)
+<img src="docs/images/home-blocks.png" alt="The Home category: switches, covers, thermostats and media players" width="460">
 
-Pick entities by name instead of typing IDs:
+Press Ctrl+Space anywhere on the canvas and type to add a block:
 
-<img src="docs/images/entity-picker.png" alt="Entity picker" width="520">
+<img src="docs/images/quick-add.png" alt="Adding a block by typing" width="620">
+
+Entities are picked by name, and the list only offers the kind of entity the
+block needs:
+
+<img src="docs/images/entity-picker.png" alt="Entity picker listing lights by name" width="520">
+
+Programs read like what they do. This one sets the living room lights
+depending on what the TV is doing:
+
+<img src="docs/images/switch-case.png" alt="A switch block choosing light settings by the TV's state" width="620">
 
 Set a breakpoint, run the program and look at the variables while it's paused:
 

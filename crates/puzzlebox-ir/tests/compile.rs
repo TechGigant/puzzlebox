@@ -174,3 +174,252 @@ fn trigger_durations_are_sockets_and_every_is_checked() {
     let errors = compile(&ws(every(90, "minutes")), &NoExternals).unwrap_err();
     assert!(errors[0].message.contains("can't repeat"), "{}", errors[0].message);
 }
+
+/// The HA config a single trigger block compiles to, without the `id` the compiler adds.
+fn trigger_config(trigger: serde_json::Value) -> Result<serde_json::Value, Vec<CompileError>> {
+    let ws = json!({"blocks": {"blocks": [{"type": "ha_when", "id": "w", "inputs": {"TRIGGERS": {"block": trigger}}}]}});
+    let p = compile(&ws, &NoExternals)?;
+    let HandlerKind::Triggers { triggers } = &p.handlers[0].kind else { panic!() };
+    let Trigger::Ha { config, .. } = &triggers[0] else { panic!("not an HA trigger") };
+    let mut config = config.clone();
+    config.as_object_mut().unwrap().remove("id");
+    Ok(config)
+}
+
+fn dur(n: f64, unit: &str) -> serde_json::Value {
+    json!({"shadow": {"type": "duration", "fields": {"UNIT": unit},
+        "inputs": {"N": {"shadow": {"type": "math_number", "fields": {"NUM": n}}}}}})
+}
+
+fn tb(ty: &str, fields: serde_json::Value) -> serde_json::Value {
+    json!({"type": ty, "id": "t", "fields": fields})
+}
+
+#[test]
+fn state_trigger_options() {
+    let state = |fields: serde_json::Value| trigger_config(tb("ha_trigger_state", fields)).unwrap();
+    // Old shape: unchanged.
+    assert_eq!(
+        state(json!({"ENTITY": "light.a", "FROM": "off", "TO": "on"})),
+        json!({"trigger": "state", "entity_id": "light.a", "from": "off", "to": "on"})
+    );
+    assert_eq!(
+        state(json!({"ENTITY": "light.a", "FROM": "", "TO": ""})),
+        json!({"trigger": "state", "entity_id": "light.a", "to": null})
+    );
+    // Several states become a list.
+    assert_eq!(
+        state(json!({"ENTITY": "cover.a", "FROM": "", "TO": "open, opening"})),
+        json!({"trigger": "state", "entity_id": "cover.a", "to": ["open", "opening"]})
+    );
+    assert_eq!(
+        state(
+            json!({"ENTITY": "light.a", "FROM_OP": "not", "FROM": "unavailable,unknown", "TO_OP": "not", "TO": "unavailable"})
+        ),
+        json!({"trigger": "state", "entity_id": "light.a", "not_from": ["unavailable", "unknown"], "not_to": "unavailable"})
+    );
+    // Any change, including details.
+    assert_eq!(
+        state(json!({"ENTITY": "sensor.x", "WHAT": "any", "FROM": "a", "TO": "b"})),
+        json!({"trigger": "state", "entity_id": "sensor.x"})
+    );
+    // A detail: values keep their type.
+    assert_eq!(
+        state(
+            json!({"ENTITY": "light.a", "WHAT": "attribute", "ATTRIBUTE": "brightness", "FROM": "", "TO": "255"})
+        ),
+        json!({"trigger": "state", "entity_id": "light.a", "attribute": "brightness", "to": 255})
+    );
+    assert_eq!(
+        state(
+            json!({"ENTITY": "climate.a", "WHAT": "attribute", "ATTRIBUTE": "hvac_action", "TO": "heating, true"})
+        ),
+        json!({"trigger": "state", "entity_id": "climate.a", "attribute": "hvac_action", "to": ["heating", true]})
+    );
+    assert_eq!(
+        state(json!({"ENTITY": "light.a", "WHAT": "attribute", "ATTRIBUTE": "brightness", "TO": ""})),
+        json!({"trigger": "state", "entity_id": "light.a", "attribute": "brightness", "to": null})
+    );
+    assert!(
+        trigger_config(tb("ha_trigger_state", json!({"ENTITY": "light.a", "WHAT": "attribute"}))).is_err()
+    );
+
+    // "becomes" takes several states too.
+    assert_eq!(
+        trigger_config(tb("ha_trigger_becomes", json!({"ENTITY": "cover.a", "STATE": "open,closed"})))
+            .unwrap(),
+        json!({"trigger": "state", "entity_id": "cover.a", "to": ["open", "closed"]})
+    );
+}
+
+#[test]
+fn numeric_trigger_options() {
+    let mut t = tb(
+        "ha_trigger_numeric",
+        json!({"ENTITY": "climate.a", "WHAT": "attribute", "ATTRIBUTE": "current_temperature", "ABOVE": "20", "BELOW": ""}),
+    );
+    t["inputs"] = json!({"FOR": dur(10.0, "minutes")});
+    assert_eq!(
+        trigger_config(t).unwrap(),
+        json!({"trigger": "numeric_state", "entity_id": "climate.a", "attribute": "current_temperature", "above": 20,
+               "for": {"hours": 0, "minutes": 10, "seconds": 0}})
+    );
+    let t = tb(
+        "ha_trigger_numeric",
+        json!({"ENTITY": "sensor.a", "WHAT": "template", "VALUE_TEMPLATE": "{{ state.state | float * 2 }}", "ATTRIBUTE": "x", "BELOW": "5"}),
+    );
+    assert_eq!(
+        trigger_config(t).unwrap(),
+        json!({"trigger": "numeric_state", "entity_id": "sensor.a", "value_template": "{{ state.state | float * 2 }}", "below": 5})
+    );
+}
+
+#[test]
+fn time_trigger_options() {
+    let days = |on: &[&str]| {
+        let mut f = json!({"AT": "08:00"});
+        for d in ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"] {
+            f[d] = json!(if on.contains(&d) { "TRUE" } else { "FALSE" });
+        }
+        tb("ha_trigger_time", f)
+    };
+    assert_eq!(
+        trigger_config(tb("ha_trigger_time", json!({"AT": "07:00"}))).unwrap(),
+        json!({"trigger": "time", "at": "07:00"})
+    );
+    assert_eq!(
+        trigger_config(days(&["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"])).unwrap(),
+        json!({"trigger": "time", "at": "08:00"})
+    );
+    assert_eq!(
+        trigger_config(days(&["SAT", "SUN"])).unwrap(),
+        json!({"trigger": "time", "at": "08:00", "weekday": ["sat", "sun"]})
+    );
+    assert_eq!(
+        trigger_config(days(&["MON"])).unwrap(),
+        json!({"trigger": "time", "at": "08:00", "weekday": "mon"})
+    );
+    assert!(trigger_config(days(&[])).is_err());
+
+    let mut t = tb("ha_trigger_time", json!({"AT": "sensor.alarm"}));
+    t["inputs"] = json!({"OFFSET": dur(-10.0, "minutes")});
+    assert_eq!(
+        trigger_config(t).unwrap(),
+        json!({"trigger": "time", "at": {"entity_id": "sensor.alarm", "offset": "-00:10:00"}})
+    );
+    let mut t = tb("ha_trigger_time", json!({"AT": "07:00"}));
+    t["inputs"] = json!({"OFFSET": dur(5.0, "minutes")});
+    assert!(trigger_config(t).is_err(), "a fixed time can't be shifted");
+}
+
+#[test]
+fn time_pattern_trigger() {
+    let pattern = |h: (&str, u32), m: (&str, u32), s: (&str, u32)| {
+        trigger_config(tb(
+            "ha_trigger_time_pattern",
+            json!({"HOURS_MODE": h.0, "HOURS": h.1, "MINUTES_MODE": m.0, "MINUTES": m.1, "SECONDS_MODE": s.0, "SECONDS": s.1}),
+        ))
+    };
+    assert_eq!(
+        pattern(("any", 0), ("every", 15), ("at", 0)).unwrap(),
+        json!({"trigger": "time_pattern", "minutes": "/15"})
+    );
+    assert_eq!(
+        pattern(("at", 7), ("at", 30), ("at", 0)).unwrap(),
+        json!({"trigger": "time_pattern", "hours": 7, "minutes": 30})
+    );
+    // "any" minute under a set hour must stay, or HA would use minute 0.
+    assert_eq!(
+        pattern(("at", 7), ("any", 0), ("at", 0)).unwrap(),
+        json!({"trigger": "time_pattern", "hours": 7, "minutes": "*"})
+    );
+    assert_eq!(
+        pattern(("every", 2), ("at", 0), ("at", 30)).unwrap(),
+        json!({"trigger": "time_pattern", "hours": "/2", "minutes": 0, "seconds": 30})
+    );
+    assert_eq!(
+        pattern(("any", 0), ("any", 0), ("any", 0)).unwrap(),
+        json!({"trigger": "time_pattern", "seconds": "*"})
+    );
+    assert!(pattern(("every", 0), ("at", 0), ("at", 0)).is_err());
+    assert!(pattern(("at", 24), ("at", 0), ("at", 0)).is_err());
+}
+
+#[test]
+fn more_ha_triggers() {
+    let cfg = |t: serde_json::Value| trigger_config(t).unwrap();
+    assert_eq!(
+        cfg(tb("ha_trigger_ha_start", json!({}))),
+        json!({"trigger": "homeassistant", "event": "start"})
+    );
+    assert_eq!(
+        cfg(tb("ha_trigger_ha_start", json!({"EVENT": "shutdown"}))),
+        json!({"trigger": "homeassistant", "event": "shutdown"})
+    );
+
+    let mut t = tb("ha_trigger_template", json!({"VALUE_TEMPLATE": "{{ is_state('light.a', 'on') }}"}));
+    t["inputs"] = json!({"FOR": dur(90.0, "seconds")});
+    assert_eq!(
+        cfg(t),
+        json!({"trigger": "template", "value_template": "{{ is_state('light.a', 'on') }}",
+               "for": {"hours": 0, "minutes": 1, "seconds": 30}})
+    );
+
+    assert_eq!(
+        cfg(tb(
+            "ha_trigger_mqtt",
+            json!({"TOPIC": "home/door", "PAYLOAD": "", "VALUE_TEMPLATE": "", "QOS": "0"})
+        )),
+        json!({"trigger": "mqtt", "topic": "home/door"})
+    );
+    assert_eq!(
+        cfg(tb(
+            "ha_trigger_mqtt",
+            json!({"TOPIC": "home/door", "PAYLOAD": "open", "VALUE_TEMPLATE": "{{ value_json.state }}", "QOS": "1"})
+        )),
+        json!({"trigger": "mqtt", "topic": "home/door", "payload": "open", "value_template": "{{ value_json.state }}", "qos": 1})
+    );
+
+    assert_eq!(
+        cfg(tb("ha_trigger_webhook", json!({"WEBHOOK_ID": "my-hook"}))),
+        json!({"trigger": "webhook", "webhook_id": "my-hook", "allowed_methods": ["POST", "PUT"], "local_only": true})
+    );
+    assert_eq!(
+        cfg(tb(
+            "ha_trigger_webhook",
+            json!({"WEBHOOK_ID": "h", "GET": "TRUE", "HEAD": "FALSE", "POST": "FALSE", "PUT": "FALSE", "LOCAL_ONLY": "FALSE"})
+        )),
+        json!({"trigger": "webhook", "webhook_id": "h", "allowed_methods": ["GET"], "local_only": false})
+    );
+    assert!(
+        trigger_config(tb("ha_trigger_webhook", json!({"WEBHOOK_ID": "h", "POST": "FALSE", "PUT": "FALSE"})))
+            .is_err()
+    );
+
+    let mut t = tb("ha_trigger_calendar", json!({"ENTITY": "calendar.work", "EVENT": "start"}));
+    t["inputs"] = json!({"OFFSET": dur(-15.0, "minutes")});
+    assert_eq!(
+        cfg(t),
+        json!({"trigger": "calendar", "event": "start", "entity_id": "calendar.work", "offset": "-00:15:00"})
+    );
+    assert_eq!(
+        cfg(tb("ha_trigger_calendar", json!({"ENTITY": "calendar.work", "EVENT": "end"}))),
+        json!({"trigger": "calendar", "event": "end", "entity_id": "calendar.work"})
+    );
+
+    assert_eq!(
+        cfg(tb("ha_trigger_tag", json!({"TAG_ID": "A7-6B", "DEVICE": ""}))),
+        json!({"trigger": "tag", "tag_id": "A7-6B"})
+    );
+    assert_eq!(
+        cfg(tb("ha_trigger_tag", json!({"TAG_ID": "a, b", "DEVICE": "dev1"}))),
+        json!({"trigger": "tag", "tag_id": ["a", "b"], "device_id": "dev1"})
+    );
+    assert!(trigger_config(tb("ha_trigger_tag", json!({"TAG_ID": " "}))).is_err());
+
+    assert_eq!(
+        cfg(tb("ha_trigger_conversation", json!({"COMMAND": "good night\n\n  [turn on] night mode \n"}))),
+        json!({"trigger": "conversation", "command": ["good night", "[turn on] night mode"]})
+    );
+    assert!(trigger_config(tb("ha_trigger_conversation", json!({"COMMAND": ""}))).is_err());
+}

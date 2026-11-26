@@ -100,6 +100,41 @@ const expr = (type: string, message0: string, args0: Json[], output: string | st
   inputsInline: true,
 });
 
+/** [field, dropdown, values]: the field only shows while the dropdown has one of the values. */
+type ShowRule = [string, string, string[]];
+
+/** Trigger options that only apply to some choices, e.g. the detail name of a state trigger. */
+const SHOW_WHEN: Record<string, ShowRule[]> = {
+  pb_state_trigger_fields: [
+    ['ATTRIBUTE', 'WHAT', ['attribute']],
+    ...['FROM_OP', 'FROM', 'TO_OP', 'TO'].map((f): ShowRule => [f, 'WHAT', ['state', 'attribute']]),
+  ],
+  pb_numeric_trigger_fields: [
+    ['ATTRIBUTE', 'WHAT', ['attribute']],
+    ['VALUE_TEMPLATE', 'WHAT', ['template']],
+  ],
+  pb_time_pattern_fields: ['HOURS', 'MINUTES', 'SECONDS'].map((f): ShowRule => [f, `${f}_MODE`, ['at', 'every']]),
+};
+
+function registerShowWhen() {
+  for (const [name, rules] of Object.entries(SHOW_WHEN)) {
+    Blockly.Extensions.register(name, function (this: Blockly.Block) {
+      const update = () => {
+        if (this.isDeadOrDying()) return;
+        for (const [field, control, values] of rules) {
+          this.getField(field)?.setVisible(values.includes(String(this.getFieldValue(control))));
+        }
+        if (this.rendered) (this as Blockly.BlockSvg).render();
+      };
+      for (const control of new Set(rules.map(([, c]) => c))) {
+        // Runs before the new value is stored, so look again afterwards.
+        this.getField(control)?.setValidator((v) => (setTimeout(update), v));
+      }
+      update();
+    });
+  }
+}
+
 export const CORE_BLOCKS: Json[] = [
   // --- entry points -----------------------------------------------------------
   {
@@ -125,19 +160,63 @@ export const CORE_BLOCKS: Json[] = [
   },
 
   // --- triggers -------------------------------------------------------------
+  {
+    ...trigger(
+      'ha_trigger_state',
+      '%1 %2 of %3 changes %4 %5 %6 %7 for %8',
+      [
+        dropdown('WHAT', [['state', 'state'], ['detail', 'attribute'], ['state or any detail', 'any']]),
+        { type: 'field_attribute', name: 'ATTRIBUTE', text: '' },
+        entity('ENTITY'),
+        dropdown('FROM_OP', [['from', 'is'], ['from anything but', 'not']]),
+        stateValue('FROM'),
+        dropdown('TO_OP', [['to', 'is'], ['to anything but', 'not']]),
+        stateValue('TO', 'on'),
+        value('FOR', 'Number'),
+      ],
+      'Fires when an entity changes state (or one detail, like a light\'s brightness). Leave from/to empty to match anything; separate several values with commas. "state or any detail" fires on every change. "for" makes it wait until the change has lasted that long.',
+    ),
+    extensions: ['pb_state_trigger_fields'],
+  },
+  {
+    ...trigger(
+      'ha_trigger_numeric',
+      '%1 %2 %3 of %4 is above %5 and below %6 for %7',
+      [
+        dropdown('WHAT', [['value', 'state'], ['detail', 'attribute'], ['template', 'template']]),
+        { type: 'field_attribute', name: 'ATTRIBUTE', text: '' },
+        text('VALUE_TEMPLATE', '{{ state.state | float(0) }}'),
+        entity('ENTITY'),
+        text('ABOVE', '25'),
+        text('BELOW'),
+        value('FOR', 'Number'),
+      ],
+      'Fires when the value (or a detail, or a template that gets the entity as "state") moves into this range. Leave one side empty for just "above" or just "below". A side can also be a number helper (input_number.…).',
+    ),
+    extensions: ['pb_numeric_trigger_fields'],
+  },
   trigger(
-    'ha_trigger_state',
-    'state of %1 changes from %2 to %3 for %4',
-    [entity('ENTITY'), stateValue('FROM'), stateValue('TO', 'on'), value('FOR', 'Number')],
-    'Fires when an entity changes state (not when only its details change). Leave from/to empty to match any state; "for" makes it wait until the state has lasted that long.',
+    'ha_trigger_time',
+    'it is %1 shifted by %2 %3 on Mon %4 Tue %5 Wed %6 Thu %7 Fri %8 Sat %9 Sun %10',
+    [time('AT', '07:00'), value('OFFSET', 'Number'), dummy, checkbox('MON'), checkbox('TUE'), checkbox('WED'), checkbox('THU'), checkbox('FRI'), checkbox('SAT'), checkbox('SUN')],
+    'Fires at this time (like 07:30) on the ticked days, or at the time in a date/time helper (input_datetime.…) or timestamp sensor. A shift only works with a helper or sensor: -10 minutes fires 10 minutes before it.',
   ),
-  trigger(
-    'ha_trigger_numeric',
-    '%1 is above %2 and below %3',
-    [entity('ENTITY'), text('ABOVE', '25'), text('BELOW')],
-    'Fires when the value moves into this range. Leave one side empty for just "above" or just "below". A side can also be a number helper (input_number.…).',
-  ),
-  trigger('ha_trigger_time', 'it is %1', [time('AT', '07:00')], 'Fires every day at this time (like 07:30), or at the time in a date/time helper (input_datetime.…).'),
+  {
+    ...trigger(
+      'ha_trigger_time_pattern',
+      'clock shows hour %1 %2 minute %3 %4 second %5 %6',
+      [
+        dropdown('HOURS_MODE', [['any', 'any'], ['is', 'at'], ['every', 'every']]),
+        number('HOURS', 1, { min: 0, max: 23, precision: 1 }),
+        dropdown('MINUTES_MODE', [['every', 'every'], ['any', 'any'], ['is', 'at']]),
+        number('MINUTES', 15, { min: 0, max: 59, precision: 1 }),
+        dropdown('SECONDS_MODE', [['is', 'at'], ['any', 'any'], ['every', 'every']]),
+        number('SECONDS', 0, { min: 0, max: 59, precision: 1 }),
+      ],
+      'Fires when the clock matches, e.g. minute "every 15" and second "is 0" fires at :00, :15, :30 and :45. "every" counts from the top of the hour (or day, or minute).',
+    ),
+    extensions: ['pb_time_pattern_fields'],
+  },
   trigger(
     'ha_trigger_sun',
     'at %1 shifted by %2',
@@ -145,7 +224,30 @@ export const CORE_BLOCKS: Json[] = [
     'Fires at sunrise or sunset. A negative shift fires earlier (e.g. -30 minutes = half an hour before sunset).',
   ),
   trigger('ha_trigger_event', 'event %1 fires', [text('EVENT_TYPE', 'my_event')], 'Fires when a Home Assistant event is fired.'),
-  trigger('ha_trigger_ha_start', 'Home Assistant starts', [], 'Fires when Home Assistant has started.'),
+  trigger(
+    'ha_trigger_ha_start',
+    'Home Assistant %1',
+    [dropdown('EVENT', [['starts', 'start'], ['shuts down', 'shutdown']])],
+    'Fires when Home Assistant has started, or when it begins to shut down (keep those actions short).',
+  ),
+  trigger(
+    'ha_trigger_calendar',
+    'event in %1 %2 shifted by %3',
+    [entity('ENTITY', '', ['calendar']), dropdown('EVENT', [['starts', 'start'], ['ends', 'end']]), value('OFFSET', 'Number')],
+    'Fires when a calendar event starts or ends. A negative shift fires earlier (-15 minutes = a quarter of an hour before). "trigger detail" calendar_event.summary has the event\'s title.',
+  ),
+  trigger(
+    'ha_trigger_tag',
+    'tag %1 is scanned by %2',
+    [text('TAG_ID', ''), { type: 'field_registry', name: 'DEVICE', text: '', kind: 'device' }],
+    'Fires when an NFC tag or QR code is scanned. Leave the device empty for any scanner; separate several tags or devices with commas.',
+  ),
+  trigger(
+    'ha_trigger_conversation',
+    'Assist hears %1',
+    [multiline('COMMAND', 'good night')],
+    'Fires when you say or type one of these sentences to Assist, one per line. [optional words], (this|that) choices and {name} wildcards work. "trigger detail" sentence or slots.name tells you what was said.',
+  ),
   trigger(
     'ha_trigger_every',
     'every %1 %2',
@@ -160,6 +262,24 @@ export const CORE_BLOCKS: Json[] = [
     'Fires on requests to /api/webhook/<id> (on your Home Assistant URL when the Puzzlebox integration is installed). The body and query are available as trigger data.',
   ),
   trigger('engine_trigger_mqtt', 'MQTT message on %1', [text('TOPIC', 'home/+/state')], 'Fires on MQTT messages (wildcards allowed).'),
+  trigger(
+    'ha_trigger_template',
+    'template %1 becomes true for %2',
+    [multiline('VALUE_TEMPLATE', "{{ states('sensor.temperature') | float(0) > 25 }}"), value('FOR', 'Number')],
+    'Fires when the template changes from false to true (and, if set, has stayed true that long).',
+  ),
+  trigger(
+    'ha_trigger_mqtt',
+    'Home Assistant MQTT message on %1 with payload %2 %3 value template %4 QoS %5',
+    [text('TOPIC', 'home/+/state'), text('PAYLOAD'), dummy, text('VALUE_TEMPLATE'), dropdown('QOS', [['0', '0'], ['1', '1'], ['2', '2']])],
+    'Fires on MQTT messages received by Home Assistant\'s MQTT integration. Leave the payload empty for any message; a value template (like {{ value_json.state }}) picks what the payload is compared with.',
+  ),
+  trigger(
+    'ha_trigger_webhook',
+    'Home Assistant webhook %1 %2 accepts GET %3 HEAD %4 POST %5 PUT %6 only from my network %7',
+    [text('WEBHOOK_ID', 'my-hook'), dummy, checkbox('GET', false), checkbox('HEAD', false), checkbox('POST'), checkbox('PUT'), checkbox('LOCAL_ONLY')],
+    'Fires on requests to /api/webhook/<id> on your Home Assistant URL (Home Assistant\'s own webhooks). "trigger detail" json, data or query has what was sent.',
+  ),
   trigger('ha_trigger_raw', 'HA trigger (YAML) %1', [multiline('CONFIG', 'trigger: state\nentity_id: sun.sun')], 'Any native Home Assistant trigger, written as YAML.'),
 
   // --- actions --------------------------------------------------------------
@@ -588,6 +708,7 @@ export function registerCoreBlocks(): void {
   registerFieldEntity();
   Blockly.fieldRegistry.register('field_trigger_ref', FieldTriggerRef);
   registerConditionOptions();
+  registerShowWhen();
   for (const b of CORE_BLOCKS) {
     if ((b as { nextStatement?: unknown }).nextStatement === undefined) delete (b as Json).nextStatement;
   }

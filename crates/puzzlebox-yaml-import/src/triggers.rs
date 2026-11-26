@@ -95,54 +95,79 @@ impl Builder {
             "event" => self.event(m, &rest, split),
             "sun" => one(self.sun(&rest)?),
             "zone" => one(self.zone(&rest)?),
-            "homeassistant" if only_keys(&rest, &["event"]) && rest.get("event")? == "start" => {
-                one(self.block("ha_trigger_ha_start", json!({}), vec![], None))
+            "homeassistant" if only_keys(&rest, &["event"]) => {
+                let event = rest.get("event")?.as_str().filter(|e| ["start", "shutdown"].contains(e))?;
+                one(self.block("ha_trigger_ha_start", json!({"EVENT": event}), vec![], None))
             }
+            "template" => one(self.template(&rest)?),
+            "mqtt" => one(self.mqtt(&rest)?),
+            "webhook" => one(self.webhook(&rest)?),
+            "calendar" => one(self.calendar(&rest)?),
+            "tag" => one(self.tag(&rest)?),
+            "conversation" => one(self.conversation(&rest)?),
             "device" => one(self.device(m, &rest)?),
             _ => None,
         }
     }
 
     fn state(&mut self, m: &Map<String, Value>) -> Option<Value> {
-        // Without from/to/not_from/not_to HA also fires on attribute changes; no block does.
-        if !only_keys(m, &["entity_id", "from", "to", "for"])
-            || !(m.contains_key("from") || m.contains_key("to"))
-        {
+        if !only_keys(m, &["entity_id", "from", "to", "not_from", "not_to", "for", "attribute"]) {
             return None;
         }
         let entity = entities(m.get("entity_id")?)?;
-        let from = state_match(m.get("from"))?;
-        let to = state_match(m.get("to"))?;
+        let attribute = match m.get("attribute") {
+            None => None,
+            Some(Value::String(s)) if plain(s) => Some(s.clone()),
+            _ => return None,
+        };
+        let typed = attribute.is_some();
+        let (from_not, from) = side(m, "from", "not_from", typed)?;
+        let (to_not, to) = side(m, "to", "not_to", typed)?;
+        // Without any of from/to/not_from/not_to, HA fires on every change, details included.
+        let every_change = ["from", "to", "not_from", "not_to"].iter().all(|k| !m.contains_key(*k));
         let duration = match m.get("for") {
             None => None,
             // `for: 0` still sets `trigger.for` to 0 seconds instead of none.
             Some(f) => Some(period(f).filter(|s| *s > 0.0)?),
         };
-        match (from, to) {
-            (None, Some(to)) => {
-                let mut b =
-                    self.block("ha_trigger_becomes", json!({"ENTITY": entity, "STATE": to}), vec![], None);
-                let d = self.duration(duration.unwrap_or(0.0));
-                shadow(&mut b, "FOR", d);
-                Some(b)
-            }
-            (from, to) => {
-                // This block's duration is whole seconds.
-                if duration.is_some_and(|d| d.fract() != 0.0) {
-                    return None;
-                }
-                let fields =
-                    json!({"ENTITY": entity, "FROM": from.unwrap_or_default(), "TO": to.unwrap_or_default()});
-                let mut b = self.block("ha_trigger_state", fields, vec![], None);
-                let d = self.duration(duration.unwrap_or(0.0));
-                shadow(&mut b, "FOR", d);
-                Some(b)
-            }
+        if !typed && from.is_none() && !to_not && to.is_some() {
+            let mut b = self.block(
+                "ha_trigger_becomes",
+                json!({"ENTITY": entity, "STATE": to.unwrap_or_default()}),
+                vec![],
+                None,
+            );
+            let d = self.duration(duration.unwrap_or(0.0));
+            shadow(&mut b, "FOR", d);
+            return Some(b);
         }
+        // This block's duration is whole seconds.
+        if duration.is_some_and(|d| d.fract() != 0.0) {
+            return None;
+        }
+        let what = match (&attribute, every_change) {
+            (Some(_), _) => "attribute",
+            (None, true) => "any",
+            (None, false) => "state",
+        };
+        let op = |not: bool| if not { "not" } else { "is" };
+        let fields = json!({
+            "WHAT": what,
+            "ATTRIBUTE": attribute.unwrap_or_default(),
+            "ENTITY": entity,
+            "FROM_OP": op(from_not),
+            "FROM": from.unwrap_or_default(),
+            "TO_OP": op(to_not),
+            "TO": to.unwrap_or_default(),
+        });
+        let mut b = self.block("ha_trigger_state", fields, vec![], None);
+        let d = self.duration(duration.unwrap_or(0.0));
+        shadow(&mut b, "FOR", d);
+        Some(b)
     }
 
     fn numeric_state(&mut self, m: &Map<String, Value>) -> Option<Value> {
-        if !only_keys(m, &["entity_id", "above", "below"])
+        if !only_keys(m, &["entity_id", "above", "below", "attribute", "value_template", "for"])
             || !(m.contains_key("above") || m.contains_key("below"))
         {
             return None;
@@ -167,18 +192,34 @@ impl Builder {
             }
         };
         let (above, below) = (threshold("above")?, threshold("below")?);
-        Some(self.block(
-            "ha_trigger_numeric",
-            json!({"ENTITY": entity, "ABOVE": above, "BELOW": below}),
-            vec![],
-            None,
-        ))
+        // The block reads either a detail or a template, not both.
+        let (what, attribute, template) = match (m.get("attribute"), m.get("value_template")) {
+            (None, None) => ("state", "", ""),
+            (Some(Value::String(a)), None) if plain(a) => ("attribute", a.as_str(), ""),
+            (None, Some(Value::String(t))) if !t.is_empty() && t.trim() == t => ("template", "", t.as_str()),
+            _ => return None,
+        };
+        let duration = match m.get("for") {
+            None => 0.0,
+            Some(f) => period(f).filter(|s| *s > 0.0 && s.fract() == 0.0)?,
+        };
+        let mut fields = json!({"WHAT": what, "ENTITY": entity, "ABOVE": above, "BELOW": below});
+        if !attribute.is_empty() {
+            fields["ATTRIBUTE"] = json!(attribute);
+        }
+        if !template.is_empty() {
+            fields["VALUE_TEMPLATE"] = json!(template);
+        }
+        let mut b = self.block("ha_trigger_numeric", fields, vec![], None);
+        let d = self.duration(duration);
+        shadow(&mut b, "FOR", d);
+        Some(b)
     }
 
-    /// One block per plain time or entity in `at`; the other entries (offsets, templates)
-    /// stay raw on their own.
+    /// One block per plain time or entity (with its offset) in `at`; the other entries
+    /// (templates) stay raw on their own.
     fn time(&mut self, all: &Map<String, Value>, m: &Map<String, Value>, split: bool) -> Option<Vec<Value>> {
-        if !only_keys(m, &["at"]) {
+        if !only_keys(m, &["at", "weekday"]) {
             return None;
         }
         let items = match m.get("at")? {
@@ -189,10 +230,26 @@ impl Builder {
         if items.len() > 1 && !split {
             return None;
         }
+        let days = match m.get("weekday") {
+            None => None,
+            Some(v) => Some(weekdays(v)?),
+        };
         let blocks = items
             .iter()
-            .map(|at| match at.as_str().filter(|s| plain(s)) {
-                Some(s) => self.block("ha_trigger_time", json!({"AT": s}), vec![], None),
+            .map(|at| match time_at(at) {
+                Some((at, offset)) => {
+                    let mut fields = json!({"AT": at});
+                    if let Some(days) = &days {
+                        for d in WEEKDAYS {
+                            fields[d.to_uppercase()] =
+                                json!(if days.contains(&d) { "TRUE" } else { "FALSE" });
+                        }
+                    }
+                    let mut b = self.block("ha_trigger_time", fields, vec![], None);
+                    let d = self.duration(offset);
+                    shadow(&mut b, "OFFSET", d);
+                    b
+                }
                 None => self.raw_part(all, "at", at),
             })
             .collect::<Vec<_>>();
@@ -219,9 +276,142 @@ impl Builder {
             (h, m, Some(Pattern::Every(n))) if any(&h) && any(&m) => (n, "seconds"),
             (h, Some(Pattern::Every(n)), Some(Pattern::At(0))) if any(&h) => (n, "minutes"),
             (Some(Pattern::Every(n)), Some(Pattern::At(0)), Some(Pattern::At(0))) => (n, "hours"),
-            _ => return None,
+            _ => {
+                let mut fields = Map::new();
+                for (key, p) in [("HOURS", h), ("MINUTES", min), ("SECONDS", s)] {
+                    let (mode, n) = match p {
+                        None | Some(Pattern::Any) => ("any", 0),
+                        Some(Pattern::At(n)) => ("at", n),
+                        Some(Pattern::Every(n)) => ("every", n),
+                    };
+                    fields.insert(format!("{key}_MODE"), json!(mode));
+                    fields.insert(key.into(), json!(n));
+                }
+                return Some(self.block("ha_trigger_time_pattern", Value::Object(fields), vec![], None));
+            }
         };
         Some(self.block("ha_trigger_every", json!({"N": n, "UNIT": unit}), vec![], None))
+    }
+
+    fn template(&mut self, m: &Map<String, Value>) -> Option<Value> {
+        if !only_keys(m, &["value_template", "for"]) {
+            return None;
+        }
+        let tpl = m.get("value_template")?.as_str().filter(|t| !t.is_empty() && t.trim() == *t)?;
+        let duration = match m.get("for") {
+            None => 0.0,
+            Some(f) => period(f).filter(|s| *s > 0.0 && s.fract() == 0.0)?,
+        };
+        let mut b = self.block("ha_trigger_template", json!({"VALUE_TEMPLATE": tpl}), vec![], None);
+        let d = self.duration(duration);
+        shadow(&mut b, "FOR", d);
+        Some(b)
+    }
+
+    fn mqtt(&mut self, m: &Map<String, Value>) -> Option<Value> {
+        if !only_keys(m, &["topic", "payload", "value_template", "qos"]) {
+            return None;
+        }
+        let text = |k: &str| match m.get(k) {
+            None => Some(""),
+            Some(Value::String(s)) if !s.is_empty() && s.trim() == s => Some(s.as_str()),
+            _ => None,
+        };
+        let topic = text("topic").filter(|t| !t.is_empty())?;
+        let (payload, template) = (text("payload")?, text("value_template")?);
+        let qos = match m.get("qos") {
+            None => 0,
+            Some(Value::Number(n)) => n.as_u64().filter(|q| *q <= 2)?,
+            Some(Value::String(s)) => s.parse::<u64>().ok().filter(|q| *q <= 2)?,
+            _ => return None,
+        };
+        Some(self.block(
+            "ha_trigger_mqtt",
+            json!({"TOPIC": topic, "PAYLOAD": payload, "VALUE_TEMPLATE": template, "QOS": qos.to_string()}),
+            vec![],
+            None,
+        ))
+    }
+
+    fn webhook(&mut self, m: &Map<String, Value>) -> Option<Value> {
+        if !only_keys(m, &["webhook_id", "allowed_methods", "local_only"]) {
+            return None;
+        }
+        let id = m.get("webhook_id")?.as_str().filter(|s| !s.is_empty() && s.trim() == *s)?;
+        let methods: Vec<String> = match m.get("allowed_methods") {
+            None => vec!["POST".into(), "PUT".into()],
+            Some(Value::String(s)) => vec![s.to_uppercase()],
+            Some(Value::Array(a)) => {
+                a.iter().map(|v| v.as_str().map(str::to_uppercase)).collect::<Option<_>>()?
+            }
+            _ => return None,
+        };
+        let known = ["GET", "HEAD", "POST", "PUT"];
+        // HA rejects other methods and repeats; no method at all can't be ticked.
+        let unique = methods.iter().enumerate().all(|(i, x)| !methods[..i].contains(x));
+        if methods.is_empty() || !unique || !methods.iter().all(|x| known.contains(&x.as_str())) {
+            return None;
+        }
+        let local_only = match m.get("local_only") {
+            None => true,
+            Some(Value::Bool(b)) => *b,
+            _ => return None,
+        };
+        let tick = |b: bool| if b { "TRUE" } else { "FALSE" };
+        let mut fields = json!({"WEBHOOK_ID": id, "LOCAL_ONLY": tick(local_only)});
+        for k in known {
+            fields[k] = json!(tick(methods.iter().any(|x| x == k)));
+        }
+        Some(self.block("ha_trigger_webhook", fields, vec![], None))
+    }
+
+    /// The single-calendar form; `calendar.event_started` and friends take targets and stay raw.
+    fn calendar(&mut self, m: &Map<String, Value>) -> Option<Value> {
+        if !only_keys(m, &["event", "entity_id", "offset"]) {
+            return None;
+        }
+        let entity = m.get("entity_id")?.as_str().filter(|e| plain(e) && !e.contains(','))?;
+        let event = match m.get("event") {
+            None => "start",
+            Some(e) => e.as_str().filter(|e| ["start", "end"].contains(e))?,
+        };
+        let offset = match m.get("offset") {
+            None => 0.0,
+            Some(o) => period(o).filter(|s| s.fract() == 0.0)?,
+        };
+        let mut b =
+            self.block("ha_trigger_calendar", json!({"ENTITY": entity, "EVENT": event}), vec![], None);
+        let d = self.duration(offset);
+        shadow(&mut b, "OFFSET", d);
+        Some(b)
+    }
+
+    fn tag(&mut self, m: &Map<String, Value>) -> Option<Value> {
+        if !only_keys(m, &["tag_id", "device_id"]) {
+            return None;
+        }
+        let tags = comma_field(m.get("tag_id")?)?;
+        let device = match m.get("device_id") {
+            None => String::new(),
+            Some(d) => comma_field(d)?,
+        };
+        Some(self.block("ha_trigger_tag", json!({"TAG_ID": tags, "DEVICE": device}), vec![], None))
+    }
+
+    fn conversation(&mut self, m: &Map<String, Value>) -> Option<Value> {
+        if !only_keys(m, &["command"]) {
+            return None;
+        }
+        let sentences: Vec<&str> = match m.get("command")? {
+            Value::String(s) => vec![s.as_str()],
+            Value::Array(a) if !a.is_empty() => a.iter().map(Value::as_str).collect::<Option<_>>()?,
+            _ => return None,
+        };
+        // The block holds one sentence per line, trimmed.
+        if !sentences.iter().all(|s| !s.is_empty() && s.trim() == *s && !s.contains('\n')) {
+            return None;
+        }
+        Some(self.block("ha_trigger_conversation", json!({"COMMAND": sentences.join("\n")}), vec![], None))
     }
 
     fn event(&mut self, all: &Map<String, Value>, m: &Map<String, Value>, split: bool) -> Option<Vec<Value>> {
@@ -399,16 +589,81 @@ fn entities(v: &Value) -> Option<String> {
     ids.iter().all(|s| plain(s)).then(|| ids.join(", "))
 }
 
-/// `from`/`to` of a state trigger: `Some(None)` for any state (absent or null), `Some(Some(s))`
-/// for one state; `None` for what the fields can't hold (several states, non-strings, "").
-fn state_match(v: Option<&Value>) -> Option<Option<String>> {
+/// `from`/`not_from` (or `to`/`not_to`) of a state trigger: whether it's the "not" form, and
+/// the values as the field holds them (`None` for any). `None` for what the field can't hold.
+fn side(m: &Map<String, Value>, key: &str, not_key: &str, typed: bool) -> Option<(bool, Option<String>)> {
+    match (m.get(key), m.get(not_key)) {
+        // HA rejects both.
+        (Some(_), Some(_)) => None,
+        (v, None) => Some((false, state_values(v, typed)?)),
+        (None, v) => Some((true, state_values(v, typed)?)),
+    }
+}
+
+/// State values: `Some(None)` for any (absent or null), else the comma-separated text the
+/// compiler splits again. With `typed` (an attribute), numbers and booleans are allowed and
+/// strings that the compiler would turn into one stay raw.
+fn state_values(v: Option<&Value>, typed: bool) -> Option<Option<String>> {
+    let item = |v: &Value| -> Option<String> {
+        match v {
+            Value::String(s)
+                if plain(s)
+                    && !s.contains(',')
+                    && !(typed && (s.parse::<f64>().is_ok() || s == "true" || s == "false")) =>
+            {
+                Some(s.clone())
+            }
+            Value::Number(n) if typed && n.as_f64().is_some_and(f64::is_finite) => Some(n.to_string()),
+            Value::Bool(b) if typed => Some(b.to_string()),
+            _ => None,
+        }
+    };
     match v {
         None | Some(Value::Null) => Some(None),
-        Some(Value::String(s)) if plain(s) => Some(Some(s.clone())),
-        Some(Value::Array(a)) if a.len() == 1 => match &a[0] {
-            Value::String(s) if plain(s) => Some(Some(s.clone())),
-            _ => None,
-        },
+        Some(Value::Array(a)) if !a.is_empty() => {
+            Some(Some(a.iter().map(item).collect::<Option<Vec<_>>>()?.join(", ")))
+        }
+        Some(Value::Array(_)) => None,
+        Some(v) => Some(Some(item(v)?)),
+    }
+}
+
+/// A text field from one string or a list of them (the compiler splits it at commas again).
+fn comma_field(v: &Value) -> Option<String> {
+    let items: Vec<&str> = match v {
+        Value::String(s) => vec![s.as_str()],
+        Value::Array(a) if !a.is_empty() => a.iter().map(Value::as_str).collect::<Option<_>>()?,
+        _ => return None,
+    };
+    items.iter().all(|s| plain(s) && !s.contains(',')).then(|| items.join(", "))
+}
+
+/// HA's `WEEKDAYS`; the time block has a box for each.
+const WEEKDAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+fn weekdays(v: &Value) -> Option<Vec<&'static str>> {
+    let items: Vec<&str> = match v {
+        Value::String(s) => vec![s.as_str()],
+        Value::Array(a) if !a.is_empty() => a.iter().map(Value::as_str).collect::<Option<_>>()?,
+        _ => return None,
+    };
+    items.iter().map(|d| WEEKDAYS.into_iter().find(|w| w == d)).collect()
+}
+
+/// One entry of a time trigger's `at`: a time or entity, and its offset in whole seconds.
+fn time_at(at: &Value) -> Option<(String, f64)> {
+    match at {
+        Value::String(s) if plain(s) => Some((s.clone(), 0.0)),
+        Value::Object(o) if only_keys(o, &["entity_id", "offset"]) => {
+            let entity = o.get("entity_id")?.as_str().filter(|e| {
+                plain(e) && !e.contains(',') && (e.starts_with("input_datetime.") || e.starts_with("sensor."))
+            })?;
+            let offset = match o.get("offset") {
+                None => 0.0,
+                Some(v) => period(v).filter(|s| s.fract() == 0.0)?,
+            };
+            Some((entity.to_owned(), offset))
+        }
         _ => None,
     }
 }

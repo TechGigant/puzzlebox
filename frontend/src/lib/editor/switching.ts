@@ -33,8 +33,17 @@ const GROUPS: [string, string][][] = [
   [
     ['ha_trigger_time', 'time is'],
     ['ha_trigger_every', 'every N minutes'],
+    ['ha_trigger_time_pattern', 'clock shows'],
     ['ha_trigger_sun', 'sunrise / sunset'],
     ['engine_trigger_cron', 'schedule (cron)'],
+  ],
+  [
+    ['engine_trigger_webhook', 'webhook'],
+    ['ha_trigger_webhook', 'Home Assistant webhook'],
+  ],
+  [
+    ['engine_trigger_mqtt', 'MQTT message'],
+    ['ha_trigger_mqtt', 'Home Assistant MQTT message'],
   ],
   [
     ['ha_state', 'state of'],

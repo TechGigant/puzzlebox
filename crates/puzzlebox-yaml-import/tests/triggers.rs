@@ -105,14 +105,61 @@ fn state() {
     assert_eq!(dur["fields"]["UNIT"], "minutes");
     assert_eq!(dur["inputs"]["N"]["shadow"]["fields"]["NUM"], 5);
 
-    for raw in [
-        // Fires on attribute changes too.
+    // Without from/to it fires on attribute changes too: "state or any detail".
+    check(
         "- {trigger: state, entity_id: sensor.x}",
+        &["ha_trigger_state"],
+        json!([{"trigger": "state", "entity_id": "sensor.x"}]),
+    );
+    assert_eq!(import("- {trigger: state, entity_id: sensor.x}").blocks[0]["fields"]["WHAT"], "any");
+    check(
         "- {trigger: state, entity_id: sensor.x, for: 5}",
+        &["ha_trigger_state"],
+        json!([{"trigger": "state", "entity_id": "sensor.x", "for": {"hours": 0, "minutes": 0, "seconds": 5}}]),
+    );
+    // Several states and "not".
+    check(
         "- {trigger: state, entity_id: light.a, to: ['on', 'off']}",
+        &["ha_trigger_becomes"],
+        json!([{"trigger": "state", "entity_id": "light.a", "to": ["on", "off"]}]),
+    );
+    check(
         "- {trigger: state, entity_id: light.a, not_to: [unavailable, unknown]}",
+        &["ha_trigger_state"],
+        json!([{"trigger": "state", "entity_id": "light.a", "not_to": ["unavailable", "unknown"]}]),
+    );
+    check(
         "- {trigger: state, entity_id: light.a, not_from: unavailable, to: 'on'}",
+        &["ha_trigger_state"],
+        json!([{"trigger": "state", "entity_id": "light.a", "not_from": "unavailable", "to": "on"}]),
+    );
+    // One detail; its values keep their type.
+    check(
         "- {trigger: state, entity_id: climate.x, attribute: hvac_action, to: heating}",
+        &["ha_trigger_state"],
+        json!([{"trigger": "state", "entity_id": "climate.x", "attribute": "hvac_action", "to": "heating"}]),
+    );
+    check(
+        "- {trigger: state, entity_id: light.a, attribute: brightness, from: [0, 1.5], not_to: 255}",
+        &["ha_trigger_state"],
+        json!([{"trigger": "state", "entity_id": "light.a", "attribute": "brightness", "from": [0, 1.5], "not_to": 255}]),
+    );
+    // Only that detail's changes, as with `to: null`.
+    check(
+        "- {trigger: state, entity_id: light.a, attribute: brightness}",
+        &["ha_trigger_state"],
+        json!([{"trigger": "state", "entity_id": "light.a", "attribute": "brightness", "to": null}]),
+    );
+
+    for raw in [
+        "- {trigger: state, entity_id: light.a, from: 'on', not_from: 'off'}",
+        "- {trigger: state, entity_id: light.a, to: 'on,off'}",
+        "- {trigger: state, entity_id: light.a, to: []}",
+        "- {trigger: state, entity_id: light.a, to: 5}",
+        // The compiler would send these as numbers or booleans.
+        "- {trigger: state, entity_id: light.a, attribute: brightness, to: '255'}",
+        "- {trigger: state, entity_id: light.a, attribute: on_off, to: 'true'}",
+        "- {trigger: state, entity_id: light.a, attribute: \"{{ 'x' }}\", to: 'a'}",
         "- {trigger: state, entity_id: light.a, to: 'on', for: \"{{ 5 }}\"}",
         "- {trigger: state, entity_id: light.a, to: 'on', for: {minutes: \"{{ 2 }}\"}}",
         // Sets trigger.for to zero instead of none.
@@ -139,10 +186,26 @@ fn numeric_state() {
         &["ha_trigger_numeric"],
         json!([{"trigger": "numeric_state", "entity_id": "sensor.a, sensor.b", "above": "input_number.low", "below": 30.5}]),
     );
-    for raw in [
+    check(
         "- {trigger: numeric_state, entity_id: sensor.t, below: 10, for: '00:10:00'}",
+        &["ha_trigger_numeric"],
+        json!([{"trigger": "numeric_state", "entity_id": "sensor.t", "below": 10,
+                "for": {"hours": 0, "minutes": 10, "seconds": 0}}]),
+    );
+    check(
         "- {trigger: numeric_state, entity_id: climate.x, attribute: current_temperature, above: 20}",
+        &["ha_trigger_numeric"],
+        json!([{"trigger": "numeric_state", "entity_id": "climate.x", "attribute": "current_temperature", "above": 20}]),
+    );
+    check(
         "- {trigger: numeric_state, entity_id: sensor.x, value_template: \"{{ state.state | float }}\", above: 5}",
+        &["ha_trigger_numeric"],
+        json!([{"trigger": "numeric_state", "entity_id": "sensor.x", "value_template": "{{ state.state | float }}", "above": 5}]),
+    );
+    for raw in [
+        "- {trigger: numeric_state, entity_id: sensor.x, attribute: a, value_template: \"{{ 1 }}\", above: 5}",
+        "- {trigger: numeric_state, entity_id: sensor.t, below: 10, for: 0}",
+        "- {trigger: numeric_state, entity_id: sensor.t, below: 10, for: 1.5}",
         "- {trigger: numeric_state, entity_id: sensor.x, above: \"{{ 5 }}\"}",
         "- {trigger: numeric_state, entity_id: sensor.x, above: lots}",
     ] {
@@ -167,19 +230,52 @@ fn time() {
             {"trigger": "time", "at": "sensor.next_alarm"},
         ]),
     );
-    let out = import("- {trigger: time, at: ['22:00:00', {entity_id: sensor.alarm, offset: '-00:10:00'}]}");
-    assert_eq!(out.types, ["ha_trigger_time", "ha_trigger_raw"]);
-    assert_eq!(
-        out.configs,
-        [
-            json!({"trigger": "time", "at": "22:00:00"}),
-            json!({"trigger": "time", "at": {"entity_id": "sensor.alarm", "offset": "-00:10:00"}}),
-        ]
+    check(
+        "- {trigger: time, at: ['22:00:00', {entity_id: sensor.alarm, offset: '-00:10:00'}]}",
+        &["ha_trigger_time", "ha_trigger_time"],
+        json!([
+            {"trigger": "time", "at": "22:00:00"},
+            {"trigger": "time", "at": {"entity_id": "sensor.alarm", "offset": "-00:10:00"}},
+        ]),
     );
-    for raw in [
+    // "HH:MM" is hours and minutes.
+    check(
+        "- {trigger: time, at: {entity_id: input_datetime.wake, offset: '00:05'}}",
+        &["ha_trigger_time"],
+        json!([{"trigger": "time", "at": {"entity_id": "input_datetime.wake", "offset": "00:05:00"}}]),
+    );
+    check(
+        "- {trigger: time, at: {entity_id: sensor.alarm}}",
+        &["ha_trigger_time"],
+        json!([{"trigger": "time", "at": "sensor.alarm"}]),
+    );
+    check(
         "- {trigger: time, at: '08:00', weekday: [mon, tue]}",
+        &["ha_trigger_time"],
+        json!([{"trigger": "time", "at": "08:00", "weekday": ["mon", "tue"]}]),
+    );
+    check(
+        "- {trigger: time, at: '08:00', weekday: sat}",
+        &["ha_trigger_time"],
+        json!([{"trigger": "time", "at": "08:00", "weekday": "sat"}]),
+    );
+    // Every day is the same as no days.
+    check(
+        "- {trigger: time, at: '08:00', weekday: [mon, tue, wed, thu, fri, sat, sun]}",
+        &["ha_trigger_time"],
+        json!([{"trigger": "time", "at": "08:00"}]),
+    );
+    // The days go with each entry of a split list, raw ones too.
+    let out = import("- {trigger: time, at: ['06:00', \"{{ '09:00' }}\"], weekday: [sun]}");
+    assert_eq!(out.types, ["ha_trigger_time", "ha_trigger_raw"]);
+    assert_eq!(out.configs[0], json!({"trigger": "time", "at": "06:00", "weekday": "sun"}));
+    assert_eq!(out.configs[1], json!({"trigger": "time", "at": "{{ '09:00' }}", "weekday": ["sun"]}));
+    for raw in [
         "- {trigger: time, at: \"{{ '09:00' }}\"}",
-        "- {trigger: time, at: {entity_id: sensor.alarm, offset: '00:05'}}",
+        "- {trigger: time, at: '08:00', weekday: []}",
+        "- {trigger: time, at: '08:00', weekday: monday}",
+        "- {trigger: time, at: {entity_id: sensor.alarm, offset: 0.5}}",
+        "- {trigger: time, at: {entity_id: calendar.x, offset: '00:05'}}",
     ] {
         check_raw(raw);
     }
@@ -229,14 +325,48 @@ fn time_pattern() {
         "seconds",
         json!({"trigger": "time_pattern", "seconds": "/30"}),
     );
-    for raw in [
+    // Other patterns use the clock block, with HA's defaults made visible.
+    let clock = |yaml: &str, fields: Value, config: Value| {
+        let out = import(yaml);
+        assert_eq!(out.types, ["ha_trigger_time_pattern"], "{yaml}");
+        assert_eq!(out.blocks[0]["fields"], fields, "{yaml}");
+        assert_eq!(out.configs, [config], "{yaml}");
+    };
+    let fields = |h: (&str, u64), m: (&str, u64), s: (&str, u64)| json!({"HOURS_MODE": h.0, "HOURS": h.1, "MINUTES_MODE": m.0, "MINUTES": m.1, "SECONDS_MODE": s.0, "SECONDS": s.1});
+    clock(
         "- {trigger: time_pattern, minutes: 30}",
+        fields(("any", 0), ("at", 30), ("at", 0)),
+        json!({"trigger": "time_pattern", "minutes": 30}),
+    );
+    clock(
         "- {trigger: time_pattern, hours: 7, minutes: '/5'}",
+        fields(("at", 7), ("every", 5), ("at", 0)),
+        json!({"trigger": "time_pattern", "hours": 7, "minutes": "/5"}),
+    );
+    clock(
         "- {trigger: time_pattern, minutes: '/5', seconds: 30}",
+        fields(("any", 0), ("every", 5), ("at", 30)),
+        json!({"trigger": "time_pattern", "minutes": "/5", "seconds": 30}),
+    );
+    clock(
         "- {trigger: time_pattern, hours: 0}",
+        fields(("at", 0), ("at", 0), ("at", 0)),
+        json!({"trigger": "time_pattern", "hours": 0}),
+    );
+    clock(
+        "- {trigger: time_pattern, minutes: '*'}",
+        fields(("any", 0), ("any", 0), ("at", 0)),
+        json!({"trigger": "time_pattern", "seconds": 0}),
+    );
+    clock(
+        "- {trigger: time_pattern, hours: 7, minutes: '*'}",
+        fields(("at", 7), ("any", 0), ("at", 0)),
+        json!({"trigger": "time_pattern", "hours": 7, "minutes": "*"}),
+    );
+    for raw in [
         "- {trigger: time_pattern, minutes: '/0'}",
         "- {trigger: time_pattern, minutes: '/75'}",
-        "- {trigger: time_pattern, minutes: '*'}",
+        "- {trigger: time_pattern, hours: 24}",
     ] {
         check_raw(raw);
     }
@@ -289,7 +419,12 @@ fn sun_zone_event_homeassistant() {
         &["ha_trigger_ha_start"],
         json!([{"trigger": "homeassistant", "event": "start"}]),
     );
-    check_raw("- {trigger: homeassistant, event: shutdown}");
+    check(
+        "- {trigger: homeassistant, event: shutdown}",
+        &["ha_trigger_ha_start"],
+        json!([{"trigger": "homeassistant", "event": "shutdown"}]),
+    );
+    check_raw("- {trigger: homeassistant, event: restart}");
 }
 
 #[test]
@@ -309,16 +444,112 @@ fn device() {
 }
 
 #[test]
+fn template_mqtt_webhook() {
+    check(
+        "- {trigger: template, value_template: \"{{ is_state('light.a', 'on') }}\", for: '00:01:00'}",
+        &["ha_trigger_template"],
+        json!([{"trigger": "template", "value_template": "{{ is_state('light.a', 'on') }}",
+                "for": {"hours": 0, "minutes": 1, "seconds": 0}}]),
+    );
+    check(
+        "- {trigger: template, value_template: \"{{ true }}\"}",
+        &["ha_trigger_template"],
+        json!([{"trigger": "template", "value_template": "{{ true }}"}]),
+    );
+    check(
+        "- {trigger: mqtt, topic: home/door, payload: open, value_template: \"{{ value_json.state }}\"}",
+        &["ha_trigger_mqtt"],
+        json!([{"trigger": "mqtt", "topic": "home/door", "payload": "open", "value_template": "{{ value_json.state }}"}]),
+    );
+    check(
+        "- {trigger: mqtt, topic: home/door, qos: '2'}",
+        &["ha_trigger_mqtt"],
+        json!([{"trigger": "mqtt", "topic": "home/door", "qos": 2}]),
+    );
+    // QoS 0 is HA's default.
+    check(
+        "- {trigger: mqtt, topic: home/door, qos: 0}",
+        &["ha_trigger_mqtt"],
+        json!([{"trigger": "mqtt", "topic": "home/door"}]),
+    );
+    check(
+        "- {trigger: webhook, webhook_id: my-hook, allowed_methods: [POST, PUT], local_only: true}",
+        &["ha_trigger_webhook"],
+        json!([{"trigger": "webhook", "webhook_id": "my-hook", "allowed_methods": ["POST", "PUT"], "local_only": true}]),
+    );
+    // HA's defaults: POST and PUT, local only.
+    check(
+        "- {trigger: webhook, webhook_id: hook}",
+        &["ha_trigger_webhook"],
+        json!([{"trigger": "webhook", "webhook_id": "hook", "allowed_methods": ["POST", "PUT"], "local_only": true}]),
+    );
+    check(
+        "- {trigger: webhook, webhook_id: hook, allowed_methods: get, local_only: false}",
+        &["ha_trigger_webhook"],
+        json!([{"trigger": "webhook", "webhook_id": "hook", "allowed_methods": ["GET"], "local_only": false}]),
+    );
+    for raw in [
+        "- {trigger: template, value_template: \"{{ true }}\", for: 0}",
+        "- {trigger: mqtt, topic: home/door, encoding: ''}",
+        "- {trigger: mqtt, topic: home/door, qos: 3}",
+        "- {trigger: mqtt, topic: home/door, payload: ''}",
+        "- {trigger: webhook, webhook_id: hook, allowed_methods: [POST, POST]}",
+        "- {trigger: webhook, webhook_id: hook, allowed_methods: [DELETE]}",
+        "- {trigger: webhook, webhook_id: hook, allowed_methods: []}",
+        "- {trigger: webhook, webhook_id: hook, local_only: 'yes'}",
+    ] {
+        check_raw(raw);
+    }
+}
+
+#[test]
+fn calendar_tag_conversation() {
+    check(
+        "- {trigger: calendar, event: start, entity_id: calendar.work, offset: '-0:15:0'}",
+        &["ha_trigger_calendar"],
+        json!([{"trigger": "calendar", "event": "start", "entity_id": "calendar.work", "offset": "-00:15:00"}]),
+    );
+    check(
+        "- {trigger: calendar, entity_id: calendar.work}",
+        &["ha_trigger_calendar"],
+        json!([{"trigger": "calendar", "event": "start", "entity_id": "calendar.work"}]),
+    );
+    check(
+        "- {trigger: tag, tag_id: A7-6B, device_id: [abc]}",
+        &["ha_trigger_tag"],
+        json!([{"trigger": "tag", "tag_id": "A7-6B", "device_id": "abc"}]),
+    );
+    check(
+        "- {trigger: tag, tag_id: [a, b]}",
+        &["ha_trigger_tag"],
+        json!([{"trigger": "tag", "tag_id": ["a", "b"]}]),
+    );
+    check(
+        "- {trigger: conversation, command: ['turn on the [living room] lights', lights on]}",
+        &["ha_trigger_conversation"],
+        json!([{"trigger": "conversation", "command": ["turn on the [living room] lights", "lights on"]}]),
+    );
+    check(
+        "- {trigger: conversation, command: good night}",
+        &["ha_trigger_conversation"],
+        json!([{"trigger": "conversation", "command": ["good night"]}]),
+    );
+    for raw in [
+        "- {trigger: calendar, event: start, entity_id: calendar.work, offset: 0.5}",
+        "- {trigger: calendar.event_started, target: {entity_id: calendar.work}, options: {offset: '00:05'}}",
+        "- {trigger: tag, tag_id: 'a,b'}",
+        "- {trigger: tag, tag_id: []}",
+        "- {trigger: conversation, command: []}",
+        "- {trigger: conversation, command: [' padded']}",
+    ] {
+        check_raw(raw);
+    }
+}
+
+#[test]
 fn triggers_without_blocks_stay_raw() {
     for raw in [
-        "- {trigger: mqtt, topic: home/door, payload: open, value_template: \"{{ value_json.state }}\"}",
-        "- {trigger: mqtt, topic: home/door}",
-        "- {trigger: webhook, webhook_id: my-hook, allowed_methods: [POST, PUT], local_only: true}",
-        "- {trigger: template, value_template: \"{{ is_state('light.a', 'on') }}\", for: '00:01:00'}",
         "- {trigger: geo_location, source: feed, zone: zone.alert, event: enter}",
-        "- {trigger: calendar, event: start, entity_id: calendar.work, offset: '-0:15:0'}",
-        "- {trigger: tag, tag_id: A7-6B, device_id: [abc]}",
-        "- {trigger: conversation, command: ['turn on the [living room] lights', lights on]}",
         "- {trigger: persistent_notification, update_type: [added, removed], notification_id: x}",
         "- {trigger: light.turned_on, target: {area_id: kitchen}, options: {behavior: any}}",
         "- {trigger: some_custom.thing, foo: bar}",
@@ -373,5 +604,5 @@ fn every_trigger_form_compiles() {
     let out = import_triggers(&text);
     let native = out.types.iter().filter(|t| *t != "ha_trigger_raw").count();
     assert_eq!(out.types.len(), native + out.raw);
-    assert_eq!((native, out.raw), (31, 32), "{:?}", out.types);
+    assert_eq!((native, out.raw), (53, 14), "{:?}", out.types);
 }

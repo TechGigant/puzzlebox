@@ -1,0 +1,213 @@
+# Every trigger form Home Assistant 2026.11 accepts in YAML.
+alias: Every trigger
+triggers:
+  # state
+  - trigger: state
+    entity_id: binary_sensor.door
+    to: "on"
+  - trigger: state
+    entity_id: [light.a, light.b]
+    from: "off"
+    to: "on"
+    for: "00:05"
+  - trigger: state
+    entity_id: light.a
+    to: ["on"]
+    for: {minutes: 2, seconds: 30}
+  - trigger: state
+    entity_id: light.a
+    from: "on"
+  - trigger: state
+    entity_id: sensor.x
+    to: null
+  - trigger: state
+    entity_id: sensor.x
+  - trigger: state
+    entity_id: light.a
+    to: ["on", "off"]
+  - trigger: state
+    entity_id: light.a
+    not_to: [unavailable, unknown]
+  - trigger: state
+    entity_id: light.a
+    not_from: unavailable
+    to: "on"
+  - trigger: state
+    entity_id: climate.lounge
+    attribute: hvac_action
+    to: heating
+  - trigger: state
+    entity_id: light.a
+    to: "on"
+    for: "{{ states('input_number.delay') | int }}"
+  - trigger: state
+    entity_id: light.a
+    to: "on"
+    for: {minutes: "{{ 2 }}"}
+  - platform: state
+    entity_id: light.legacy
+    to: "on"
+  # numeric_state
+  - trigger: numeric_state
+    entity_id: sensor.temperature
+    above: 25
+  - trigger: numeric_state
+    entity_id: [sensor.t1, sensor.t2]
+    above: input_number.low
+    below: "30.5"
+  - trigger: numeric_state
+    entity_id: sensor.temperature
+    below: 10
+    for: "00:10:00"
+  - trigger: numeric_state
+    entity_id: climate.lounge
+    attribute: current_temperature
+    above: 20
+  - trigger: numeric_state
+    entity_id: sensor.x
+    value_template: "{{ state.state | float * 2 }}"
+    above: 5
+  # time
+  - trigger: time
+    at: "07:30"
+  - trigger: time
+    at: ["06:00", input_datetime.wake, sensor.next_alarm]
+  - trigger: time
+    at:
+      - "22:00:00"
+      - entity_id: sensor.phone_next_alarm
+        offset: "-00:10:00"
+  - trigger: time
+    at: "08:00"
+    weekday: [mon, tue]
+  - trigger: time
+    at: "{{ '09:00' }}"
+  # time_pattern
+  - trigger: time_pattern
+    minutes: "/5"
+  - trigger: time_pattern
+    hours: "/2"
+  - trigger: time_pattern
+    seconds: "/10"
+  - trigger: time_pattern
+    hours: "*"
+    minutes: "/15"
+    seconds: 0
+  - trigger: time_pattern
+    minutes: 30
+  - trigger: time_pattern
+    hours: 7
+    minutes: "/5"
+  # sun
+  - trigger: sun
+    event: sunset
+    offset: "-00:30:00"
+  - trigger: sun
+    event: sunrise
+  - trigger: sun
+    event: sunrise
+    offset: 0.5
+  # zone, geo_location
+  - trigger: zone
+    entity_id: person.me
+    zone: zone.home
+    event: leave
+  - trigger: zone
+    entity_id: [person.a, device_tracker.b]
+    zone: zone.work
+  - trigger: geo_location
+    source: nsw_rural_fire_service_feed
+    zone: zone.bushfire_alert_zone
+    event: enter
+  # event
+  - trigger: event
+    event_type: my_event
+  - trigger: event
+    event_type: [a_event, "{{ 'b' }}_event"]
+  - trigger: event
+    event_type: call_service
+    event_data:
+      domain: light
+    context:
+      user_id: [abc]
+  # homeassistant
+  - trigger: homeassistant
+    event: start
+  - trigger: homeassistant
+    event: shutdown
+  # mqtt, webhook, template
+  - trigger: mqtt
+    topic: home/door
+    payload: "open"
+    value_template: "{{ value_json.state }}"
+  - trigger: webhook
+    webhook_id: my-hook
+    allowed_methods: [POST, PUT]
+    local_only: true
+  - trigger: template
+    value_template: "{{ is_state('light.a', 'on') }}"
+    for: "00:01:00"
+  # device
+  - trigger: device
+    device_id: 0123456789abcdef
+    domain: zha
+    type: remote_button_short_press
+    subtype: turn_on
+  - trigger: device
+    device_id: abcdef
+    domain: binary_sensor
+    entity_id: 5f3e9c
+    type: opened
+    for: {seconds: 5}
+  # others
+  - trigger: calendar
+    event: start
+    entity_id: calendar.work
+    offset: "-0:15:0"
+  - trigger: tag
+    tag_id: A7-6B-90-5F
+    device_id: [abc]
+  - trigger: conversation
+    command: ["turn on the [living room] lights", "lights on"]
+  - trigger: persistent_notification
+    update_type: [added, removed]
+    notification_id: invalid_config
+  - trigger: light.turned_on
+    target:
+      area_id: kitchen
+    options:
+      behavior: any
+  - trigger: sun.elevation_crossed_threshold
+    options:
+      threshold: 5
+  # base options
+  - trigger: state
+    entity_id: light.a
+    to: "on"
+    id: light_on
+  - trigger: state
+    entity_id: light.a
+    to: "off"
+    enabled: false
+  - trigger: event
+    event_type: x
+    enabled: "{{ true }}"
+  - trigger: state
+    entity_id: light.a
+    to: "on"
+    alias: Light on
+  - trigger: state
+    entity_id: light.a
+    to: "on"
+    variables:
+      room: kitchen
+  - trigger: state
+    entity_id: light.a
+    to: "on"
+    note: only used by the frontend
+  - triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: nested
+actions: []

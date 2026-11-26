@@ -89,6 +89,13 @@ pub struct Compiler<'a> {
 }
 
 pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec<CompileError>> {
+    let (program, errors) = compile_partial(workspace, ext);
+    if errors.is_empty() { Ok(program) } else { Err(errors) }
+}
+
+/// Compiles everything that can be compiled: an entry block, loose stack or function with a
+/// problem is left out (and reported), so one broken stack doesn't stop the rest.
+pub fn compile_partial(workspace: &Value, ext: &dyn BlockLowerer) -> (Program, Vec<CompileError>) {
     let mut c = Compiler {
         vars: HashMap::new(),
         errors: Vec::new(),
@@ -122,6 +129,8 @@ pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec
         if !b.enabled() {
             continue;
         }
+        let (errors_before, handlers_before, timers_before, loose_before) =
+            (c.errors.len(), program.handlers.len(), c.timer_handlers.len(), loose.len());
         match b.ty() {
             "ha_when" => {
                 let triggers = c.trigger_chain(b.input("TRIGGERS"));
@@ -185,6 +194,14 @@ pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec
                 }
             }
         }
+        if c.errors.len() > errors_before {
+            program.handlers.truncate(handlers_before);
+            c.timer_handlers.truncate(timers_before);
+            loose.truncate(loose_before);
+            if b.ty().starts_with("procedures_def") {
+                program.functions.remove(b.field_str("NAME").unwrap_or(""));
+            }
+        }
     }
     program.handlers.append(&mut loose);
     program.persistent = std::mem::take(&mut c.persistent);
@@ -200,14 +217,33 @@ pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec
         }
     }
 
-    for h in &program.handlers {
-        check_calls(&h.body, &program.functions, &mut c);
+    // Functions calling missing (or broken) functions go first, then the handlers using them.
+    loop {
+        let fns = program.functions.clone();
+        let broken: Vec<String> = fns
+            .iter()
+            .filter(|(_, f)| {
+                let before = c.errors.len();
+                check_calls(&f.body, &fns, &mut c);
+                c.errors.len() > before
+            })
+            .map(|(n, _)| n.clone())
+            .collect();
+        if broken.is_empty() {
+            break;
+        }
+        for n in broken {
+            program.functions.remove(&n);
+        }
     }
-    for f in program.functions.values() {
-        check_calls(&f.body, &program.functions, &mut c);
-    }
+    let fns = program.functions.clone();
+    program.handlers.retain(|h| {
+        let before = c.errors.len();
+        check_calls(&h.body, &fns, &mut c);
+        c.errors.len() == before
+    });
 
-    if c.errors.is_empty() { Ok(program) } else { Err(c.errors) }
+    (program, c.errors)
 }
 
 fn check_calls(body: &[Stmt], fns: &BTreeMap<String, Function>, c: &mut Compiler<'_>) {
@@ -217,7 +253,7 @@ fn check_calls(body: &[Stmt], fns: &BTreeMap<String, Function>, c: &mut Compiler
         {
             errs.push(CompileError {
                 block_id: Some(e.id.clone()),
-                message: format!("unknown function '{function}'"),
+                message: format!("the function \"{function}\" is missing or has a problem"),
             });
         }
     }
@@ -296,7 +332,13 @@ impl<'a> Compiler<'a> {
         match b.field_str(field).map(str::trim) {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => {
-                self.err(b, format!("{} is required", field.to_lowercase()));
+                // The editor replaces the quoted name with the field's label.
+                let msg = if field == "ENTITY" {
+                    "choose an entity".to_owned()
+                } else {
+                    format!("fill in \u{201c}{}\u{201d}", field.to_lowercase())
+                };
+                self.err(b, msg);
                 String::new()
             }
         }
@@ -306,9 +348,25 @@ impl<'a> Compiler<'a> {
         match b.input(input) {
             Some(inner) => self.expr(inner),
             None => {
-                self.err(b, format!("missing input {}", input.to_lowercase()));
+                self.err(
+                    b,
+                    format!("put a block in the empty \u{201c}{}\u{201d} slot", input.to_lowercase()),
+                );
                 Expr::lit(b.id(), Value::Null)
             }
+        }
+    }
+
+    /// A number that must be known when the program starts (trigger settings): a number or
+    /// duration block in the socket, or the older number field of the same name.
+    fn fixed_number(&mut self, b: &Block<'_>, name: &str) -> Option<f64> {
+        match self.value_opt(b, name) {
+            Some(Expr { kind: ExprKind::Lit { value }, .. }) => value.as_f64(),
+            Some(_) => {
+                self.err(b, "a trigger needs a fixed number here, not a variable or calculation");
+                None
+            }
+            None => b.field_f64(name),
         }
     }
 
@@ -365,7 +423,7 @@ impl<'a> Compiler<'a> {
                 other => {
                     self.errors.push(CompileError {
                         block_id: Some(other.block_id().into()),
-                        message: "only Home Assistant triggers can be waited for".into(),
+                        message: "only Home Assistant triggers can be waited for, not schedules, webhooks or MQTT messages".into(),
                     });
                     None
                 }
@@ -386,8 +444,12 @@ impl<'a> Compiler<'a> {
                         cfg.insert(key.into(), json!(v));
                     }
                 }
-                if let Some(d) = duration_or_none(b.field_f64("FOR")) {
+                if let Some(d) = duration_or_none(self.fixed_number(&b, "FOR")) {
                     cfg.insert("for".into(), d);
+                }
+                // "changes" means the state; without from/to HA would also fire on attribute changes.
+                if !cfg.contains_key("from") && !cfg.contains_key("to") {
+                    cfg.insert("to".into(), Value::Null);
                 }
                 ha(Value::Object(cfg))
             }
@@ -420,7 +482,7 @@ impl<'a> Compiler<'a> {
             }
             "ha_trigger_sun" => {
                 let mut cfg = json!({"trigger": "sun", "event": b.field_str("EVENT").unwrap_or("sunset")});
-                if let Some(off) = b.field_f64("OFFSET").filter(|o| *o != 0.0) {
+                if let Some(off) = self.fixed_number(&b, "OFFSET").filter(|o| *o != 0.0) {
                     let sign = if off < 0.0 { "-" } else { "" };
                     let s = off.abs() as u64;
                     cfg["offset"] =
@@ -431,11 +493,23 @@ impl<'a> Compiler<'a> {
             "ha_trigger_ha_start" => ha(json!({"trigger": "homeassistant", "event": "start"})),
             "ha_trigger_every" => {
                 let n = b.field_f64("N").unwrap_or(5.0).max(1.0) as u64;
-                let unit = match b.field_str("UNIT") {
-                    Some("seconds") => "seconds",
-                    Some("hours") => "hours",
-                    _ => "minutes",
+                let (unit, max) = match b.field_str("UNIT") {
+                    Some("seconds") => ("seconds", 60),
+                    Some("hours") => ("hours", 24),
+                    _ => ("minutes", 60),
                 };
+                // HA's time pattern counts from the top of the minute/hour/day.
+                if n >= max || max % n != 0 {
+                    self.err(
+                        &b,
+                        format!(
+                            "every {n} {unit} doesn't fit evenly into {} {}; use {} or a timer that starts itself again",
+                            max,
+                            if unit == "hours" { "hours (a day)" } else if unit == "minutes" { "minutes (an hour)" } else { "seconds (a minute)" },
+                            (1..max).filter(|d| max % d == 0).map(|d| d.to_string()).collect::<Vec<_>>().join(", ")
+                        ),
+                    );
+                }
                 ha(json!({"trigger": "time_pattern", unit: format!("/{n}")}))
             }
             "ha_trigger_raw" => match parse_config(b.field_str("CONFIG").unwrap_or("")) {
@@ -486,10 +560,13 @@ impl<'a> Compiler<'a> {
                 Some(Trigger::Mqtt { id, topic: self.required_str(&b, "TOPIC"), filter: None })
             }
             _ => {
+                if let Some(t) = self.helper_trigger(&b) {
+                    return t;
+                }
                 let ext = self.ext;
                 let t = ext.lower_trigger(b, self);
                 if t.is_none() {
-                    self.err(&b, format!("'{}' is not a trigger", b.ty()));
+                    self.err(&b, "this block isn't a trigger; triggers go in the slot of a \"when\" block");
                 }
                 t
             }
@@ -706,7 +783,27 @@ impl<'a> Compiler<'a> {
                 }
                 let (name, scope) = self.var(&lb, "VAR");
                 let key = self.list_index(&b);
-                StmtKind::SetItem { name, scope, key, value: self.value(&b, "TO") }
+                let value = self.value(&b, "TO");
+                if b.field_str("MODE") == Some("INSERT") {
+                    // Inserting "at" an index puts the item before it; "last" appends.
+                    let list = Expr { id: b.id().into(), kind: ExprKind::Var { name: name.clone(), scope } };
+                    let inserted =
+                        Expr { id: b.id().into(), kind: self.builtin("list_insert", vec![list, key, value]) };
+                    StmtKind::Set { name, scope, value: inserted }
+                } else {
+                    StmtKind::SetItem { name, scope, key, value }
+                }
+            }
+            "lists_getIndex" if b.field_str("MODE") == Some("REMOVE") => {
+                let Some(lb) = b.input("VALUE").filter(|l| l.ty() == "variables_get") else {
+                    self.err(&b, "the list to remove from must be a variable");
+                    return None;
+                };
+                let (name, scope) = self.var(&lb, "VAR");
+                let key = self.list_index(&b);
+                let list = Expr { id: b.id().into(), kind: ExprKind::Var { name: name.clone(), scope } };
+                let removed = Expr { id: b.id().into(), kind: self.builtin("list_remove", vec![list, key]) };
+                StmtKind::Set { name, scope, value: removed }
             }
             "dict_set" => {
                 let (name, scope) = self.var(&b, "VAR");
@@ -829,7 +926,13 @@ impl<'a> Compiler<'a> {
                 if b.0.get("output").is_some() || self.is_value_block(&b) {
                     self.err(&b, "this block produces a value; plug it into another block");
                 } else {
-                    self.err(&b, format!("unsupported block '{}'", b.ty()));
+                    self.err(
+                        &b,
+                        format!(
+                            "this block isn't available any more (its integration or plugin may be gone: {})",
+                            b.ty()
+                        ),
+                    );
                 }
                 return None;
             }
@@ -983,7 +1086,12 @@ impl<'a> Compiler<'a> {
             }
             "text_trim" => {
                 let a = self.value(b, "TEXT");
-                self.builtin("text_trim", vec![a])
+                let name = match b.field_str("MODE") {
+                    Some("LEFT") => "text_left",
+                    Some("RIGHT") => "text_right",
+                    _ => "text_trim",
+                };
+                self.builtin(name, vec![a])
             }
             "text_indexOf" | "lists_indexOf" => {
                 let args = vec![self.value(b, "VALUE"), self.value(b, "FIND")];
@@ -1008,7 +1116,7 @@ impl<'a> Compiler<'a> {
                 let name = match b.field_str("MODE") {
                     Some("GET") | None => "list_get",
                     Some(_) => {
-                        self.err(b, "only 'get' is supported in expressions; use 'set' to modify lists");
+                        self.err(b, "\"get and remove\" isn't supported: get the item first, then use a separate \"remove\" block");
                         "list_get"
                     }
                 };
@@ -1025,7 +1133,8 @@ impl<'a> Compiler<'a> {
             "lists_sort" => {
                 let a = self.value(b, "LIST");
                 let desc = b.field_str("DIRECTION") == Some("-1");
-                self.builtin(if desc { "list_sort_desc" } else { "list_sort" }, vec![a])
+                let ty = Expr::lit(b.id(), json!(b.field_str("TYPE").unwrap_or("NUMERIC")));
+                self.builtin(if desc { "list_sort_desc" } else { "list_sort" }, vec![a, ty])
             }
             "lists_split" => {
                 let args = vec![self.value(b, "INPUT"), self.value(b, "DELIM")];
@@ -1082,11 +1191,12 @@ impl<'a> Compiler<'a> {
                 }
             }
             "ha_is_state" => {
-                let entity = self.required_str(b, "ENTITY");
+                let mut args = BTreeMap::new();
+                args.insert("entity".to_owned(), self.entity_expr(b));
                 let state = b.field_str("STATE").unwrap_or("").to_owned();
                 ExprKind::Condition {
-                    config: json!({"condition": "state", "entity_id": entity, "state": state}),
-                    args: BTreeMap::new(),
+                    config: json!({"condition": "state", "entity_id": arg_placeholder("entity"), "state": state}),
+                    args,
                 }
             }
             "ha_condition_raw" => match parse_config(b.field_str("CONFIG").unwrap_or("")) {
@@ -1148,12 +1258,12 @@ impl<'a> Compiler<'a> {
                 self.builtin("engine:throttle", vec![key, secs])
             }
             "ha_state_for" => {
-                let entity = self.required_str(b, "ENTITY");
                 let state = b.field_str("STATE").unwrap_or("").to_owned();
                 let mut args = BTreeMap::new();
+                args.insert("entity".to_owned(), self.entity_expr(b));
                 args.insert("for".to_owned(), self.value(b, "SECONDS"));
                 ExprKind::Condition {
-                    config: json!({"condition": "state", "entity_id": entity, "state": state,
+                    config: json!({"condition": "state", "entity_id": arg_placeholder("entity"), "state": state,
                         "for": {"seconds": arg_placeholder("for")}}),
                     args,
                 }
@@ -1184,7 +1294,14 @@ impl<'a> Compiler<'a> {
                     .filter(|s| !s.is_empty())
                     .collect();
                 if ids.is_empty() {
-                    self.err(b, format!("choose a {}", b.ty().trim_start_matches("ha_")));
+                    let what = b.ty().trim_start_matches("ha_");
+                    self.err(
+                        b,
+                        format!(
+                            "choose {} {what}",
+                            if what.starts_with(['a', 'e', 'i', 'o', 'u']) { "an" } else { "a" }
+                        ),
+                    );
                 }
                 lit(json!({ key: ids }))
             }
@@ -1228,7 +1345,8 @@ impl<'a> Compiler<'a> {
             "ha_entities_in" => {
                 let kind = b.field_str("KIND").unwrap_or("area");
                 let name = b.field_str("NAME").unwrap_or("").trim().replace(['\\', '\''], "");
-                let domain = b.field_str("DOMAIN").unwrap_or("").trim().replace(['\\', '\''], "");
+                let domain =
+                    b.field_str("DOMAIN").unwrap_or("").trim().trim_matches('*').replace(['\\', '\''], "");
                 let func = match kind {
                     "floor" => "floor_entities",
                     "label" => "label_entities",

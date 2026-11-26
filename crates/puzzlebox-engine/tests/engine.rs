@@ -54,6 +54,9 @@ impl HaApi for MockHa {
         Ok(Value::Null)
     }
     async fn render_template(&self, t: &str, v: Value) -> Result<Value, String> {
+        if t.contains("area_entities('kitchen')") {
+            return Ok(json!(["light.a", "light.b"]));
+        }
         Ok(json!(format!("{t}|{}", v["trigger"]["platform"].as_str().unwrap_or(""))))
     }
     async fn fire_event(&self, _t: &str, _d: Option<Value>) -> Result<(), String> {
@@ -773,4 +776,96 @@ async fn device_helpers_call_the_right_actions() {
             ("notify.mobile_app_phone".into(), Some(json!({"message": "hi", "title": "Home"}))),
         ]
     );
+}
+
+#[tokio::test]
+async fn broken_stacks_are_skipped_and_the_rest_runs() {
+    let (engine, ha) = setup().await;
+    let mut events = engine.subscribe();
+    let good = on_run(call("ok", "light.turn_on", "light.a"));
+    // An "if" without a condition: a problem, but only in its own stack.
+    let broken = when("bw", state_trigger("bt", "x.y"), b("controls_if", "bad", json!({}), json!({})));
+    let (_, errors) =
+        engine.save(program("pc", workspace(vec![good, broken], json!([])), "single")).await.unwrap();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].message.contains("empty"), "{}", errors[0].message);
+    assert!(engine.run_now("pc", None, None));
+    next_finished(&mut events).await;
+    assert_eq!(ha.calls(), ["light.turn_on"]);
+    assert_eq!(engine.status("pc").unwrap().state, "error");
+}
+
+#[tokio::test]
+async fn areas_expand_to_entities_and_review_fixes() {
+    let (engine, ha) = setup().await;
+    let mut events = engine.subscribe();
+    {
+        let mut st = ha.states.lock().unwrap();
+        st.insert("light.a".into(), json!({"entity_id": "light.a", "state": "on"}));
+        st.insert("light.b".into(), json!({"entity_id": "light.b", "state": "off"}));
+        st.insert("sensor.x".into(), json!({"entity_id": "sensor.x", "state": "9.5"}));
+        st.insert("sensor.y".into(), json!({"entity_id": "sensor.y", "state": "10.2"}));
+    }
+    let area = || blk(b("ha_area", "ar", json!({"ID": "kitchen"}), json!({})));
+    let count = b("ha_state_count", "cnt", json!({"OP": "is", "STATE": "on"}), json!({"LIST": area()}));
+    let state = |id: &str, e: &str| {
+        b(
+            "ha_state",
+            id,
+            json!({}),
+            json!({"ENTITY": {"shadow": {"type": "ha_entity", "id": format!("{id}e"), "fields": {"ENTITY": e}}}}),
+        )
+    };
+    // Two sensor states compare as numbers: 9.5 < 10.2 (as text it would be the other way round).
+    let less = b(
+        "logic_compare",
+        "lt",
+        json!({"OP": "LT"}),
+        json!({"A": blk(state("sx", "sensor.x")), "B": blk(state("sy", "sensor.y"))}),
+    );
+    let mut list = b(
+        "lists_create_with",
+        "l",
+        json!({}),
+        json!({"ADD0": blk(num("1", 1.0)), "ADD1": blk(num("3", 3.0))}),
+    );
+    list["extraState"] = json!({"itemCount": 2});
+    let insert = b(
+        "lists_setIndex",
+        "ins",
+        json!({"MODE": "INSERT", "WHERE": "FROM_START"}),
+        json!({"LIST": blk(b("variables_get", "lg", json!({"VAR": {"id": "lst"}}), json!({}))), "AT": blk(num("at", 2.0)), "TO": blk(num("two", 2.0))}),
+    );
+    let mut each = b(
+        "controls_forEach",
+        "fe",
+        json!({"VAR": {"id": "it"}}),
+        json!({"LIST": area(), "DO": blk(b("ha_call_service", "c", json!({"SERVICE": "light.toggle"}),
+            json!({"TARGET": blk(b("variables_get", "ig", json!({"VAR": {"id": "it"}}), json!({})))})))}),
+    );
+    each["id"] = json!("fe");
+    let neg = b("math_single", "ng", json!({"OP": "NEG"}), json!({"NUM": blk(num("n", 4.0))}));
+    let body = chain(vec![
+        set("s1", "count", count),
+        set("s2", "less", less),
+        set("s3", "lst", list),
+        insert,
+        each,
+        set("s4", "neg", neg),
+    ]);
+    let vars = json!([{"name": "count", "id": "count"}, {"name": "less", "id": "less"}, {"name": "lst", "id": "lst"},
+        {"name": "it", "id": "it"}, {"name": "neg", "id": "neg"}]);
+    let (_, errors) =
+        engine.save(program("ar", workspace(vec![on_run(body)], vars), "single")).await.unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(engine.run_now("ar", None, None));
+    let (status, error) = next_finished(&mut events).await;
+    assert_eq!(status, "ok", "{error:?}");
+    assert_eq!(ha.calls(), ["light.toggle", "light.toggle"], "looping over an area visits its entities");
+    let run = engine.store().list_runs("ar", 1).await.unwrap().remove(0);
+    let v = engine.store().get_run(&run.id).await.unwrap().unwrap().trace.unwrap()["variables"].clone();
+    assert_eq!(v["count"], json!(1));
+    assert_eq!(v["less"], json!(true));
+    assert_eq!(v["lst"], json!([1, 2, 3]));
+    assert_eq!(v["neg"], json!(-4));
 }

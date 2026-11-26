@@ -1,0 +1,117 @@
+//! Updates saved workspaces to the current block shapes when a program is opened. The engine
+//! still understands the old shapes, so programs keep running until they are opened and saved.
+
+import { blockDef } from '../blocks/dynamic';
+
+type State = {
+  type: string;
+  fields?: Record<string, unknown>;
+  inputs?: Record<string, { block?: State; shadow?: State }>;
+  next?: { block?: State };
+  extraState?: unknown;
+  [k: string]: unknown;
+};
+
+/** Blocks whose entity moved from a typed-in field to a socket. */
+const ENTITY_SOCKET = new Set([
+  'ha_state',
+  'ha_attribute',
+  'ha_is_state',
+  'ha_state_for',
+  'ha_has_value',
+  'ha_number_state',
+  'ha_friendly_name',
+  'ha_seconds_since',
+  'ha_history',
+  'light_colour',
+  'light_brightness',
+  'cover_position_of',
+  'climate_temperature_of',
+  'media_volume_of',
+  'media_title_of',
+  'fan_speed_of',
+]);
+
+/** Number fields that became sockets (trigger durations). */
+const NUMBER_SOCKET: Record<string, string[]> = {
+  ha_trigger_state: ['FOR'],
+  ha_trigger_sun: ['OFFSET'],
+};
+
+/** Seconds sockets that now show a duration block ("5 minutes") instead of a bare number. */
+const SECONDS: Record<string, string[]> = {
+  ha_wait: ['SECONDS'],
+  ha_wait_for_trigger: ['TIMEOUT'],
+  timer_start: ['SECONDS'],
+  wait_until: ['HOLD', 'TIMEOUT'],
+  throttle: ['SECONDS'],
+  ha_state_for: ['SECONDS'],
+  ha_history: ['SECONDS'],
+};
+
+const duration = (n: unknown) => ({
+  type: 'duration',
+  inputs: { N: { shadow: { type: 'math_number', fields: { NUM: n } } } },
+  fields: { UNIT: 'seconds' },
+});
+
+function migrateBlock(b: State) {
+  b.inputs ??= {};
+  if (ENTITY_SOCKET.has(b.type) && b.fields && 'ENTITY' in b.fields && !b.inputs.ENTITY) {
+    b.inputs.ENTITY = { shadow: { type: 'ha_entity', fields: { ENTITY: b.fields.ENTITY } } };
+    delete b.fields.ENTITY;
+  }
+  for (const name of NUMBER_SOCKET[b.type] ?? []) {
+    if (b.fields && name in b.fields && !b.inputs[name]) {
+      b.inputs[name] = { shadow: duration(b.fields[name]) as State };
+      delete b.fields[name];
+    }
+  }
+  for (const name of SECONDS[b.type] ?? []) {
+    const slot = b.inputs[name];
+    if (slot && !slot.block && slot.shadow?.type === 'math_number') {
+      slot.shadow = duration(slot.shadow.fields?.NUM) as State;
+    }
+  }
+  // Blocks that returned different kinds of value were split.
+  if (b.type === 'ha_state_check' && b.fields?.MODE === 'count') {
+    b.type = 'ha_state_count';
+    delete b.fields.MODE;
+  }
+  if (b.type === 'ha_history' && b.fields?.OP === 'state_ago') {
+    b.type = 'ha_state_ago';
+    delete b.fields.OP;
+    delete b.fields.STATE;
+  }
+  if (b.type === 'trigger_info' && (b.fields?.WHAT === 'id' || b.fields?.WHAT === 'platform')) {
+    b.type = 'ha_trigger_data';
+    b.fields = { PATH: b.fields.WHAT };
+  }
+  // Colour settings of generated blocks became sockets.
+  const def = blockDef(b.type);
+  for (const p of def?.params ?? []) {
+    const slot = `P_${p.name}`;
+    if (p.input === 'color' && b.fields && typeof b.fields[slot] === 'string' && !b.inputs[slot]) {
+      b.inputs[slot] = { shadow: { type: 'colour_picker', fields: { COLOUR: b.fields[slot] } } };
+      delete b.fields[slot];
+    }
+  }
+  if (!Object.keys(b.inputs).length) delete b.inputs;
+}
+
+function walk(b: State | undefined) {
+  if (!b || typeof b !== 'object') return;
+  migrateBlock(b);
+  for (const slot of Object.values(b.inputs ?? {})) {
+    walk(slot.block);
+    walk(slot.shadow);
+  }
+  walk(b.next?.block);
+}
+
+/** Migrates a saved workspace in place and returns it. */
+export function migrateWorkspace<T extends object>(ws: T): T {
+  const blocks = (ws as { blocks?: { blocks?: State[] } }).blocks?.blocks ?? [];
+  blocks.forEach(walk);
+  return ws;
+}

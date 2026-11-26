@@ -186,6 +186,20 @@ export class FieldEntity extends FieldSuggest {
   protected emptyText() {
     return cache.length ? 'No matching entities' : 'Loading entities…';
   }
+
+  protected override getText_(): string | null {
+    // Show names ("Kitchen light") instead of ids; the editor still edits the id.
+    const v = String(this.getValue() ?? '');
+    if (!v) return 'choose…';
+    if (v.includes('{')) return null;
+    const names = v.split(',').map((id) => entityState(id.trim())?.attributes.friendly_name ?? id.trim());
+    return names.join(', ');
+  }
+}
+
+/** Entities loaded from Home Assistant (empty until the first load finishes). */
+export function knownEntities(): EntityState[] {
+  return cache;
 }
 
 // Tables below follow Home Assistant's frontend (src/common/entity/get_states.ts, Apache-2.0).
@@ -242,7 +256,21 @@ const DOMAIN_OPTIONS_ATTRIBUTES: Record<string, Record<string, string>> = {
 
 /** Resolves the entity ids in a block's target slot (set by dynamic blocks). */
 export type TargetResolver = (block: Blockly.Block) => string[];
-let resolveTarget: TargetResolver = () => [];
+const split = (raw: string) =>
+  raw
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+/** Entities a block is about: its TARGET or ENTITY socket (entity block), or ENTITY field. */
+export function blockEntities(block: Blockly.Block): string[] {
+  for (const name of ['TARGET', 'ENTITY']) {
+    const t = block.getInputTargetBlock(name);
+    if (t?.type === 'ha_entity') return split(String(t.getFieldValue('ENTITY') ?? ''));
+  }
+  const f = block.getField('ENTITY');
+  return f ? split(String(f.getValue() ?? '')) : [];
+}
+let resolveTarget: TargetResolver = blockEntities;
 export function setTargetResolver(r: TargetResolver) {
   resolveTarget = r;
 }
@@ -253,6 +281,10 @@ export function setTargetResolver(r: TargetResolver) {
  */
 export class FieldStateValue extends FieldSuggest {
   attribute: string | null = null;
+
+  static fromJson(options: Blockly.FieldTextInputFromJsonConfig) {
+    return new FieldStateValue(options.text ?? '');
+  }
 
   private candidates(): string[] {
     const block = this.getSourceBlock();
@@ -366,22 +398,72 @@ export class FieldRegistry extends FieldSuggest {
   }
 
   protected suggestions(q: string): Suggestion[] {
-    return this.commaList(q, registrySuggestions(registryCache, this.kind));
+    return this.commaList(q, registrySuggestions(registryCache, this.currentKind()));
   }
 
   protected emptyText() {
-    return registryCache ? `No ${this.kind}s found` : 'Loading…';
+    return registryCache ? `No ${this.currentKind()}s found` : 'Loading…';
+  }
+
+  /** Blocks with a KIND dropdown (area/floor/…) pick from that kind. */
+  private currentKind(): string {
+    const k = this.getSourceBlock()?.getField('KIND')?.getValue();
+    return typeof k === 'string' ? k : this.kind;
   }
 
   protected override getText_(): string | null {
     // Show names instead of ids.
     const v = String(this.getValue() ?? '');
     if (!registryCache || !v) return null;
-    const names = registrySuggestions(registryCache, this.kind);
+    const names = registrySuggestions(registryCache, this.currentKind());
     return v
       .split(',')
       .map((id) => names.find((n) => n.value === id.trim())?.label ?? id.trim())
       .join(', ');
+  }
+}
+
+/** Attribute names of the block's entity (brightness, friendly_name, …). */
+export class FieldAttribute extends FieldSuggest {
+  static fromJson(options: Blockly.FieldTextInputFromJsonConfig) {
+    return new FieldAttribute(options.text ?? '');
+  }
+
+  protected suggestions(q: string): Suggestion[] {
+    const block = this.getSourceBlock();
+    const names = new Set<string>();
+    for (const id of block ? blockEntities(block) : []) {
+      for (const k of Object.keys(entityState(id)?.attributes ?? {})) names.add(k);
+    }
+    return [...names]
+      .filter((n) => !q || n.includes(q))
+      .map((n) => {
+        const ids = block ? blockEntities(block) : [];
+        const v = ids.length ? entityState(ids[0])?.attributes[n] : undefined;
+        return { value: n, label: n.replaceAll('_', ' '), meta: v === undefined ? undefined : String(JSON.stringify(v)).slice(0, 40) };
+      });
+  }
+
+  protected emptyText() {
+    return 'Choose an entity first';
+  }
+}
+
+/** A time of day ("07:30") or an input_datetime entity; "7", "730" and "7.30" are tidied up. */
+export class FieldTime extends Blockly.FieldTextInput {
+  static fromJson(options: Blockly.FieldTextInputFromJsonConfig) {
+    return new FieldTime(options.text ?? '');
+  }
+
+  protected override doClassValidation_(v?: string): string | null {
+    const s = String(v ?? '').trim();
+    if (!s || /^[a-z_]+\.[a-z0-9_]+$/.test(s)) return s;
+    const m = s.match(/^(\d{1,2})(?:[:.h]?(\d{2}))?(?:[:.](\d{2}))?$/);
+    if (!m) return null;
+    const [h, min, sec] = [Number(m[1]), Number(m[2] ?? 0), m[3] === undefined ? null : Number(m[3])];
+    if (h > 23 || min > 59 || (sec ?? 0) > 59) return null;
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${pad(h)}:${pad(min)}${sec === null ? '' : ':' + pad(sec)}`;
   }
 }
 
@@ -391,4 +473,7 @@ export function registerFieldEntity() {
   registered = true;
   Blockly.fieldRegistry.register('field_entity', FieldEntity);
   Blockly.fieldRegistry.register('field_registry', FieldRegistry);
+  Blockly.fieldRegistry.register('field_state_value', FieldStateValue);
+  Blockly.fieldRegistry.register('field_attribute', FieldAttribute);
+  Blockly.fieldRegistry.register('field_time', FieldTime);
 }

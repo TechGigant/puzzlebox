@@ -39,7 +39,8 @@ const BLOCK_TYPE = { trigger: 'device_trigger', condition: 'device_condition', a
 function buildInputs(block: DeviceBlock) {
   for (const input of [...block.inputList]) block.removeInput(input.name, true);
   const st = block.device;
-  block.appendDummyInput('TITLE').appendField(st?.label || 'device (drag in from Devices)');
+  const kind = block.type === 'device_trigger' ? '⚡ ' : '';
+  block.appendDummyInput('TITLE').appendField(kind + (st?.label || 'device (drag in from Devices)'));
   for (const p of st?.params ?? []) {
     const name = `P_${p.name}`;
     switch (p.input) {
@@ -59,7 +60,7 @@ function buildInputs(block: DeviceBlock) {
         block.appendDummyInput(name).appendField(p.label).appendField(new Blockly.FieldTextInput(''), name);
         break;
       default: {
-        const label = p.input === 'duration' ? `${p.label.toLowerCase()} (s)` : p.label;
+        const label = p.input === 'duration' ? `${p.label.toLowerCase()} (seconds)` : p.label;
         const input = block.appendValueInput(name).appendField(label);
         input.setAlign(Blockly.inputs.Align.RIGHT);
         if (p.input === 'number' || p.input === 'duration') input.setCheck('Number');
@@ -94,6 +95,7 @@ function defineDeviceBlock(type: string, kind: DeviceAutomation['kind']) {
     loadExtraState(this: DeviceBlock, state: DeviceState | null) {
       this.device = state;
       buildInputs(this);
+      if (state?.label) this.setTooltip(`${state.label} (a device ${kind} from Home Assistant).`);
     },
   };
 }

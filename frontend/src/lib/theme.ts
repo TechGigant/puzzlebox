@@ -33,7 +33,8 @@ const DARK: HaTokens = {
 /** Category hues, tuned to sit well on both HA light and dark backgrounds. */
 const CATEGORIES: Record<string, { light: string; dark: string }> = {
   logic: { light: '#5c6bc0', dark: '#7986cb' },
-  loop: { light: '#26a69a', dark: '#4db6ac' },
+  // Loops live in Control, so they share its colour.
+  loop: { light: '#546e7a', dark: '#78909c' },
   math: { light: '#1e88e5', dark: '#42a5f5' },
   text: { light: '#8e24aa', dark: '#ab47bc' },
   list: { light: '#f4511e', dark: '#ff7043' },
@@ -45,12 +46,12 @@ const CATEGORIES: Record<string, { light: string; dark: string }> = {
   time: { light: '#7cb342', dark: '#9ccc65' },
   flow: { light: '#546e7a', dark: '#78909c' },
   dict: { light: '#5e35b1', dark: '#9575cd' },
-  http: { light: '#3949ab', dark: '#7986cb' },
+  http: { light: '#455a64', dark: '#90a4ae' },
   stored: { light: '#c2185b', dark: '#f06292' },
-  plugin: { light: '#00838f', dark: '#26c6da' },
+  plugin: { light: '#6a1b9a', dark: '#ba68c8' },
   favourite: { light: '#f9a825', dark: '#fdd835' },
   section: { light: '#9e9e9e', dark: '#616161' },
-  colour: { light: '#d4a017', dark: '#e6b422' },
+  colour: { light: '#00acc1', dark: '#4dd0e1' },
   home: { light: '#0288d1', dark: '#4fc3f7' },
 };
 
@@ -153,6 +154,8 @@ export function buildTheme(t: HaTokens, extraStyles: string[] = []): Blockly.The
     };
     categoryStyles[`${name}_category`] = { colour };
   }
+  // Entry blocks ("when …") get a hat, like Scratch's event blocks.
+  blockStyles.entry_blocks = { ...blockStyles.trigger_blocks, hat: 'cap' };
 
   return Blockly.Theme.defineTheme(t.dark ? 'ha-dark' : 'ha-light', {
     name: t.dark ? 'ha-dark' : 'ha-light',

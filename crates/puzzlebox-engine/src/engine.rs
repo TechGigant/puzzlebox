@@ -207,6 +207,11 @@ impl Engine {
         puzzlebox_ir::compile(workspace, lowerer.as_ref())
     }
 
+    fn compile_partial(&self, workspace: &Value) -> (Program, Vec<CompileError>) {
+        let lowerer = self.inner.lowerer.read().unwrap_or_else(|p| p.into_inner()).clone();
+        puzzlebox_ir::compile_partial(workspace, lowerer.as_ref())
+    }
+
     pub fn statuses(&self) -> HashMap<String, ProgramStatus> {
         lock(&self.inner.status).clone()
     }
@@ -378,23 +383,22 @@ impl Engine {
                 lock(&self.inner.status).entry(rec.id.clone()).or_default().last_error = Some(e);
             }
         }
-        let program = match self.compile(&rec.workspace) {
-            Ok(p) => p,
-            Err(errors) => {
-                self.update_status(&rec.id, |s| {
-                    s.state = "invalid".into();
-                    s.errors = errors.clone();
-                });
-                return errors;
-            }
-        };
+        // Stacks with problems are left out; the rest runs. Nothing to run at all = invalid.
+        let (program, compile_errors) = self.compile_partial(&rec.workspace);
+        if !compile_errors.is_empty() && program.handlers.is_empty() {
+            self.update_status(&rec.id, |s| {
+                s.state = "invalid".into();
+                s.errors = compile_errors.clone();
+            });
+            return compile_errors;
+        }
         if !rec.enabled {
             self.update_status(&rec.id, |s| {
                 s.state = "disabled".into();
-                s.errors.clear();
+                s.errors = compile_errors.clone();
                 s.active_runs = 0;
             });
-            return vec![];
+            return compile_errors;
         }
         self.update_status(&rec.id, |s| {
             s.state = "idle".into();
@@ -414,7 +418,7 @@ impl Engine {
         let (tx, rx) = mpsc::unbounded_channel();
         let runs = Arc::new(Mutex::new(HashMap::new()));
         let mut tasks = Vec::new();
-        let mut errors = Vec::new();
+        let mut errors = compile_errors;
 
         for (idx, h) in program.handlers.iter().enumerate() {
             let HandlerKind::Triggers { triggers } = &h.kind else { continue };

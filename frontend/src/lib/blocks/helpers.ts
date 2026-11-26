@@ -2,12 +2,17 @@
 //! label/device block, like Home Assistant's own actions.
 
 import * as Blockly from 'blockly/core';
+import { allBlockDefs } from './dynamic';
+import { FieldOptions } from './field_entity';
 
 type Json = Record<string, unknown>;
 const value = (name: string, check?: string) => ({ type: 'input_value', name, ...(check ? { check } : {}) });
 const dropdown = (name: string, options: [string, string][]) => ({ type: 'field_dropdown', name, options });
 const entity = (name: string, value = '', domains: string[] = []) => ({ type: 'field_entity', name, text: value, domains });
 const text = (name: string, value = '') => ({ type: 'field_input', name, text: value });
+const stateValue = (name: string, value = '') => ({ type: 'field_state_value', name, text: value });
+const time = (name: string, value = '') => ({ type: 'field_time', name, text: value });
+const statements = (name: string) => ({ type: 'input_statement', name });
 
 const act = (type: string, message0: string, args0: Json[], tooltip: string): Json => ({
   type,
@@ -28,6 +33,18 @@ const val = (type: string, message0: string, args0: Json[], output: string | nul
   tooltip,
   inputsInline: true,
 });
+
+/** Which entities the ENTITY picker offers for each value block. */
+export const ENTITY_DOMAINS: Record<string, string[]> = {
+  light_colour: ['light'],
+  light_brightness: ['light'],
+  cover_position_of: ['cover'],
+  climate_temperature_of: ['climate'],
+  media_volume_of: ['media_player'],
+  media_title_of: ['media_player'],
+  fan_speed_of: ['fan'],
+  person_is_home: ['person', 'device_tracker'],
+};
 
 /** Which entities the TARGET picker offers for each helper block. */
 export const HELPER_DOMAINS: Record<string, string[]> = {
@@ -62,7 +79,7 @@ export const HELPER_BLOCKS: Json[] = [
     [dropdown('WHAT', [['position', 'position'], ['tilt', 'tilt']]), value('TARGET'), value('POSITION', 'Number')],
     'Moves a cover to a position: 0 % is closed, 100 % open.',
   ),
-  val('cover_position_of', '%1 of %2', [dropdown('WHAT', [['position %', 'position'], ['tilt %', 'tilt']]), entity('ENTITY', '', ['cover'])], 'Number', 'How far a cover is open (0–100 %).'),
+  val('cover_position_of', '%1 of %2', [dropdown('WHAT', [['position %', 'position'], ['tilt %', 'tilt']]), value('ENTITY')], 'Number', 'How far a cover is open (0–100 %).'),
   act('climate_set_temperature', 'set %1 to %2 °', [value('TARGET'), value('TEMPERATURE', 'Number')], 'Sets the target temperature of a thermostat.'),
   act(
     'climate_set_mode',
@@ -74,7 +91,7 @@ export const HELPER_BLOCKS: Json[] = [
   val(
     'climate_temperature_of',
     '%1 temperature of %2',
-    [dropdown('WHICH', [['current', 'current'], ['target', 'target']]), entity('ENTITY', '', ['climate'])],
+    [dropdown('WHICH', [['current', 'current'], ['target', 'target']]), value('ENTITY')],
     'Number',
     'The room temperature a thermostat measures, or the one it aims for.',
   ),
@@ -100,10 +117,10 @@ export const HELPER_BLOCKS: Json[] = [
     [value('MESSAGE'), value('TARGET'), entity('TTS', '', ['tts'])],
     'Speaks text on speakers using a text-to-speech service (choose the tts entity, e.g. tts.google_translate_en_com).',
   ),
-  val('media_volume_of', 'volume of %1', [entity('ENTITY', '', ['media_player'])], 'Number', 'The volume of a media player (0–100 %).'),
-  val('media_title_of', 'what %1 is playing', [entity('ENTITY', '', ['media_player'])], 'String', 'The title of what is playing.'),
+  val('media_volume_of', 'volume of %1', [value('ENTITY')], 'Number', 'The volume of a media player (0–100 %).'),
+  val('media_title_of', 'what %1 is playing', [value('ENTITY')], 'String', 'The title of what is playing.'),
   act('fan_set_speed', 'set speed of %1 to %2 %', [value('TARGET'), value('SPEED', 'Number')], 'Sets a fan speed (0–100 %).'),
-  val('fan_speed_of', 'speed of %1', [entity('ENTITY', '', ['fan'])], 'Number', 'A fan speed in percent.'),
+  val('fan_speed_of', 'speed of %1', [value('ENTITY')], 'Number', 'A fan speed in percent.'),
   act('lock_command', '%1 %2', [dropdown('MODE', [['lock', 'lock'], ['unlock', 'unlock'], ['open', 'open']]), value('TARGET')], 'Locks or unlocks a lock.'),
   act(
     'vacuum_command',
@@ -122,15 +139,85 @@ export const HELPER_BLOCKS: Json[] = [
   ),
   act(
     'notify_send',
-    'notify %1 %2 title %3',
-    [text('TO', 'persistent'), value('MESSAGE'), value('TITLE')],
-    'Sends a notification. "persistent" shows it in Home Assistant; otherwise use a notify service such as mobile_app_your_phone.',
+    'send notification %1 titled %2 to %3',
+    [value('MESSAGE'), value('TITLE'), { type: 'field_notify_target', name: 'TO', text: 'persistent' }],
+    'Sends a notification to a phone (mobile_app_…) or another notify service. "persistent" shows it in Home Assistant\'s sidebar.',
   ),
+  act('device_on_for', 'turn on %1 for %2 then off', [value('TARGET'), value('SECONDS', 'Number')], 'Turns something on and, after the time, off again. Running it again restarts the countdown.'),
+  {
+    ...act('wait_until_time', 'wait until it is %1', [time('TIME', '07:00')], 'Waits until this time of day (or the time in a date/time helper).'),
+    style: 'flow_blocks',
+  },
+  {
+    ...act('http_send', 'send HTTP %1 to %2 with body %3', [dropdown('METHOD', [['POST', 'POST'], ['GET', 'GET'], ['PUT', 'PUT'], ['DELETE', 'DELETE']]), value('URL', 'String'), value('BODY')], 'Sends a web request and carries on (use the "HTTP" value block to read the answer).'),
+    style: 'http_blocks',
+  },
+  // Triggers: same shape as other triggers, with the bolt.
+  {
+    type: 'ha_trigger_becomes',
+    message0: '⚡ %1 becomes %2 for %3',
+    args0: [entity('ENTITY'), stateValue('STATE', 'on'), value('FOR', 'Number')],
+    previousStatement: 'Trigger',
+    nextStatement: 'Trigger',
+    style: 'trigger_blocks',
+    inputsInline: true,
+    tooltip: 'Fires when an entity changes to this state (and, if set, has stayed in it that long).',
+  },
+  {
+    type: 'ha_trigger_zone',
+    message0: '⚡ %1 %2 %3',
+    args0: [entity('PERSON', '', ['person', 'device_tracker']), dropdown('EVENT', [['arrives at', 'enter'], ['leaves', 'leave']]), entity('ZONE', 'zone.home', ['zone'])],
+    previousStatement: 'Trigger',
+    nextStatement: 'Trigger',
+    style: 'trigger_blocks',
+    tooltip: 'Fires when a person arrives at or leaves a zone (Home, Work…).',
+  },
+  // Sensing
+  { ...val('sun_is', 'the sun is %1', [dropdown('WHERE', [['up', 'up'], ['down', 'down']])], 'Boolean', 'True during the day (up) or at night (down).'), style: 'condition_blocks' },
+  {
+    ...val('someone_home', '%1 is home', [dropdown('WHO', [['someone', 'someone'], ['nobody', 'nobody'], ['everyone', 'everyone']])], 'Boolean', 'Checks the people in Home Assistant.'),
+    style: 'condition_blocks',
+  },
+  { ...val('person_is_home', '%1 is %2', [value('ENTITY'), dropdown('WHERE', [['home', 'home'], ['away', 'away']])], 'Boolean', 'Whether a person is at home.'), style: 'condition_blocks' },
+  {
+    ...val(
+      'weekday_is',
+      'today is %1',
+      [dropdown('WHEN', [['a weekday', 'weekday'], ['the weekend', 'weekend'], ['Monday', 'mon'], ['Tuesday', 'tue'], ['Wednesday', 'wed'], ['Thursday', 'thu'], ['Friday', 'fri'], ['Saturday', 'sat'], ['Sunday', 'sun']])],
+      'Boolean',
+      'Checks the day of the week.',
+    ),
+    style: 'condition_blocks',
+  },
+  { ...val('time_of_day', 'time of day', [], 'String', 'The current time as hours:minutes:seconds, e.g. "07:30:00".'), style: 'time_blocks' },
+  { ...val('wait_timed_out', 'the wait timed out', [], 'Boolean', 'True if the last "wait until" or "wait for" ran out of time instead of finishing.'), style: 'flow_blocks' },
+  { ...val('wait_entity', 'what ended the wait', [], 'String', 'The entity whose trigger ended the last "wait for" (empty if it timed out).'), style: 'flow_blocks' },
+  { ...val('trigger_entity', 'trigger entity', [], 'String', 'The entity that started this run (empty for schedules and other triggers without one).'), style: 'trigger_blocks' },
+  { ...val('text_regex_test', 'text %1 matches %2', [value('TEXT'), text('PATTERN', '\\d+')], 'Boolean', 'True if the text matches the regular expression.'), style: 'text_blocks' },
+  { ...val('colour_hex', 'hex code of %1', [value('COLOUR')], 'String', 'A colour as "#rrggbb" text.'), style: 'colour_blocks' },
 ];
+
+/** Notify services offered by Home Assistant (from the generated "notify" blocks). */
+class FieldNotifyTarget extends FieldOptions {
+  static fromJson(options: Blockly.FieldTextInputFromJsonConfig) {
+    return new FieldNotifyTarget(options.text ?? 'persistent');
+  }
+
+  constructor(value: string) {
+    const services = [...allBlockDefs()]
+      .map((d) => d.type.match(/^ha_svc__notify__(.+)$/)?.[1])
+      .filter((s): s is string => !!s && s !== 'send_message' && s !== 'persistent_notification');
+    super(value, [
+      { value: 'persistent', label: 'Home Assistant sidebar', meta: 'persistent notification' },
+      ...services.map((s) => ({ value: s, label: s.replace(/^mobile_app_/, '📱 ').replaceAll('_', ' '), meta: `notify.${s}` })),
+    ]);
+  }
+}
 
 let registered = false;
 export function registerHelperBlocks() {
   if (registered) return;
   registered = true;
+  Blockly.fieldRegistry.register('field_notify_target', FieldNotifyTarget);
   Blockly.common.defineBlocksWithJsonArray(HELPER_BLOCKS);
 }

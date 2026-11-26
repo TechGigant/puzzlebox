@@ -100,7 +100,11 @@
       errors = saved.errors ?? [];
       ws?.setErrors(errors);
       dirty = false;
-      flash(errors.length ? `Saved with ${errors.length} problem(s); the program won't run until they're fixed.` : 'Saved');
+      flash(
+        errors.length
+          ? `Saved. ${errors.length === 1 ? '1 problem' : `${errors.length} problems`}: those stacks won't run until fixed, the rest will.`
+          : 'Saved',
+      );
     } catch (e) {
       flash(`Save failed: ${e}`);
     } finally {
@@ -226,10 +230,10 @@
     <button class="icon" onclick={close} aria-label="Back" title="Back to programs">←</button>
     <input class="name" bind:value={name} oninput={refreshDirty} aria-label="Program name" />
     <select bind:value={mode} onchange={refreshDirty} title="What happens when a trigger fires while the program is already running">
-      <option value="single">single</option>
-      <option value="restart">restart</option>
-      <option value="queued">queued</option>
-      <option value="parallel">parallel</option>
+      <option value="single">if already running: ignore</option>
+      <option value="restart">if already running: start over</option>
+      <option value="queued">if already running: run after</option>
+      <option value="parallel">if already running: run both</option>
     </select>
     <label class="switch" title="Enabled">
       <input type="checkbox" bind:checked={enabled} onchange={refreshDirty} />
@@ -263,7 +267,7 @@
     {#if panelOpen}
       <SidePanel
         programId={id}
-        {errors}
+        errors={ws?.friendlyErrors(errors) ?? errors}
         {paused}
         onresume={resume}
         onreveal={(b) => ws?.reveal(b)}

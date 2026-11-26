@@ -39,6 +39,37 @@
   colour). Colours can also be "#rrggbb" text or colour names.
 - Credits for TurboWarp, Scratch Addons and PenguinMod, whose editors many of
   these features are modelled on (Settings → About and the README).
+- **Home** category: one-block actions for switches, covers, thermostats,
+  media players (incl. "say … on speakers"), fans, locks, vacuums, scenes,
+  scripts, counters, helpers and phone notifications, plus "turn on … for 5
+  minutes then off", and readings like a cover's position or a thermostat's
+  temperature.
+- **Easier blocks**, after a usability review:
+  - Scratch-like toolbox: Events, Control, Sensing first; technical blocks
+    (YAML, templates, cron, HTTP, dictionaries…) moved to "Advanced".
+  - "When" blocks have a hat and triggers a ⚡, so it's clear what goes where.
+  - Blocks that read an entity take any block in their entity socket (a
+    variable, the trigger entity, a list item…), not only a typed-in id.
+  - Durations are "5 minutes" blocks everywhere, also in triggers; units
+    come after the number; times are tidied up ("7" → "07:00").
+  - Entity pickers show names and start empty ("choose…"); state boxes
+    suggest the entity's states; attributes are suggested too. Blocks warn
+    about entities that don't exist.
+  - New: "… becomes …" and "arrives at/leaves zone" triggers, "the sun is
+    up", "someone is home", "today is a weekday", "wait until it is 07:00",
+    "the wait timed out", "trigger entity", "how many of … are on", "state
+    of … 1 hour ago", "text matches", "hex code of colour".
+  - Areas, floors, labels and devices work in "any/all of", averages, scene
+    blocks and loops.
+  - A stack with a problem no longer stops the whole program: the rest runs.
+    Problems name the block and its slot in plain words.
+  - Colour settings of Home Assistant and Zigbee2MQTT blocks take colour
+    blocks; Zigbee2MQTT group brightness and white are in % and K (re-enter
+    those two values in existing group blocks).
+- Fixes: "−" in the math block, trim left/right, list insert/remove and sort
+  types, sensor states compared as text, "seconds since reported", trigger
+  details inside timers, state triggers no longer fire on attribute changes,
+  "every N minutes" values that don't divide an hour are reported.
 
 ## 0.3.0
 

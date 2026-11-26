@@ -14,6 +14,10 @@ const value = (name: string, check?: string | string[]) => ({ type: 'input_value
 const statements = (name: string, check?: string) => ({ type: 'input_statement', name, ...(check ? { check } : {}) });
 const variable = (name: string, v = 'item') => ({ type: 'field_variable', name, variable: v });
 const checkbox = (name: string, checked = true) => ({ type: 'field_checkbox', name, checked });
+const stateValue = (name: string, value = '') => ({ type: 'field_state_value', name, text: value });
+const time = (name: string, value = '') => ({ type: 'field_time', name, text: value });
+/** Colours are "#rrggbb" text, so they also fit text sockets. */
+const COLOUR = ['Colour', 'String'];
 const dummy = { type: 'input_dummy' };
 
 /** Short description of a trigger block for the "triggered by" dropdown. */
@@ -59,7 +63,8 @@ class FieldTriggerRef extends Blockly.FieldDropdown {
 
 const trigger = (type: string, message0: string, args0: Json[], tooltip: string): Json => ({
   type,
-  message0,
+  // Triggers have the same shape as actions in Blockly; the bolt tells them apart.
+  message0: `⚡ ${message0}`,
   args0,
   previousStatement: 'Trigger',
   nextStatement: 'Trigger',
@@ -78,7 +83,13 @@ const action = (type: string, message0: string, args0: Json[], tooltip: string, 
   inputsInline: false,
 });
 
-const expr = (type: string, message0: string, args0: Json[], output: string | null, style: string, tooltip: string): Json => ({
+/** An action whose sockets sit on one line, Scratch-style ("set [x] to [y] %"). */
+const inline = (type: string, message0: string, args0: Json[], tooltip: string, style = 'action_blocks'): Json => ({
+  ...action(type, message0, args0, tooltip, style),
+  inputsInline: true,
+});
+
+const expr = (type: string, message0: string, args0: Json[], output: string | string[] | null, style: string, tooltip: string): Json => ({
   type,
   message0,
   args0,
@@ -94,42 +105,44 @@ export const CORE_BLOCKS: Json[] = [
     type: 'ha_when',
     message0: 'when %1 %2 do %3',
     args0: [{ type: 'input_dummy' }, statements('TRIGGERS', 'Trigger'), statements('DO')],
-    style: 'trigger_blocks',
-    hat: 'cap',
+    style: 'entry_blocks',
     tooltip: 'Runs the blocks inside whenever any of the triggers fires.',
   },
   {
     type: 'ha_on_run',
     message0: 'when run manually %1 do %2',
     args0: [{ type: 'input_dummy' }, statements('DO')],
-    style: 'trigger_blocks',
-    hat: 'cap',
+    style: 'entry_blocks',
     tooltip: 'Runs only when started with the Run button or the puzzlebox.run_program action.',
   },
   {
     type: 'ha_on_start',
     message0: 'when program starts %1 do %2',
     args0: [{ type: 'input_dummy' }, statements('DO')],
-    style: 'trigger_blocks',
-    hat: 'cap',
+    style: 'entry_blocks',
     tooltip: 'Runs once when the program is enabled, saved or the app starts.',
   },
 
   // --- triggers -------------------------------------------------------------
   trigger(
     'ha_trigger_state',
-    'state of %1 changes from %2 to %3 for %4 s',
-    [entity('ENTITY', 'binary_sensor.motion'), text('FROM'), text('TO', 'on'), number('FOR', 0, { min: 0 })],
-    'Fires when an entity changes state. Leave from/to empty to match any state.',
+    'state of %1 changes from %2 to %3 for %4',
+    [entity('ENTITY'), stateValue('FROM'), stateValue('TO', 'on'), value('FOR', 'Number')],
+    'Fires when an entity changes state (not when only its details change). Leave from/to empty to match any state; "for" makes it wait until the state has lasted that long.',
   ),
   trigger(
     'ha_trigger_numeric',
-    '%1 goes above %2 or below %3',
-    [entity('ENTITY', 'sensor.temperature'), text('ABOVE', '25'), text('BELOW')],
-    'Fires when a numeric state crosses a threshold. Leave a side empty to ignore it.',
+    '%1 is above %2 and below %3',
+    [entity('ENTITY'), text('ABOVE', '25'), text('BELOW')],
+    'Fires when the value moves into this range. Leave one side empty for just "above" or just "below". A side can also be a number helper (input_number.…).',
   ),
-  trigger('ha_trigger_time', 'time is %1', [text('AT', '07:00:00')], 'Fires daily at a time (HH:MM:SS) or an input_datetime entity.'),
-  trigger('ha_trigger_sun', '%1 with offset %2 s', [dropdown('EVENT', [['sunset', 'sunset'], ['sunrise', 'sunrise']]), number('OFFSET', 0)], 'Fires at sunrise or sunset.'),
+  trigger('ha_trigger_time', 'it is %1', [time('AT', '07:00')], 'Fires every day at this time (like 07:30), or at the time in a date/time helper (input_datetime.…).'),
+  trigger(
+    'ha_trigger_sun',
+    'at %1 shifted by %2',
+    [dropdown('EVENT', [['sunset', 'sunset'], ['sunrise', 'sunrise']]), value('OFFSET', 'Number')],
+    'Fires at sunrise or sunset. A negative shift fires earlier (e.g. -30 minutes = half an hour before sunset).',
+  ),
   trigger('ha_trigger_event', 'event %1 fires', [text('EVENT_TYPE', 'my_event')], 'Fires when a Home Assistant event is fired.'),
   trigger('ha_trigger_ha_start', 'Home Assistant starts', [], 'Fires when Home Assistant has started.'),
   trigger(
@@ -155,12 +168,13 @@ export const CORE_BLOCKS: Json[] = [
     [text('SERVICE', 'light.turn_on'), { type: 'input_dummy' }, value('TARGET'), value('DATA', ['Dict', 'Object'])],
     'Calls a Home Assistant action. Target: entity id(s), a list, or a target dictionary.',
   ),
-  action('ha_wait', 'wait %1 seconds', [value('SECONDS', 'Number')], 'Pauses this run.'),
+  action('ha_wait', 'wait %1', [value('SECONDS', 'Number')], 'Pauses this run for a while (a number on its own means seconds).', 'flow_blocks'),
   action(
     'ha_wait_for_trigger',
-    'wait until %1 %2 timeout %3 s',
+    'wait for %1 %2 at most %3',
     [{ type: 'input_dummy' }, statements('TRIGGERS', 'Trigger'), value('TIMEOUT', 'Number')],
-    'Waits for one of the triggers (or the timeout). The variable "wait" holds {"trigger": ...}.',
+    'Waits until one of the triggers fires, or the time runs out. Afterwards, "the wait timed out" and "what ended the wait" tell you which.',
+    'flow_blocks',
   ),
   action(
     'ha_log',
@@ -172,39 +186,39 @@ export const CORE_BLOCKS: Json[] = [
   action('ha_action_raw', 'HA action (YAML) %1', [multiline('CONFIG', 'action: notify.notify\ndata:\n  message: Hello')], 'Any native Home Assistant action sequence, written as YAML.'),
 
   // --- state & conditions ---------------------------------------------------
-  expr('ha_entity', 'entity %1', [entity('ENTITY', 'light.kitchen')], 'String', 'condition_blocks', 'An entity id.'),
+  expr('ha_entity', '%1', [entity('ENTITY')], 'String', 'condition_blocks', 'An entity. Several can be separated with commas.'),
   expr('ha_area', 'area %1', [{ type: 'field_registry', name: 'ID', text: '', kind: 'area' }], null, 'condition_blocks', 'An area, usable as an action target ("turn off the lights in the kitchen"). Several can be separated with commas.'),
   expr('ha_floor', 'floor %1', [{ type: 'field_registry', name: 'ID', text: '', kind: 'floor' }], null, 'condition_blocks', 'A floor, usable as an action target.'),
   expr('ha_label', 'label %1', [{ type: 'field_registry', name: 'ID', text: '', kind: 'label' }], null, 'condition_blocks', 'A label, usable as an action target.'),
   expr('ha_device', 'device %1', [{ type: 'field_registry', name: 'ID', text: '', kind: 'device' }], null, 'condition_blocks', 'A device, usable as an action target.'),
-  expr('ha_state', 'state of %1', [entity('ENTITY', 'sensor.temperature')], null, 'condition_blocks', 'Current state of an entity.'),
-  expr('ha_attribute', '%1 of %2', [text('ATTRIBUTE', 'brightness'), entity('ENTITY', 'light.kitchen')], null, 'condition_blocks', 'An attribute of an entity.'),
-  expr('ha_is_state', '%1 is %2', [entity('ENTITY', 'light.kitchen'), text('STATE', 'on')], 'Boolean', 'condition_blocks', 'True if the entity is in the given state.'),
+  expr('ha_state', 'state of %1', [value('ENTITY')], 'String', 'condition_blocks', 'What an entity is right now ("on", "21.5", "home"…), as text.'),
+  expr('ha_attribute', '%1 of %2', [{ type: 'field_attribute', name: 'ATTRIBUTE', text: 'friendly_name' }, value('ENTITY')], null, 'condition_blocks', 'A detail (attribute) of an entity, e.g. a light\'s brightness (0–255) or a thermostat\'s target temperature.'),
+  expr('ha_is_state', '%1 is %2', [value('ENTITY'), stateValue('STATE', 'on')], 'Boolean', 'condition_blocks', 'True if the entity is in this state.'),
   expr('ha_condition_raw', 'HA condition (YAML) %1', [multiline('CONFIG', 'condition: state\nentity_id: sun.sun\nstate: below_horizon')], 'Boolean', 'condition_blocks', 'Any native Home Assistant condition, written as YAML.'),
   expr('ha_template', 'template %1', [multiline('TEMPLATE', "{{ states('sun.sun') }}")], null, 'condition_blocks', 'Rendered by Home Assistant. Program variables and "trigger" are available.'),
-  expr('ha_trigger_data', 'trigger %1', [text('PATH', 'to_state.state')], null, 'trigger_blocks', 'A value from what triggered this run (dotted path).'),
+  expr('ha_trigger_data', 'trigger detail %1', [text('PATH', 'to_state.state')], null, 'trigger_blocks', 'Any detail of what started this run, by its path (e.g. to_state.attributes.brightness).'),
 
 
   // --- timers, waiting & rate limits -----------------------------------------
   action(
     'timer_start',
-    'start timer %1 if running %2 %3 delay (s) %4 then do %5',
-    [text('NAME', 'lights off'), dropdown('MODE', [['restart', 'restart'], ['keep running', 'keep']]), dummy, value('SECONDS', 'Number'), statements('DO')],
-    'Runs the blocks inside after the delay, without blocking this run. Starting it again restarts the countdown, so "turn off 5 minutes after the last motion" needs no extra logic.',
+    'start timer %1 for %2 if already counting %3 %4 then do %5',
+    [text('NAME', 'lights off'), value('SECONDS', 'Number'), dropdown('MODE', [['start over', 'restart'], ['keep going', 'keep']]), dummy, statements('DO')],
+    'Runs the blocks inside when the time is up, without holding up the rest. Starting it again starts the countdown over, so "turn off 5 minutes after the last motion" needs nothing else.',
     'flow_blocks',
   ),
   action('timer_cancel', 'cancel timer %1', [text('NAME', 'lights off')], 'Stops a running timer before it fires.', 'flow_blocks'),
   expr('timer_running', 'timer %1 is running', [text('NAME', 'lights off')], 'Boolean', 'flow_blocks', 'True while the timer is counting down.'),
   action(
     'wait_until',
-    'wait until %1 stays true for (s) %2 give up after (s) %3',
+    'wait until %1 stays true for %2 at most %3',
     [value('COND', 'Boolean'), value('HOLD', 'Number'), value('TIMEOUT', 'Number')],
-    'Waits until the condition is true (and stays true for the given seconds, if set). The variable "wait" holds {"completed": true/false}; false means the timeout passed first.',
+    'Waits until the condition is true (and has stayed true for a while, if set), or the time runs out. Afterwards, "the wait timed out" tells you which.',
     'flow_blocks',
   ),
   expr(
     'throttle',
-    'at most once every %1 s',
+    'at most once every %1',
     [value('SECONDS', 'Number')],
     'Boolean',
     'flow_blocks',
@@ -215,19 +229,19 @@ export const CORE_BLOCKS: Json[] = [
   // --- more state & conditions ---------------------------------------------------
   expr(
     'ha_state_for',
-    '%1 has been %2 for %3 s',
-    [entity('ENTITY', 'binary_sensor.motion'), text('STATE', 'off'), value('SECONDS', 'Number')],
+    '%1 has been %2 for %3',
+    [value('ENTITY'), stateValue('STATE', 'off'), value('SECONDS', 'Number')],
     'Boolean',
     'condition_blocks',
     'True if the entity has been in the state for at least the given time.',
   ),
-  expr('ha_has_value', '%1 has a value', [entity('ENTITY', 'sensor.temperature')], 'Boolean', 'condition_blocks', 'False while the entity is unknown or unavailable (or missing).'),
-  expr('ha_number_state', 'number state of %1 or %2', [entity('ENTITY', 'sensor.temperature'), value('DEFAULT')], 'Number', 'condition_blocks', 'The state as a number, or the fallback when it is not numeric.'),
-  expr('ha_friendly_name', 'name of %1', [entity('ENTITY', 'light.kitchen')], 'String', 'condition_blocks', 'The friendly name of an entity.'),
+  expr('ha_has_value', '%1 has a value', [value('ENTITY')], 'Boolean', 'condition_blocks', 'False while the entity is unknown or unavailable (or doesn\'t exist).'),
+  expr('ha_number_state', '%1 as a number (or %2 if unknown)', [value('ENTITY'), value('DEFAULT', 'Number')], 'Number', 'condition_blocks', 'The state as a number, for sensors. When the sensor has no number right now, you get the second value instead.'),
+  expr('ha_friendly_name', 'name of %1', [value('ENTITY')], 'String', 'condition_blocks', 'The name of an entity as shown in Home Assistant.'),
   expr(
     'ha_seconds_since',
     'seconds since %1 %2',
-    [entity('ENTITY', 'binary_sensor.motion'), dropdown('FIELD', [['changed', 'last_changed'], ['updated', 'last_updated'], ['reported', 'last_reported']])],
+    [value('ENTITY'), dropdown('FIELD', [['changed', 'last_changed'], ['updated', 'last_updated'], ['reported', 'last_reported']])],
     'Number',
     'condition_blocks',
     'How long ago the entity changed state (or reported any update).',
@@ -236,14 +250,22 @@ export const CORE_BLOCKS: Json[] = [
     'ha_state_check',
     '%1 of %2 %3 %4',
     [
-      dropdown('MODE', [['any', 'any'], ['all', 'all'], ['none', 'none'], ['how many', 'count']]),
+      dropdown('MODE', [['any', 'any'], ['all', 'all'], ['none', 'none']]),
       value('LIST'),
       dropdown('OP', [['are', 'is'], ['are not', 'is_not']]),
       text('STATE', 'on'),
     ],
-    null,
+    'Boolean',
     'condition_blocks',
-    'Checks several entities at once (a list or comma-separated ids). "How many" returns a number.',
+    'Checks several entities at once: a list, an area, a floor, a label or a device.',
+  ),
+  expr(
+    'ha_state_count',
+    'how many of %1 %2 %3',
+    [value('LIST'), dropdown('OP', [['are', 'is'], ['are not', 'is_not']]), text('STATE', 'on')],
+    'Number',
+    'condition_blocks',
+    'Counts entities in a state: a list, an area, a floor, a label or a device.',
   ),
   expr(
     'ha_states_aggregate',
@@ -256,31 +278,36 @@ export const CORE_BLOCKS: Json[] = [
   expr(
     'time_is_between',
     'time is between %1 and %2 %3 on Mon %4 Tue %5 Wed %6 Thu %7 Fri %8 Sat %9 Sun %10',
-    [text('AFTER', '22:00'), text('BEFORE', '06:00'), dummy, checkbox('MON'), checkbox('TUE'), checkbox('WED'), checkbox('THU'), checkbox('FRI'), checkbox('SAT'), checkbox('SUN')],
+    [time('AFTER', '22:00'), time('BEFORE', '06:00'), dummy, checkbox('MON'), checkbox('TUE'), checkbox('WED'), checkbox('THU'), checkbox('FRI'), checkbox('SAT'), checkbox('SUN')],
     'Boolean',
     'condition_blocks',
     'True between the two times (it can span midnight) on the ticked days. Leave a time empty for no limit on that side.',
   ),
   expr(
     'ha_history',
-    '%1 of %2 over the last %3 s %4',
+    '%1 of %2 over the last %3 %4',
     [
-      dropdown('OP', [['average', 'average'], ['minimum', 'min'], ['maximum', 'max'], ['state', 'state_ago'], ['number of changes', 'changes'], ['seconds in state', 'time_in_state']]),
-      entity('ENTITY', 'sensor.temperature'),
+      dropdown('OP', [['average', 'average'], ['minimum', 'min'], ['maximum', 'max'], ['number of changes', 'changes'], ['seconds in state', 'time_in_state']]),
+      value('ENTITY'),
       value('SECONDS', 'Number'),
-      { ...text('STATE', ''), name: 'STATE' },
+      stateValue('STATE'),
     ],
-    null,
+    'Number',
     'condition_blocks',
-    'From Home Assistant\'s recorder. "state" is the state the given seconds ago; "seconds in state" needs the state in the last field. The average is weighted by time.',
+    'From Home Assistant\'s history. "seconds in state" needs the state in the last box. The average is weighted by time.',
   ),
+  expr('ha_state_ago', 'state of %1 %2 ago', [value('ENTITY'), value('SECONDS', 'Number')], 'String', 'condition_blocks', 'What the entity was a while ago, from Home Assistant\'s history.'),
   expr(
     'ha_entities_in',
-    'entities in %1 %2 of domain %3',
-    [dropdown('KIND', [['area', 'area'], ['floor', 'floor'], ['label', 'label'], ['device', 'device'], ['integration', 'integration']]), text('NAME', 'Kitchen'), text('DOMAIN', 'light')],
+    '%1 in %2 %3',
+    [
+      dropdown('DOMAIN', [['all entities', '*'], ['lights', 'light'], ['switches', 'switch'], ['sensors', 'sensor'], ['binary sensors', 'binary_sensor'], ['covers', 'cover'], ['thermostats', 'climate'], ['media players', 'media_player'], ['fans', 'fan'], ['locks', 'lock'], ['scenes', 'scene'], ['people', 'person']]),
+      dropdown('KIND', [['area', 'area'], ['floor', 'floor'], ['label', 'label'], ['device', 'device'], ['integration', 'integration']]),
+      { type: 'field_registry', name: 'NAME', text: '', kind: 'area' },
+    ],
     'Array',
     'condition_blocks',
-    'Entity ids in an area, floor, label, device or integration (name or id). Leave the domain empty for all.',
+    'The entities in an area, floor, label, device or integration, as a list.',
   ),
 
   // --- scenes --------------------------------------------------------------------
@@ -298,62 +325,62 @@ export const CORE_BLOCKS: Json[] = [
     'trigger_info',
     'trigger %1 %2',
     [
-      dropdown('WHAT', [['entity', 'entity'], ['old state', 'from'], ['new state', 'to'], ['old attribute', 'from_attr'], ['new attribute', 'to_attr'], ['trigger id', 'id'], ['type', 'platform']]),
+      dropdown('WHAT', [['entity', 'entity'], ['old state', 'from'], ['new state', 'to'], ['old detail', 'from_attr'], ['new detail', 'to_attr']]),
       { ...text('ATTR', ''), name: 'ATTR' },
     ],
     null,
     'trigger_blocks',
-    'Details of what started this run. For attributes, put the attribute name in the text field.',
+    'Details of what started this run. For details (attributes), put their name in the box.',
   ),
 
   // --- values ----------------------------------------------------------------------
-  expr('yaml_value', 'YAML %1', [multiline('CONFIG', '')], null, 'dict_blocks', 'A list, dictionary or other value written as YAML or JSON. Empty means "not set".'),
+  expr('yaml_value', 'value %1', [multiline('CONFIG', '')], null, 'dict_blocks', 'Any value, written as YAML or JSON (lists, dictionaries…). Empty means "not set".'),
 
 
   // --- lights & colours ----------------------------------------------------------
-  action(
+  inline(
     'light_set_colour',
-    'set %1 to colour %2 brightness % %3 fade (s) %4',
+    'set %1 to colour %2 at %3 % brightness, fade %4 seconds',
     [value('TARGET'), value('COLOUR'), value('BRIGHTNESS', 'Number'), value('TRANSITION', 'Number')],
     'Turns lights on in a colour (a colour block, "#rrggbb" or a colour name). Leave brightness or fade empty to keep them as they are.',
     'colour_blocks',
   ),
-  action(
+  inline(
     'light_set_white',
-    'set %1 to white (K) %2 brightness % %3 fade (s) %4',
+    'set %1 to white %2 K at %3 % brightness, fade %4 seconds',
     [value('TARGET'), value('KELVIN', 'Number'), value('BRIGHTNESS', 'Number'), value('TRANSITION', 'Number')],
     'Turns lights on in white: about 2200 K is candle-warm, 2700 K cosy, 4000 K neutral and 6500 K daylight.',
     'colour_blocks',
   ),
-  action(
+  inline(
     'light_set_brightness',
-    'set brightness of %1 to % %2 fade (s) %3',
+    'set brightness of %1 to %2 %, fade %3 seconds',
     [value('TARGET'), value('BRIGHTNESS', 'Number'), value('TRANSITION', 'Number')],
     'Turns lights on at a brightness, keeping their colour.',
     'colour_blocks',
   ),
-  action(
+  inline(
     'light_step',
-    '%1 %2 by % %3 fade (s) %4',
+    '%1 %2 by %3 %, fade %4 seconds',
     [dropdown('DIRECTION', [['brighten', 'brighten'], ['dim', 'dim']]), value('TARGET'), value('STEP', 'Number'), value('TRANSITION', 'Number')],
     'Makes lights brighter or dimmer by a step, e.g. for dimmer buttons.',
     'colour_blocks',
   ),
-  action(
+  inline(
     'light_power',
-    '%1 %2 fade (s) %3',
+    '%1 %2 fade %3 seconds',
     [dropdown('MODE', [['turn on', 'on'], ['turn off', 'off'], ['toggle', 'toggle']]), value('TARGET'), value('TRANSITION', 'Number')],
     'Turns lights on, off or toggles them, optionally fading.',
     'colour_blocks',
   ),
-  expr('light_colour', 'colour of %1', [entity('ENTITY', 'light.kitchen', ['light'])], 'Colour', 'colour_blocks', 'The current colour of a light ("#rrggbb"), or empty when it is off.'),
-  expr('light_brightness', 'brightness % of %1', [entity('ENTITY', 'light.kitchen', ['light'])], 'Number', 'colour_blocks', 'Brightness of a light in percent (0 when off).'),
-  expr('colour_picker', '%1', [{ type: 'field_colour', name: 'COLOUR', colour: '#ffcc66' }], 'Colour', 'colour_blocks', 'A colour.'),
+  expr('light_colour', 'colour of %1', [value('ENTITY')], COLOUR, 'colour_blocks', 'The current colour of a light, or empty when it is off (use "or if empty" for a fallback).'),
+  expr('light_brightness', 'brightness of %1 in %', [value('ENTITY')], 'Number', 'colour_blocks', 'Brightness of a light in percent (0 when off).'),
+  expr('colour_picker', '%1', [{ type: 'field_colour', name: 'COLOUR', colour: '#ffcc66' }], COLOUR, 'colour_blocks', 'A colour.'),
   expr(
     'colour_rgb255',
     'colour red %1 green %2 blue %3',
     [value('RED', 'Number'), value('GREEN', 'Number'), value('BLUE', 'Number')],
-    'Colour',
+    COLOUR,
     'colour_blocks',
     'A colour from red, green and blue (0–255).',
   ),
@@ -361,17 +388,17 @@ export const CORE_BLOCKS: Json[] = [
     'colour_hsv',
     'colour hue %1 saturation % %2 brightness % %3',
     [value('HUE', 'Number'), value('SATURATION', 'Number'), value('VALUE', 'Number')],
-    'Colour',
+    COLOUR,
     'colour_blocks',
     'A colour from a hue (0–360: 0 red, 120 green, 240 blue), saturation and brightness.',
   ),
-  expr('colour_mix', 'mix %1 with %2 by % %3', [value('A'), value('B'), value('RATIO', 'Number')], 'Colour', 'colour_blocks', 'Blends two colours: 0 % is the first, 100 % the second.'),
-  expr('colour_random', 'random colour', [], 'Colour', 'colour_blocks', 'A random bright colour.'),
+  expr('colour_mix', 'mix %1 with %2 by % %3', [value('A'), value('B'), value('RATIO', 'Number')], COLOUR, 'colour_blocks', 'Blends two colours: 0 % is the first, 100 % the second.'),
+  expr('colour_random', 'random colour', [], COLOUR, 'colour_blocks', 'A random bright colour.'),
   expr(
     'colour_part',
     '%1 of colour %2',
-    [dropdown('PART', [['red', 'red'], ['green', 'green'], ['blue', 'blue'], ['hue', 'hue'], ['saturation', 'saturation'], ['brightness', 'value'], ['hex code', 'hex'], ['RGB list', 'rgb']]), value('COLOUR')],
-    null,
+    [dropdown('PART', [['red', 'red'], ['green', 'green'], ['blue', 'blue'], ['hue', 'hue'], ['saturation', 'saturation'], ['brightness', 'value']]), value('COLOUR')],
+    'Number',
     'colour_blocks',
     'A part of a colour.',
   ),
@@ -422,7 +449,7 @@ export const CORE_BLOCKS: Json[] = [
       'text_regex',
       '%1 regex %2 in %3 %4',
       [
-        dropdown('OP', [['matches', 'test'], ['first match of', 'match'], ['all matches of', 'all'], ['replace', 'replace']]),
+        dropdown('OP', [['first match of', 'match'], ['all matches of', 'all'], ['replace', 'replace']]),
         text('PATTERN', '(\\d+)'),
         value('TEXT'),
         value('WITH'),
@@ -435,7 +462,7 @@ export const CORE_BLOCKS: Json[] = [
   },
   expr('lists_filter', 'items of %1 where %2', [value('LIST'), value('COND', 'Boolean')], 'Array', 'list_blocks', 'Keeps the items for which the condition is true. Use the "item" block inside the condition.'),
   expr('lists_map', 'each item of %1 as %2', [value('LIST'), value('EXPR')], 'Array', 'list_blocks', 'Turns every item into a new value. Use the "item" block inside.'),
-  expr('lists_item', 'item', [], null, 'list_blocks', 'The current item inside "items of … where" or "each item of … as".'),
+  expr('lists_item', 'current item', [], null, 'list_blocks', 'The item being looked at inside "items of … where" or "each item of … as".'),
 
   // --- flow -----------------------------------------------------------------
   {

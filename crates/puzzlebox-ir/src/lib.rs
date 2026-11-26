@@ -3,5 +3,7 @@
 mod compile;
 mod ir;
 
-pub use compile::{BUILTIN_MQTT, Block, BlockLowerer, CompileError, Compiler, NoExternals, compile};
+pub use compile::{
+    BUILTIN_MQTT, Block, BlockLowerer, CompileError, Compiler, NoExternals, compile, compile_partial,
+};
 pub use ir::*;

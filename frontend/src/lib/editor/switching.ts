@@ -26,7 +26,8 @@ const GROUPS: [string, string][][] = [
   ],
   [
     ['ha_trigger_state', 'state changes'],
-    ['ha_trigger_numeric', 'goes above / below'],
+    ['ha_trigger_becomes', 'becomes'],
+    ['ha_trigger_numeric', 'is above / below'],
   ],
   [
     ['ha_trigger_time', 'time is'],
@@ -45,6 +46,7 @@ const GROUPS: [string, string][][] = [
     ['ha_is_state', 'is (state)'],
     ['ha_state_for', 'has been … for'],
     ['ha_has_value', 'has a value'],
+    ['person_is_home', 'is home'],
   ],
   [
     ['ha_entity', 'entity'],
@@ -54,12 +56,17 @@ const GROUPS: [string, string][][] = [
     ['ha_device', 'device'],
   ],
   [
-    ['ha_state_check', 'any / all of … are'],
     ['ha_states_aggregate', 'average / min / max of states'],
+    ['ha_state_count', 'how many of … are'],
   ],
   [
-    ['ha_wait', 'wait N seconds'],
+    ['ha_history', 'average / min / max over time'],
+    ['ha_state_ago', 'state … ago'],
+  ],
+  [
+    ['ha_wait', 'wait'],
     ['wait_until', 'wait until'],
+    ['wait_until_time', 'wait until it is'],
   ],
   [
     ['time_now', 'now'],

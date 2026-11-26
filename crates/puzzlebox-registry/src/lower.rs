@@ -88,15 +88,32 @@ impl RegistryLowerer {
                 let v = field_value(p, raw);
                 (!v.is_null()).then(|| Expr::lit(b.id(), v))
             } else {
-                c.value_opt(&b, &slot).and_then(|e| match (&p.input, &e.kind) {
-                    // An empty YAML value means "not set".
-                    (_, ExprKind::Lit { value: Value::Null }) => None,
-                    (
-                        ParamInput::Entity { multiple: true, .. },
-                        ExprKind::Lit { value: Value::String(s) },
-                    ) => Some(Expr::lit(e.id.clone(), split_list(s))),
-                    _ => Some(e),
-                })
+                c.value_opt(&b, &slot)
+                    .map(|e| match &p.input {
+                        // Colour blocks give "#rrggbb"; HA wants [r, g, b].
+                        ParamInput::Color => match &e.kind {
+                            ExprKind::Lit { value: Value::String(hex) } => {
+                                Expr::lit(e.id.clone(), hex_to_rgb(hex).unwrap_or(Value::Null))
+                            }
+                            _ => Expr {
+                                id: e.id.clone(),
+                                kind: ExprKind::Builtin {
+                                    name: "colour_part".into(),
+                                    args: vec![e.clone(), Expr::lit(e.id.clone(), json!("rgb"))],
+                                },
+                            },
+                        },
+                        _ => e,
+                    })
+                    .and_then(|e| match (&p.input, &e.kind) {
+                        // An empty YAML value means "not set".
+                        (_, ExprKind::Lit { value: Value::Null }) => None,
+                        (
+                            ParamInput::Entity { multiple: true, .. },
+                            ExprKind::Lit { value: Value::String(s) },
+                        ) => Some(Expr::lit(e.id.clone(), split_list(s))),
+                        _ => Some(e),
+                    })
             };
             match e {
                 Some(e) => {
@@ -112,8 +129,13 @@ impl RegistryLowerer {
                 }
             }
         }
-        let target = c.value_opt(&b, "TARGET");
-        if target.is_none() && def.target.as_ref().is_some_and(|t| t.required) {
+        // An untouched, empty entity picker in the target means "no target".
+        let empty_picker = b.input("TARGET").is_some_and(|t| {
+            t.ty() == "ha_entity" && t.field_str("ENTITY").is_none_or(|e| e.trim().is_empty())
+        });
+        let required = def.target.as_ref().is_some_and(|t| t.required);
+        let target = if empty_picker && !required { None } else { c.value_opt(&b, "TARGET") };
+        if target.is_none() && required {
             c.err(&b, "choose a target");
         }
         Args { exprs, target }
@@ -184,6 +206,10 @@ impl RegistryLowerer {
         (out, target)
     }
 
+    fn z2m_scale(e: Expr, builtin: &str) -> Expr {
+        Expr { id: e.id.clone(), kind: ExprKind::Builtin { name: builtin.into(), args: vec![e] } }
+    }
+
     fn placeholders(args: &Args) -> (Map<String, Value>, BTreeMap<String, Expr>) {
         let mut data = Map::new();
         let mut exprs = BTreeMap::new();
@@ -242,7 +268,19 @@ impl BlockLowerer for RegistryLowerer {
                         (ExprKind::Lit { value: Value::Array(rgb) }, true) if rgb.len() == 3 => {
                             Expr::lit(e.id.clone(), json!({"r": rgb[0], "g": rgb[1], "b": rgb[2]}))
                         }
+                        (_, true) => Expr {
+                            id: e.id.clone(),
+                            kind: ExprKind::Builtin { name: "colour_rgb_obj".into(), args: vec![e] },
+                        },
                         _ => e,
+                    };
+                    // Blocks use percent and kelvin; Zigbee2MQTT wants 0–254 and mired.
+                    let (k, e) = match k.as_str() {
+                        "brightness_percent" => {
+                            ("brightness".to_owned(), Self::z2m_scale(e, "z2m_brightness"))
+                        }
+                        "color_temp_kelvin" => ("color_temp".to_owned(), Self::z2m_scale(e, "z2m_mired")),
+                        _ => (k, e),
                     };
                     entries.push((k, e));
                 }

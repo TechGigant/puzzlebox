@@ -127,6 +127,9 @@ pub fn builtin(name: &str, a: &[Value]) -> Option<Result<Value, String>> {
                 _ => json!(hex(c)),
             })
         })(),
+        "colour_rgb_obj" => colour(0).map(|c| json!({"r": c[0], "g": c[1], "b": c[2]})),
+        "z2m_brightness" => Ok(json!((n(0).clamp(0.0, 100.0) * 2.54).round() as u32)),
+        "z2m_mired" => Ok(json!((1_000_000.0 / n(0).clamp(1000.0, 12000.0)).round() as u32)),
         "light_data" => Ok(light_data(&arg(0), &arg(1), &arg(2), &arg(3))),
         "light_step" => {
             let mut d = Map::new();

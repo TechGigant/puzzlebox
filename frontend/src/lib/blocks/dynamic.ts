@@ -1,10 +1,9 @@
 //! Renders registry block definitions (HA autogen, packs, plugins) as Blockly blocks.
 
 import * as Blockly from 'blockly/core';
-import { FieldColour } from '@blockly/field-colour';
 import type { ExtraCategory } from '../toolbox';
-import { HELPER_DOMAINS } from './helpers';
-import { FieldOptions, FieldRegistry, FieldStateValue, setDomainResolver, setTargetResolver } from './field_entity';
+import { ENTITY_DOMAINS, HELPER_DOMAINS } from './helpers';
+import { FieldOptions, FieldRegistry, FieldStateValue, setDomainResolver } from './field_entity';
 
 export interface SelectOption {
   label: string;
@@ -64,14 +63,7 @@ const REMOVE_ICON =
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="white" d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg>',
   );
 
-setTargetResolver((block) => {
-  const target = block.getInputTargetBlock('TARGET');
-  const raw = target?.type === 'ha_entity' ? String(target.getFieldValue('ENTITY') ?? '') : '';
-  return raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-});
+
 
 const THRESHOLD_TYPES: [string, string][] = [
   ['above', 'above'],
@@ -87,6 +79,7 @@ setDomainResolver((parent, inputName) => {
     if (parent.type.startsWith('light_')) return { domains: ['light'] };
     if (HELPER_DOMAINS[parent.type]) return { domains: HELPER_DOMAINS[parent.type] };
   }
+  if (!def && inputName === 'ENTITY' && ENTITY_DOMAINS[parent.type]) return { domains: ENTITY_DOMAINS[parent.type] };
   if (!def) return { domains: [] };
   if (inputName === 'TARGET') return { domains: def.target?.domains ?? [], deviceClasses: def.target?.device_classes };
   const p = def.params.find((x) => slot(x) === inputName);
@@ -104,6 +97,9 @@ function shadowFor(p: Param): Blockly.serialization.blocks.State | null {
       return { type: 'text', fields: { TEXT: typeof d === 'string' ? d : '' } };
     case 'entity':
       return { type: 'ha_entity', fields: { ENTITY: typeof d === 'string' ? d : '' } };
+    case 'color':
+      // A socket, so colour blocks (mix, random, colour of a light…) fit too.
+      return { type: 'colour_picker', fields: { COLOUR: typeof d === 'string' ? d : '#ffcc66' } };
     case 'any':
       // Lists, dictionaries and other structured values; empty means "not set".
       return { type: 'yaml_value', fields: { CONFIG: d == null ? '' : typeof d === 'string' ? d : JSON.stringify(d) } };
@@ -148,9 +144,6 @@ function appendParam(block: DynBlock, p: Param, withShadow: boolean, removable: 
         .appendDummyInput(name)
         .appendField(p.label)
         .appendField(new FieldRegistry(typeof p.default === 'string' ? p.default : '', p.kind), name);
-      break;
-    case 'color':
-      input = block.appendDummyInput(name).appendField(p.label).appendField(new FieldColour('#ffcc66'), name);
       break;
     case 'state_value': {
       const field = new FieldStateValue(typeof p.default === 'string' ? p.default : '');
@@ -241,7 +234,9 @@ export function defineBlock(def: BlockDef) {
     init(this: DynBlock) {
       this.hab = def;
       this.optional = [];
-      this.appendDummyInput('TITLE').appendField(def.title);
+      // Lower-case like the built-in blocks ("turn on light"), but keep acronyms ("MQTT").
+      const title = /^[A-Z][a-z]/.test(def.title) ? def.title[0].toLowerCase() + def.title.slice(1) : def.title;
+      this.appendDummyInput('TITLE').appendField(def.kind === 'trigger' ? `⚡ ${title}` : title);
       if (def.target) {
         const verb = def.kind === 'action' ? 'on' : 'for';
         this.appendValueInput('TARGET').appendField(verb).setAlign(Blockly.inputs.Align.RIGHT);
@@ -249,7 +244,7 @@ export function defineBlock(def: BlockDef) {
       for (const p of def.params.filter((x) => x.required)) appendParam(this, p, false, false);
       if (optionalParams.length) {
         const menu = (): [string, string][] => [
-          ['＋ option', '__add__'],
+          ['＋ more settings', '__add__'],
           ...optionalParams.filter((p) => !this.optional.includes(p.name)).map((p) => [p.label, p.name] as [string, string]),
         ];
         const dd = new Blockly.FieldDropdown(menu, (value) => {

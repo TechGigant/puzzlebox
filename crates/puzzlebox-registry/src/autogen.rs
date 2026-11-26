@@ -333,7 +333,7 @@ pub fn generate(d: &HaDescriptions<'_>) -> Vec<BlockDef> {
                     kind: BlockKind::Value,
                     category: category.clone(),
                     style: "action".into(),
-                    title: format!("{title} → result"),
+                    title: format!("{title} and get the answer"),
                     tooltip: format!("{tooltip}\n\nReturns the action's response. {domain}.{svc}"),
                     help_url: None,
                     target,

@@ -240,12 +240,17 @@ pub fn generate(base: &str, devices: &Value, groups: &Value) -> Vec<BlockDef> {
         let id = format!("{prefix}__group{gid}");
         let topic = format!("{base}/{name}/set");
         let cat = format!("Group: {name}");
-        let num = |n: &str, l: &str, min: f64, max: f64| Param {
+        let num = |n: &str, l: &str, min: f64, max: f64, unit: Option<&str>| Param {
             name: n.into(),
             label: l.into(),
             description: String::new(),
             required: false,
-            input: ParamInput::Number { min: Some(min), max: Some(max), step: Some(1.0), unit: None },
+            input: ParamInput::Number {
+                min: Some(min),
+                max: Some(max),
+                step: Some(1.0),
+                unit: unit.map(str::to_owned),
+            },
             default: None,
         };
         let state_opts = ["ON", "OFF", "TOGGLE"]
@@ -260,8 +265,8 @@ pub fn generate(base: &str, devices: &Value, groups: &Value) -> Vec<BlockDef> {
             format!("Sends one command to every member of the Zigbee group {name}."),
             vec![
                 select_param("state", "state", state_opts, false),
-                num("brightness", "brightness", 0.0, 254.0),
-                num("color_temp", "color temperature (mired)", 150.0, 500.0),
+                num("brightness_percent", "brightness", 0.0, 100.0, Some("%")),
+                num("color_temp_kelvin", "white temperature", 2000.0, 6500.0, Some("K")),
                 Param {
                     name: "color".into(),
                     label: "color".into(),
@@ -270,7 +275,7 @@ pub fn generate(base: &str, devices: &Value, groups: &Value) -> Vec<BlockDef> {
                     input: ParamInput::Color,
                     default: None,
                 },
-                num("transition", "transition (s)", 0.0, 300.0),
+                num("transition", "fade", 0.0, 300.0, Some("seconds")),
             ],
             Lowering::MqttPublish { topic: topic.clone(), fixed: Value::Null },
         ));

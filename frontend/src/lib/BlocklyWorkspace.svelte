@@ -110,6 +110,8 @@
   import { applyZebra, loadPrefs, markLoose, rendererName } from './editor/appearance';
   import { installDragTricks } from './editor/drag';
   import { installSummaries } from './editor/summaries';
+  import { migrateWorkspace } from './editor/migrate';
+  import { FieldEntity, knownEntities, loadEntities } from './blocks/field_entity';
 
   let {
     initial,
@@ -173,7 +175,8 @@
     loading = true;
     workspace.clear();
     if (state && Object.keys(state).length) {
-      Blockly.serialization.workspaces.load(state, workspace);
+      // A plain copy: the state may be a Svelte proxy, and the caller keeps the original.
+      Blockly.serialization.workspaces.load(migrateWorkspace(JSON.parse(JSON.stringify(state))), workspace);
     } else {
       const when = workspace.newBlock('ha_when');
       when.initSvg();
@@ -190,6 +193,38 @@
     return workspace ? Blockly.serialization.workspaces.save(workspace) : {};
   }
 
+  /** Visible labels next to an input or field, e.g. "if" or "brightness". */
+  function labelFor(b: Blockly.Block, name: string): string | null {
+    for (const input of b.inputList) {
+      const labels = input.fieldRow.filter((f) => f instanceof Blockly.FieldLabel).map((f) => f.getText().trim());
+      if (input.name.toLowerCase() === name) return labels.join(' ') || null;
+      const i = input.fieldRow.findIndex((f) => f.name?.toLowerCase() === name);
+      if (i >= 0) {
+        const before = input.fieldRow.slice(0, i).filter((f) => f instanceof Blockly.FieldLabel);
+        return before.at(-1)?.getText().trim() || null;
+      }
+    }
+    return null;
+  }
+
+  /** Error text with internal slot names replaced by what the block shows. */
+  function friendly(e: CompileError): string {
+    const b = e.block_id ? workspace?.getBlockById(e.block_id) : null;
+    if (!b) return e.message;
+    return e.message.replace(/\u201c([^\u201d]+)\u201d/g, (all, name: string) => {
+      const label = labelFor(b, name.toLowerCase());
+      return label ? `\u201c${label}\u201d` : name.match(/^[a-z]+\d*$/) ? 'empty' : all;
+    }).replace('the empty empty slot', 'the empty slot').replace('fill in empty', 'fill in the empty box');
+  }
+
+  /** Problems for the side panel: friendly text, prefixed with the block they're on. */
+  export function friendlyErrors(errors: CompileError[]): CompileError[] {
+    return errors.map((e) => {
+      const where = e.block_id ? describe(e.block_id) : null;
+      return { ...e, message: where ? `${where}: ${friendly(e)}` : friendly(e) };
+    });
+  }
+
   export function setErrors(errors: CompileError[]) {
     if (!workspace) return;
     for (const id of errorIds) {
@@ -201,7 +236,27 @@
     const byBlock = new Map<string, string[]>();
     for (const e of errors) {
       if (!e.block_id) continue;
-      byBlock.set(e.block_id, [...(byBlock.get(e.block_id) ?? []), e.message]);
+      byBlock.set(e.block_id, [...(byBlock.get(e.block_id) ?? []), friendly(e)]);
+    }
+    // Entities that Home Assistant doesn't know (typos, removed devices, examples).
+    const known = knownEntities();
+    if (known.length) {
+      const ids = new Set(known.map((k) => k.entity_id));
+      for (const b of workspace.getAllBlocks(false)) {
+        for (const input of b.inputList) {
+          for (const f of input.fieldRow) {
+            if (!(f instanceof FieldEntity)) continue;
+            for (const id of String(f.getValue() ?? '').split(',').map((x) => x.trim()).filter(Boolean)) {
+              if (!ids.has(id) && /^[a-z_]+\.[a-z0-9_]+$/.test(id)) {
+                const holder = b.isShadow() ? (b.getParent() ?? b) : b;
+                byBlock.set(holder.id, [...(byBlock.get(holder.id) ?? []), `${id} doesn't exist in Home Assistant`]);
+              }
+            }
+          }
+        }
+      }
+    } else {
+      loadEntities().then(() => knownEntities().length && setErrors(errors));
     }
     for (const [id, msgs] of byBlock) {
       const b = workspace.getBlockById(id);

@@ -334,10 +334,15 @@ impl RunCtx {
                 }
             }
             StmtKind::ForEach { var, list, body } => {
-                let items = match self.eval(frame, list).await? {
+                let evaluated = self.eval(frame, list).await?;
+                let items = match self.expand_entities(evaluated).await.at(id)? {
                     Value::Array(a) => a,
                     Value::Object(o) => o.into_iter().map(|(k, _)| json!(k)).collect(),
                     Value::Null => vec![],
+                    // A comma-separated list of entities, like the entity block allows.
+                    Value::String(s) => {
+                        value::entity_list(&json!(s)).into_iter().map(Value::String).collect()
+                    }
                     other => return Err(RunError::at(id, format!("cannot loop over {other}"))),
                 };
                 for item in items {
@@ -530,7 +535,8 @@ impl RunCtx {
                 }
                 ExprKind::Not { expr } => json!(!truthy(&self.eval(frame, expr).await?)),
                 ExprKind::Each { list, var, expr, map } => {
-                    let items = match self.eval(frame, list).await? {
+                    let evaluated = self.eval(frame, list).await?;
+                    let items = match self.expand_entities(evaluated).await.at(id)? {
                         Value::Array(a) => a,
                         Value::Null => vec![],
                         other => value::entity_list(&other).into_iter().map(Value::String).collect(),
@@ -638,17 +644,26 @@ impl RunCtx {
                     self.ha.render_template(template, self.ha_vars(frame)).await.at(id)?
                 }
                 ExprKind::TriggerData { path } => {
-                    let mut cur = &self.trigger;
-                    for part in path.split('.').filter(|p| !p.is_empty()) {
-                        cur = match cur {
-                            Value::Object(o) => o.get(part).unwrap_or(&Value::Null),
-                            Value::Array(a) => {
-                                part.parse::<usize>().ok().and_then(|i| a.get(i)).unwrap_or(&Value::Null)
-                            }
-                            _ => &Value::Null,
-                        };
+                    let walk = |root: &Value| {
+                        let mut cur = root;
+                        for part in path.split('.').filter(|p| !p.is_empty()) {
+                            cur = match cur {
+                                Value::Object(o) => o.get(part).unwrap_or(&Value::Null),
+                                Value::Array(a) => {
+                                    part.parse::<usize>().ok().and_then(|i| a.get(i)).unwrap_or(&Value::Null)
+                                }
+                                _ => &Value::Null,
+                            };
+                        }
+                        cur.clone()
+                    };
+                    match walk(&self.trigger) {
+                        // A timer's run continues the run that started it: use that trigger.
+                        Value::Null if self.trigger.get("platform") == Some(&json!("timer")) => {
+                            walk(self.trigger.get("started_by").unwrap_or(&Value::Null))
+                        }
+                        v => v,
                     }
-                    cur.clone()
                 }
                 ExprKind::Http { method, url, body, headers } => {
                     let http = self.http.as_ref().ok_or_else(|| RunError::at(id, "HTTP is not available"))?;
@@ -701,11 +716,58 @@ impl RunCtx {
                     &text(3),
                 )?
             }
+            "ha:state_check" | "ha:aggregate" | "ha:last_scene" | "ha:next_scene" => {
+                let mut args = a.to_vec();
+                if let Some(first) = args.first_mut() {
+                    *first = self.expand_entities(std::mem::take(first)).await?;
+                }
+                let lookup = |e: &str| self.ha.state(e);
+                value::ha_builtin(name, &args, &lookup)?
+            }
             _ => {
                 let lookup = |e: &str| self.ha.state(e);
                 value::ha_builtin(name, a, &lookup)?
             }
         })
+    }
+
+    /// Entity ids from an entity, a comma list, a list, or area/floor/label/device targets
+    /// (`{"area_id": [...]}`, also inside lists); other values pass through unchanged.
+    async fn expand_entities(&self, v: Value) -> Result<Value, String> {
+        const KINDS: [(&str, &str); 4] = [
+            ("area_id", "area_entities"),
+            ("floor_id", "floor_entities"),
+            ("label_id", "label_entities"),
+            ("device_id", "device_entities"),
+        ];
+        let is_target =
+            |m: &Map<String, Value>| m.keys().any(|k| k == "entity_id" || KINDS.iter().any(|(t, _)| t == k));
+        let has_target = match &v {
+            Value::Object(m) => is_target(m),
+            Value::Array(items) => items.iter().any(|i| i.as_object().is_some_and(is_target)),
+            _ => false,
+        };
+        if !has_target {
+            return Ok(v);
+        }
+        let target = puzzlebox_ir::normalize_target(&v)?;
+        let mut parts = vec![];
+        for (key, func) in KINDS {
+            for id in value::entity_list(target.get(key).unwrap_or(&Value::Null)) {
+                parts.push(format!("{func}('{}')", id.replace(['\\', '\''], "")));
+            }
+        }
+        let mut ids = value::entity_list(target.get("entity_id").unwrap_or(&Value::Null));
+        if !parts.is_empty() {
+            let template = format!("{{{{ ({}) | unique | list }}}}", parts.join(" + "));
+            let rendered = self.ha.render_template(&template, json!({})).await?;
+            for id in value::entity_list(&rendered) {
+                if !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        Ok(json!(ids))
     }
 
     async fn call(&self, frame: &Frame, id: &str, name: &str, args: &[Expr]) -> R<Value> {

@@ -29,7 +29,13 @@ pub fn as_num(v: &Value) -> Option<f64> {
 }
 
 pub fn to_num(v: &Value) -> Result<f64, String> {
-    as_num(v).ok_or_else(|| format!("expected a number, got {}", short(v)))
+    as_num(v).ok_or_else(|| match v.as_str().map(str::trim) {
+        Some("unknown" | "unavailable" | "") => format!(
+            "expected a number, got {}: the sensor has no value right now. Use \"… as a number (or 0 if unknown)\" or check \"has a value\" first",
+            short(v)
+        ),
+        _ => format!("expected a number, got {}", short(v)),
+    })
 }
 
 pub fn truthy(v: &Value) -> bool {
@@ -56,10 +62,13 @@ fn short(v: &Value) -> String {
     if s.len() > 60 { format!("{}…", &s[..s.floor_char_boundary(60)]) } else { s }
 }
 
-/// Numbers compare numerically even when one side is an HA state string like "21.5".
+/// Numbers compare numerically, also when both are HA state strings like "9.5" and "10.2".
 fn loose_cmp(a: &Value, b: &Value) -> Option<Ordering> {
     let numeric_side = matches!(a, Value::Number(_)) || matches!(b, Value::Number(_));
-    if numeric_side && let (Some(x), Some(y)) = (as_num(a), as_num(b)) {
+    let numeric_text = |v: &Value| v.as_str().is_some_and(|s| s.trim().parse::<f64>().is_ok());
+    if (numeric_side || (numeric_text(a) && numeric_text(b)))
+        && let (Some(x), Some(y)) = (as_num(a), as_num(b))
+    {
         return x.partial_cmp(&y);
     }
     match (a, b) {
@@ -157,7 +166,7 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
     let a = |i: usize| args.get(i).unwrap_or(&Value::Null);
     let n = |i: usize| to_num(a(i));
     Ok(match name {
-        "neg" => num(-n(0)?),
+        "neg" | "math_neg" => num(-n(0)?),
         "math_root" => num(n(0)?.sqrt()),
         "math_abs" => num(n(0)?.abs()),
         "math_ln" => num(n(0)?.ln()),
@@ -301,10 +310,35 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
         "list_reverse" => Value::Array(list(a(0))?.iter().rev().cloned().collect()),
         "list_sort" | "list_sort_desc" => {
             let mut l = list(a(0))?.clone();
-            l.sort_by(|x, y| loose_cmp(x, y).unwrap_or(Ordering::Equal));
+            // Optional 2nd arg: "NUMERIC", "TEXT" or "IGNORE_CASE" (Blockly's sort types).
+            match args.get(1).map(to_text).as_deref() {
+                Some("NUMERIC") => l.sort_by(|x, y| {
+                    as_num(x)
+                        .unwrap_or(f64::NAN)
+                        .partial_cmp(&as_num(y).unwrap_or(f64::NAN))
+                        .unwrap_or(Ordering::Equal)
+                }),
+                Some("TEXT") => l.sort_by_key(to_text),
+                Some("IGNORE_CASE") => l.sort_by_key(|v| to_text(v).to_lowercase()),
+                _ => l.sort_by(|x, y| loose_cmp(x, y).unwrap_or(Ordering::Equal)),
+            }
             if name == "list_sort_desc" {
                 l.reverse();
             }
+            Value::Array(l)
+        }
+        "list_insert" => {
+            // Inserts before the item at the index (-1 = append at the end).
+            let mut l = list(a(0))?.clone();
+            let i = n(1)? as i64;
+            let at = if i < 0 { (l.len() as i64 + i + 1).max(0) as usize } else { (i as usize).min(l.len()) };
+            l.insert(at, a(2).clone());
+            Value::Array(l)
+        }
+        "list_remove" => {
+            let mut l = list(a(0))?.clone();
+            let i = resolve_index(l.len(), n(1)?)?;
+            l.remove(i);
             Value::Array(l)
         }
         "list_join" => json!(list(a(0))?.iter().map(to_text).collect::<Vec<_>>().join(&to_text(a(1)))),
@@ -335,6 +369,25 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
         "json_parse" => serde_json::from_str(&to_text(a(0))).map_err(|e| format!("invalid JSON: {e}"))?,
         "json_stringify" => json!(a(0).to_string()),
         "now" => json!(Local::now().to_rfc3339()),
+        "time_of_day" => json!(Local::now().format("%H:%M:%S").to_string()),
+        "is_on" => json!(match a(0) {
+            Value::String(s) =>
+                matches!(s.trim().to_lowercase().as_str(), "on" | "true" | "yes" | "1" | "home" | "open"),
+            other => truthy(other),
+        }),
+        // input_datetime.set_datetime takes time, date or datetime depending on the helper.
+        "datetime_data" => {
+            let text = to_text(a(0));
+            let t = text.trim();
+            let key = if t.contains(':') && !t.contains('-') {
+                "time"
+            } else if t.contains('-') && !t.contains(':') {
+                "date"
+            } else {
+                "datetime"
+            };
+            json!({ key: t })
+        }
         "time_hour" => json!(Local::now().hour()),
         "time_minute" => json!(Local::now().minute()),
         "time_second" => json!(Local::now().second()),
@@ -354,6 +407,13 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
             num((y - x).num_milliseconds() as f64 / 1000.0)
         }
         "format_duration" => json!(format_duration(n(0)?, &to_text(a(1)))),
+        // `wait` after "wait until" is {"completed": bool}; after "wait for" {"trigger": … | null}.
+        "wait_timed_out" => json!(match a(0) {
+            Value::Object(m) if m.contains_key("completed") => !truthy(&m["completed"]),
+            Value::Object(m) => m.get("trigger").is_none_or(Value::is_null),
+            _ => false,
+        }),
+        "wait_entity" => a(0).pointer("/trigger/entity_id").cloned().unwrap_or(Value::Null),
         "case_matches" => match a(1) {
             // A list case matches any of its values.
             Value::Array(options) => json!(options.iter().any(|o| loose_eq(a(0), o))),
@@ -431,6 +491,15 @@ pub fn parse_time(v: &Value) -> Option<chrono::DateTime<Local>> {
     if let Some(f) = v.as_f64().filter(|_| v.is_number()) {
         return chrono::DateTime::from_timestamp_millis((f * 1000.0) as i64).map(|t| t.with_timezone(&Local));
     }
+    // input_datetime states: "2026-11-26 07:30:00" or "2026-11-26" in local time.
+    for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"] {
+        if let Ok(n) = chrono::NaiveDateTime::parse_from_str(s.trim(), fmt) {
+            return n.and_local_timezone(Local).earliest();
+        }
+    }
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d") {
+        return d.and_hms_opt(0, 0, 0)?.and_local_timezone(Local).earliest();
+    }
     today_at(&s).ok()
 }
 
@@ -488,7 +557,11 @@ pub fn ha_builtin(name: &str, a: &[Value], lookup: &dyn Fn(&str) -> Option<Value
         }
         "ha:seconds_since" => {
             let field = to_text(&arg(1));
-            let field = if field == "last_updated" { "last_updated" } else { "last_changed" };
+            let field = match field.as_str() {
+                "last_updated" => "last_updated",
+                "last_reported" => "last_reported",
+                _ => "last_changed",
+            };
             match lookup(&to_text(&arg(0)))
                 .and_then(|s| s.get(field).and_then(Value::as_str).map(str::to_owned))
                 .and_then(|t| chrono::DateTime::parse_from_rfc3339(&t).ok())

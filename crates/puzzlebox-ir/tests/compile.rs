@@ -142,3 +142,25 @@ fn every_trigger_and_area_targets() {
     let StmtKind::CallService { target: Some(t), .. } = &p.handlers[0].body[0].kind else { panic!() };
     assert_eq!(t.kind, ExprKind::Lit { value: json!({"area_id": ["kitchen", "hall"]}) });
 }
+
+#[test]
+fn trigger_durations_are_sockets_and_every_is_checked() {
+    let ws = |trigger: serde_json::Value| {
+        json!({"blocks": {"languageVersion": 0, "blocks": [{
+            "type": "ha_when", "id": "w", "inputs": {"TRIGGERS": {"block": trigger}}
+        }]}})
+    };
+    let state = json!({"type": "ha_trigger_state", "id": "s", "fields": {"ENTITY": "light.a", "FROM": "", "TO": ""},
+        "inputs": {"FOR": {"shadow": {"type": "duration", "id": "d", "fields": {"UNIT": "minutes"},
+            "inputs": {"N": {"shadow": {"type": "math_number", "id": "n", "fields": {"NUM": 5}}}}}}}});
+    let p = compile(&ws(state), &NoExternals).unwrap();
+    let HandlerKind::Triggers { triggers } = &p.handlers[0].kind else { panic!() };
+    let Trigger::Ha { config, .. } = &triggers[0] else { panic!() };
+    assert_eq!(config["for"], json!({"hours": 0, "minutes": 5, "seconds": 0}));
+    assert_eq!(config["to"], serde_json::Value::Null, "only state changes, not attribute changes");
+    assert!(config.as_object().unwrap().contains_key("to"));
+
+    let every = json!({"type": "ha_trigger_every", "id": "e", "fields": {"N": 7, "UNIT": "minutes"}});
+    let errors = compile(&ws(every), &NoExternals).unwrap_err();
+    assert!(errors[0].message.contains("doesn't fit evenly"), "{}", errors[0].message);
+}

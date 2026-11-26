@@ -4,7 +4,7 @@
 
 use serde_json::{Value, json};
 
-use super::{Block, Compiler};
+use super::{Block, Compiler, arg_placeholder};
 use crate::ir::*;
 
 impl Compiler<'_> {
@@ -127,8 +127,8 @@ impl Compiler<'_> {
                 let players = self.value_opt(b, "TARGET").unwrap_or_else(|| lit(Value::Null));
                 let tts = b.field_str("TTS").map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
                 let Some(tts) = tts else {
-                    self.err(b, "choose a text-to-speech entity (tts.…)");
-                    return Some(StmtKind::Stop);
+                    self.err(b, "choose a voice (a text-to-speech entity, tts.…)");
+                    return Some(StmtKind::Expr { expr: lit(Value::Null) });
                 };
                 let entries =
                     vec![("message".to_owned(), message), ("media_player_entity_id".to_owned(), players)];
@@ -196,6 +196,46 @@ impl Compiler<'_> {
                 }
             }
             "helper_set" => return Some(self.helper_set(b)),
+            "device_on_for" => {
+                // Turn on now, and off again after the time with a timer of its own.
+                let on =
+                    Stmt { id: b.id().into(), kind: self.service_call(b, "homeassistant.turn_on", vec![]) };
+                let off =
+                    Stmt { id: b.id().into(), kind: self.service_call(b, "homeassistant.turn_off", vec![]) };
+                let name = format!("__on_for_{}", b.id());
+                self.timer_handlers.push(Handler {
+                    id: b.id().into(),
+                    kind: HandlerKind::Timer { name: name.clone() },
+                    body: vec![off],
+                });
+                let start = Stmt {
+                    id: b.id().into(),
+                    kind: StmtKind::TimerStart {
+                        name,
+                        seconds: self.value(b, "SECONDS"),
+                        if_running: TimerMode::Restart,
+                        handler: b.id().into(),
+                    },
+                };
+                StmtKind::If { branches: vec![(lit(json!(true)), vec![on, start])], otherwise: None }
+            }
+            "wait_until_time" => {
+                let at = self.required_str(b, "TIME");
+                StmtKind::WaitForTrigger {
+                    triggers: vec![json!({"trigger": "time", "at": at})],
+                    timeout: None,
+                    result_var: None,
+                }
+            }
+            "http_send" => {
+                let kind = ExprKind::Http {
+                    method: b.field_str("METHOD").unwrap_or("POST").to_owned(),
+                    url: Box::new(self.value(b, "URL")),
+                    body: self.value_opt(b, "BODY").map(Box::new),
+                    headers: None,
+                };
+                StmtKind::Expr { expr: Expr { id: b.id().into(), kind } }
+            }
             _ => return None,
         })
     }
@@ -220,7 +260,15 @@ impl Compiler<'_> {
                 call(&format!("{domain}.set_value"), "value", value)
             }
             "input_select" | "select" => call(&format!("{domain}.select_option"), "option", value),
-            "input_datetime" => call("input_datetime.set_datetime", "datetime", value),
+            "input_datetime" => StmtKind::CallService {
+                service: "input_datetime.set_datetime".into(),
+                target,
+                data: Some(Expr {
+                    id: b.id().into(),
+                    kind: ExprKind::Builtin { name: "datetime_data".into(), args: vec![value] },
+                }),
+                response_var: None,
+            },
             "input_boolean" | "switch" | "light" | "fan" => {
                 let on = Stmt {
                     id: b.id().into(),
@@ -240,13 +288,44 @@ impl Compiler<'_> {
                         response_var: None,
                     },
                 };
-                StmtKind::If { branches: vec![(value, vec![on])], otherwise: Some(vec![off]) }
+                // "on", "true", "home", 1 … turn it on; "off", false, 0 … turn it off.
+                let is_on = Expr {
+                    id: b.id().into(),
+                    kind: ExprKind::Builtin { name: "is_on".into(), args: vec![value] },
+                };
+                StmtKind::If { branches: vec![(is_on, vec![on])], otherwise: Some(vec![off]) }
             }
             _ => {
-                self.err(b, format!("'{entity}' isn't a helper this block can set (input_number, input_text, input_select, input_boolean, input_datetime, counter …)"));
-                StmtKind::Stop
+                self.err(b, format!("'{entity}' isn't a helper this block can set (number, text, dropdown, toggle, date/time or counter helpers)"));
+                StmtKind::Expr { expr: Expr::lit(b.id(), Value::Null) }
             }
         }
+    }
+
+    /// Helper trigger blocks; `None` if `b` isn't one.
+    pub(super) fn helper_trigger(&mut self, b: &Block<'_>) -> Option<Option<Trigger>> {
+        let id: BlockId = b.id().into();
+        Some(match b.ty() {
+            "ha_trigger_becomes" => {
+                let entity = self.required_str(b, "ENTITY");
+                let state = self.required_str(b, "STATE");
+                let mut cfg = json!({"trigger": "state", "entity_id": entity, "to": state});
+                if let Some(d) = self.fixed_number(b, "FOR").filter(|d| *d > 0.0) {
+                    cfg["for"] = json!({"seconds": d});
+                }
+                Some(Trigger::Ha { id, config: cfg })
+            }
+            "ha_trigger_zone" => {
+                let who = self.required_str(b, "PERSON");
+                let zone = self.required_str(b, "ZONE");
+                let event = if b.field_str("EVENT") == Some("leave") { "leave" } else { "enter" };
+                Some(Trigger::Ha {
+                    id,
+                    config: json!({"trigger": "zone", "entity_id": who, "zone": zone, "event": event}),
+                })
+            }
+            _ => return None,
+        })
     }
 
     /// Helper value blocks; `None` if `b` isn't one.
@@ -282,6 +361,80 @@ impl Compiler<'_> {
             }
             "media_title_of" => attr(self, "media_title"),
             "fan_speed_of" => attr(self, "percentage"),
+            "wait_timed_out" | "wait_entity" => {
+                let wait = Expr {
+                    id: b.id().into(),
+                    kind: ExprKind::Var { name: "wait".into(), scope: VarScope::Local },
+                };
+                self.builtin(b.ty(), vec![wait])
+            }
+            "trigger_entity" => ExprKind::TriggerData { path: "entity_id".into() },
+            "sun_is" => {
+                let state =
+                    if b.field_str("WHERE") == Some("down") { "below_horizon" } else { "above_horizon" };
+                ExprKind::Condition {
+                    config: json!({"condition": "state", "entity_id": "sun.sun", "state": state}),
+                    args: Default::default(),
+                }
+            }
+            "someone_home" => {
+                let test = match b.field_str("WHO") {
+                    Some("nobody") => "== 0",
+                    Some("everyone") => "== states.person | count",
+                    _ => "> 0",
+                };
+                ExprKind::Template {
+                    template: format!(
+                        "{{{{ (states.person | selectattr('state', 'eq', 'home') | list | count) {test} and (states.person | count) > 0 }}}}"
+                    ),
+                }
+            }
+            "person_is_home" => {
+                let mut args = std::collections::BTreeMap::new();
+                args.insert("entity".to_owned(), self.entity_expr(b));
+                let state = if b.field_str("WHERE") == Some("away") { "not_home" } else { "home" };
+                ExprKind::Condition {
+                    config: json!({"condition": "state", "entity_id": arg_placeholder("entity"), "state": state}),
+                    args,
+                }
+            }
+            "weekday_is" => {
+                let days: Vec<&str> = match b.field_str("WHEN").unwrap_or("weekday") {
+                    "weekend" => vec!["sat", "sun"],
+                    "weekday" => vec!["mon", "tue", "wed", "thu", "fri"],
+                    d => vec![d],
+                };
+                ExprKind::Condition {
+                    config: json!({"condition": "time", "weekday": days}),
+                    args: Default::default(),
+                }
+            }
+            "ha_state_count" => {
+                let list = self.value(b, "LIST");
+                let f = |k: &str, d: &str| Expr::lit(b.id(), json!(b.field_str(k).unwrap_or(d)));
+                let (op, state) = (f("OP", "is"), f("STATE", "on"));
+                self.builtin("ha:state_check", vec![list, Expr::lit(b.id(), json!("count")), op, state])
+            }
+            "ha_state_ago" => {
+                let e = self.entity_expr(b);
+                let secs = self.value(b, "SECONDS");
+                self.builtin(
+                    "ha:history",
+                    vec![e, Expr::lit(b.id(), json!("state_ago")), secs, Expr::lit(b.id(), json!(""))],
+                )
+            }
+            "text_regex_test" => {
+                let args = vec![
+                    self.value(b, "TEXT"),
+                    Expr::lit(b.id(), json!(b.field_str("PATTERN").unwrap_or(""))),
+                ];
+                self.builtin("regex_test", args)
+            }
+            "colour_hex" => {
+                let args = vec![self.value(b, "COLOUR"), Expr::lit(b.id(), json!("hex"))];
+                self.builtin("colour_part", args)
+            }
+            "time_of_day" => self.builtin("time_of_day", vec![]),
             _ => return None,
         })
     }

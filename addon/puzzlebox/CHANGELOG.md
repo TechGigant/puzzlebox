@@ -2,6 +2,42 @@
 
 ## Unreleased
 
+### Triggers
+
+- State triggers can watch a detail (attribute) instead of the state, take
+  several states ("open, opening"), match "anything but" a state, or fire on
+  any change including details. A list of states used to be sent as one text.
+- Numeric triggers can watch a detail or a template and wait "for" a while.
+- Time triggers can be limited to weekdays and shifted from a date/time
+  entity ("10 minutes before the alarm").
+- New triggers: the clock shows (hour/minute/second patterns), Home Assistant
+  shuts down, a template becomes true, calendar events, NFC tags, Assist
+  sentences, and Home Assistant's own MQTT and webhook triggers.
+
+### Conditions
+
+- "… is …" can check a detail (attribute), several states, and "any of" several
+  entities.
+- New conditions: "… is above … and below …", "it is after/before sunset or
+  sunrise" with an offset, "… is in zone …", and "template is true".
+- A condition that fails while Home Assistant checks it (an unknown entity, a
+  state that isn't a number) now counts as false with a warning in the log,
+  as in Home Assistant, instead of stopping the run.
+
+### Actions and waits
+
+- "Perform action … and save the response in …" keeps what an action sends
+  back (weather forecasts, calendar events…) in a variable.
+- "loop round number / item / is on its first or last round" inside loops.
+  Templates in loops see Home Assistant's `repeat` (`repeat.index`,
+  `repeat.item`…), nested loops their own.
+- After "wait for" and "wait until", templates see Home Assistant's full
+  `wait` (`remaining`, `completed`, `trigger`), and several triggers are
+  numbered as in Home Assistant (`wait.trigger.idx`). Trigger templates can
+  use the program's variables.
+- "Wait until" a template reacts as soon as something the template uses
+  changes, instead of checking once a second.
+
 ### Import
 
 - Import understands whatever you paste: a single automation or script,
@@ -12,12 +48,15 @@
   with automations that use it and they are expanded too.
 - `!secret`, `!include` and other Home Assistant tags are kept as visible
   placeholders, never resolved, and listed as warnings in the preview.
-- Far more becomes real blocks instead of YAML: state, numeric, time, time
-  pattern, sun, zone, event and device triggers with their ids; state, time,
-  weekday, trigger and device conditions in any and/or/not form; every kind
-  of delay, wait, choose, if, repeat (count, while, until), parallel and
-  stop; and service calls that have a Home or Lights block, such as
-  `light.turn_on` with a colour or `climate.set_temperature`.
+- Far more becomes real blocks instead of YAML: triggers with their ids;
+  state, time, weekday, trigger and device conditions in any and/or/not
+  form; every kind
+  of delay, wait (`wait_template` too), choose, if, repeat (count, for each,
+  while, until, also when they use `repeat`), parallel and stop; actions
+  with a `response_variable`; and service calls that have a Home or Lights
+  block, such as `light.turn_on` with a colour or
+  `climate.set_temperature`. The new triggers and conditions above import as
+  blocks too.
 - Templates become blocks when the result is exactly the same:
   `states('sensor.x')`, `is_state(…)`, `state_attr(…)`, `trigger.to_state`,
   variables, comparisons, maths, `now().hour` and text with values in it.

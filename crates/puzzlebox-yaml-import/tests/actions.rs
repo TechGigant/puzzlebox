@@ -153,47 +153,61 @@ fn service_calls_that_stay_raw() {
     data: {"{{ 'transition' }}": 1}
   - action: weather.get_forecasts
     data: {type: daily}
-    response_variable: forecast
+    response_variable: trigger
 "#,
     );
     assert_eq!(top(&imp), ["ha_action_raw"; 9]);
     assert_eq!(imp.raw_blocks, 9);
-    assert_eq!(raw_config(&imp, 8)["response_variable"], "forecast");
+    assert_eq!(raw_config(&imp, 8)["response_variable"], "trigger");
 }
 
 #[test]
-fn response_variable_used_later_keeps_its_readers_with_it() {
+fn response_variables_keep_the_response() {
     let (imp, p) = script(
         r#"
   - delay: 1
   - action: weather.get_forecasts
+    target: {entity_id: weather.home}
     data: {type: daily}
     response_variable: forecast
   - action: light.turn_on
     target: {entity_id: light.a}
   - action: notify.notify
     data: {message: "{{ forecast }}"}
+  - action: light.turn_on
+    target: {entity_id: light.a}
+    response_variable: unusual
 "#,
     );
-    assert_eq!(top(&imp), ["ha_wait", "ha_action_raw"]);
-    assert_eq!(imp.raw_blocks, 1);
-    let cfg = raw_config(&imp, 1);
-    assert_eq!(cfg.as_array().unwrap().len(), 3);
-    let StmtKind::HaScript { sequence, .. } = &body(&p)[1].kind else { panic!() };
-    assert_eq!(sequence.as_array().unwrap().len(), 3);
+    assert_eq!(
+        top(&imp),
+        ["ha_wait", "ha_call_service_response", "light_power", "notify_send", "ha_call_service_response"]
+    );
+    assert_eq!(imp.raw_blocks, 0);
+    let StmtKind::CallService { service, target: Some(t), data: Some(d), response_var } = &body(&p)[1].kind
+    else {
+        panic!()
+    };
+    assert_eq!((service.as_str(), response_var.as_deref()), ("weather.get_forecasts", Some("forecast")));
+    assert_eq!(lit(t), &json!("weather.home"));
+    assert_eq!(dict(d), [("type".to_owned(), json!("daily"))]);
+    // No helper block keeps a response.
+    assert!(
+        matches!(&body(&p)[4].kind, StmtKind::CallService { response_var: Some(r), .. } if r == "unusual")
+    );
 }
 
 #[test]
 fn variables_set_in_a_nested_raw_block_widen_it() {
-    // The loop needs `repeat.item`, so it is raw; its variable is read after the "if".
+    // The loop's count is a template, so it is raw; its variable is read after the "if".
     let (imp, _) = script(
         r#"
   - if: "{{ true }}"
     then:
       - repeat:
-          for_each: [1, 2]
+          count: "{{ 2 }}"
           sequence:
-            - variables: {total: "{{ repeat.item }}"}
+            - variables: {total: "{{ repeat.index }}"}
   - action: notify.notify
     data: {message: "{{ total }}"}
   - delay: 1
@@ -208,9 +222,9 @@ fn variables_set_in_a_nested_raw_block_widen_it() {
   - if: []
     then:
       - repeat:
-          for_each: [1, 2]
+          count: "{{ 2 }}"
           sequence:
-            - variables: {total: "{{ repeat.item }}"}
+            - variables: {total: "{{ repeat.index }}"}
   - action: notify.notify
     data: {message: "{{ totally }}"}
 "#,
@@ -225,9 +239,9 @@ fn stop_inside_a_raw_block() {
     let (imp, _) = script(
         r#"
   - repeat:
-      for_each: [a, b]
+      count: "{{ 2 }}"
       sequence:
-        - if: "{{ repeat.item == 'b' }}"
+        - if: "{{ repeat.index == 2 }}"
           then: [{stop: found}]
   - delay: 1
 "#,
@@ -239,9 +253,9 @@ fn stop_inside_a_raw_block() {
         r#"
   - delay: 1
   - repeat:
-      for_each: [a, b]
+      count: "{{ 2 }}"
       sequence:
-        - if: "{{ repeat.item == 'b' }}"
+        - if: "{{ repeat.index == 2 }}"
           then: [{stop: found}]
 "#,
     );
@@ -308,47 +322,75 @@ fn wait_for_trigger() {
 }
 
 #[test]
-fn waits_whose_result_the_blocks_lack() {
-    // `wait.remaining` isn't set by the block: the wait and its reader stay raw together.
-    let (imp, _) = script(
+fn waits_set_wait_like_home_assistant() {
+    // The blocks set all of `wait`, number the triggers like HA and render their templates
+    // with the run's variables.
+    let (imp, p) = script(
         r#"
   - delay: 1
-  - wait_for_trigger: {trigger: event, event_type: x}
-    timeout: 10
-  - action: notify.notify
-    data: {message: "{{ wait.remaining }}"}
-"#,
-    );
-    assert_eq!(top(&imp), ["ha_wait", "ha_action_raw"]);
-    // Several triggers: HA numbers their ids by position.
-    let (imp, _) = script(
-        r#"
   - wait_for_trigger:
       - {trigger: event, event_type: x}
-      - {trigger: event, event_type: y}
+      - triggers: [{trigger: template, value_template: "{{ is_state(door, 'on') }}"}]
+    timeout: 10
   - action: notify.notify
-    data: {message: "{{ wait.trigger.id }}"}
-"#,
-    );
-    assert_eq!(top(&imp), ["ha_action_raw"]);
-    // Templates in the trigger, a zero timeout and wait_template stay raw.
-    let (imp, _) = script(
-        r#"
-  - wait_for_trigger: {trigger: template, value_template: "{{ x }}"}
-  - wait_for_trigger: {trigger: event, event_type: x}
-    timeout: 0
+    data: {message: "{{ wait.remaining }} {{ wait.trigger.id }} {{ wait.trigger.idx }}"}
   - wait_template: "{{ is_state('a.b', 'on') }}"
-"#,
-    );
-    assert_eq!(top(&imp), ["ha_action_raw"; 3]);
-    let (imp, _) = script(
-        r#"
-  - wait_template: "{{ is_state('a.b', 'on') }}"
+    timeout: "00:01:00"
+    continue_on_timeout: false
   - if: "{{ wait.completed }}"
     then: [{delay: 1}]
 "#,
     );
+    assert_eq!(
+        top(&imp),
+        ["ha_wait", "ha_wait_for_trigger", "notify_send", "wait_until", "controls_if", "controls_if"]
+    );
+    // The template trigger and the "template is true" condition on `wait` are blocks too.
+    assert_eq!(imp.raw_blocks, 0);
+    let mut last_if = first_block(&imp);
+    for _ in 0..5 {
+        last_if = last_if.pointer("/next/block").unwrap();
+    }
+    assert_eq!(last_if["inputs"]["IF0"]["block"]["type"], "ha_template_condition");
+    let StmtKind::WaitForTrigger { triggers, .. } = &body(&p)[1].kind else { panic!() };
+    assert_eq!(triggers.len(), 2);
+    let StmtKind::WaitUntil { cond, hold: None, timeout: Some(t) } = &body(&p)[3].kind else { panic!() };
+    // Kept as a template, which is followed change by change.
+    assert_eq!(cond.kind, ExprKind::Template { template: "{{ is_state('a.b', 'on') }}".into() });
+    assert_eq!(lit(t), &json!(60));
+    let StmtKind::If { branches, .. } = &body(&p)[4].kind else { panic!() };
+    assert!(matches!(branches[0].1[0].kind, StmtKind::Stop));
+
+    // A trigger split into several blocks shifts HA's numbers.
+    let (imp, _) = script(
+        r#"
+  - wait_for_trigger:
+      - {trigger: event, event_type: [x, y]}
+      - {trigger: event, event_type: z}
+  - action: notify.notify
+    data: {message: "{{ wait.trigger.idx }}"}
+"#,
+    );
     assert_eq!(top(&imp), ["ha_action_raw"]);
+    let (imp, _) = script(
+        r#"
+  - wait_for_trigger:
+      - {trigger: event, event_type: [x, y]}
+  - action: notify.notify
+    data: {message: "{{ wait.trigger.event.event_type }}"}
+"#,
+    );
+    assert_eq!(top(&imp), ["ha_wait_for_trigger", "notify_send"]);
+    // A zero timeout times out at once in HA but means "no limit" for the blocks.
+    let (imp, _) = script(
+        r#"
+  - wait_for_trigger: {trigger: event, event_type: x}
+    timeout: 0
+  - wait_template: "{{ is_state('a.b', 'on') }}"
+    timeout: 0
+"#,
+    );
+    assert_eq!(top(&imp), ["ha_action_raw"; 2]);
 }
 
 #[test]
@@ -498,7 +540,7 @@ fn repeats() {
             "controls_whileUntil",
             "controls_whileUntil",
             "controls_repeat_ext",
-            "ha_action_raw",
+            "controls_forEach",
             "controls_repeat_ext",
             "ha_action_raw"
         ]
@@ -513,9 +555,82 @@ fn repeats() {
     let StmtKind::If { branches, .. } = &inner[1].kind else { panic!() };
     assert!(matches!(branches[0].1[0].kind, StmtKind::Break));
     assert!(matches!(&b[3].kind, StmtKind::Repeat { times, .. } if lit(times) == &json!(2)));
-    // The inner loop uses its own `repeat`, so only it is raw.
-    let StmtKind::Repeat { body: inner, .. } = &b[5].kind else { panic!() };
+    // `repeat.item` needs the items themselves.
+    let StmtKind::ForEach { var, list, body: inner } = &b[4].kind else { panic!() };
+    assert_eq!((var.as_str(), plain(list)), ("repeat_item", json!(["a", "b"])));
+    // (An event with templates in its data has no block, but runs with `repeat` too.)
     assert!(matches!(inner[0].kind, StmtKind::HaScript { .. }));
+    // The inner loop's condition sees its own `repeat`.
+    let StmtKind::Repeat { body: inner, .. } = &b[5].kind else { panic!() };
+    let StmtKind::While { cond, .. } = &inner[0].kind else { panic!() };
+    let ExprKind::Binary { left, .. } = &cond.kind else { panic!("{cond:?}") };
+    assert!(
+        matches!(&left.kind, ExprKind::Builtin { name, args } if name == "loop_info" && lit(&args[0]) == "index")
+    );
+}
+
+#[test]
+fn for_each_over_templates_and_lists() {
+    let (imp, p) = script(
+        r#"
+  - repeat:
+      for_each: "{{ states.light | map(attribute='entity_id') | list }}"
+      sequence:
+        - action: light.turn_off
+          target: {entity_id: "{{ repeat.item }}"}
+  - variables: {repeat_item: 1}
+  - repeat:
+      for_each: [{name: a}, 2]
+      sequence:
+        - variables: {n: "{{ repeat.index }}", last: "{{ repeat.last }}", it: "{{ repeat.item }}"}
+  - repeat:
+      for_each: [light.a, {area_id: kitchen}]
+      sequence:
+        - variables: {it: "{{ repeat.item }}"}
+"#,
+    );
+    assert_eq!(top(&imp), ["controls_forEach", "variables_set", "controls_forEach", "ha_action_raw"]);
+    let b = body(&p);
+    let StmtKind::ForEach { list, .. } = &b[0].kind else { panic!() };
+    assert!(matches!(list.kind, ExprKind::Template { .. }));
+    // A name the script doesn't use.
+    let StmtKind::ForEach { var, body: inner, .. } = &b[2].kind else { panic!() };
+    assert_eq!(var, "repeat_item_2");
+    let set = |i: usize| match &inner[i].kind {
+        StmtKind::Set { name, value, .. } => (name.clone(), plain(value)),
+        other => panic!("{other:?}"),
+    };
+    let (name, index) = set(0);
+    assert!(name == "n" && index.as_str().unwrap().contains(r#"loop_info", args: [Expr { id: "#), "{index}");
+    assert!(index.as_str().unwrap().contains(r#"String("index")"#), "{index}");
+    assert!(set(1).1.as_str().unwrap().contains(r#"String("last")"#));
+    assert!(set(2).1.as_str().unwrap().contains(r#"String("item")"#));
+
+    // A while loop has no `last` or `item` (undefined in HA): those stay templates.
+    let (_, p) = script(
+        r#"
+  - repeat:
+      while: "{{ repeat.index < 3 }}"
+      sequence:
+        - variables: {last: "{{ repeat.last }}", it: "{{ repeat.item }}", first: "{{ repeat.first }}"}
+  - variables: {outside: "{{ repeat.index }}"}
+"#,
+    );
+    // Outside any loop `repeat` is whatever HA has (nothing).
+    assert!(
+        matches!(&body(&p)[1].kind, StmtKind::Set { value, .. } if matches!(value.kind, ExprKind::Template { .. }))
+    );
+    let StmtKind::While { body: inner, .. } = &body(&p)[0].kind else { panic!() };
+    let values: Vec<Value> = inner
+        .iter()
+        .map(|s| match &s.kind {
+            StmtKind::Set { value, .. } => plain(value),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(values[0], json!({"template": "{{ repeat.last }}"}));
+    assert_eq!(values[1], json!({"template": "{{ repeat.item }}"}));
+    assert!(values[2].as_str().unwrap().contains(r#"String("first")"#));
 }
 
 #[test]
@@ -527,8 +642,9 @@ fn loop_bodies_that_hide_something_from_the_next_round() {
       sequence:
         - if: "{{ n is defined }}"
           then: [{delay: 1}]
-        - action: weather.get_forecasts
-          response_variable: n
+        - repeat:
+            count: "{{ 1 }}"
+            sequence: [{variables: {n: 1}}]
 "#,
     );
     assert_eq!(top(&imp), ["ha_action_raw"]);
@@ -559,9 +675,11 @@ fn parallel_and_sequence() {
     let (imp, _) = script(
         r#"
   - parallel:
-      - action: weather.get_forecasts
-        response_variable: f
-      - wait_template: "{{ f is defined }}"
+      - repeat:
+          count: "{{ 1 }}"
+          sequence: [{variables: {f: 1}}]
+      - action: notify.notify
+        data: {message: "{{ f }}"}
 "#,
     );
     assert_eq!(top(&imp), ["ha_action_raw"]);

@@ -521,7 +521,7 @@ async fn throttle_wait_until_and_triggered_by() {
     assert_eq!(ha.calls(), ["notify.x"], "throttle lets only the first run through");
     let run = engine.store().list_runs("th", 1).await.unwrap().remove(0);
     let vars = engine.store().get_run(&run.id).await.unwrap().unwrap().trace.unwrap()["variables"].clone();
-    assert_eq!(vars["wait"], json!({"completed": false}));
+    assert_eq!(vars["wait"], json!({"remaining": 0.0, "completed": false}));
     assert_eq!(vars["hit"], json!(true));
 }
 

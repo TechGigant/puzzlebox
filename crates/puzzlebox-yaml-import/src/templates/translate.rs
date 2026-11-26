@@ -394,6 +394,19 @@ impl Tx<'_> {
                 let b = self.blk(if what { "trigger_info" } else { "ha_trigger_data" }, fields, vec![]);
                 self.tr(b, ty)
             }
+            // Inside a loop block, which sets `repeat` like HA does for that kind of loop.
+            "repeat" if !self.b.loops.is_empty() => {
+                let mode = self.b.loops.last().copied().unwrap_or_default();
+                let (what, ty) = match parts.as_slice() {
+                    ["index"] => ("index", Ty::Int),
+                    ["first"] => ("first", Ty::Bool),
+                    ["last"] if matches!(mode, "count" | "for_each") => ("last", Ty::Bool),
+                    ["item"] if mode == "for_each" => ("item", Ty::Any),
+                    _ => return None,
+                };
+                let b = self.blk("loop_info", json!({"WHAT": what}), vec![]);
+                self.tr(b, ty)
+            }
             "states" => match parts.as_slice() {
                 [d, o, "state"] if valid_entity(&format!("{d}.{o}")) => {
                     let b = self.state_plain(&format!("{d}.{o}"));

@@ -106,6 +106,7 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('controls_whileUntil', { BOOL: bool() }),
         block('controls_for', { FROM: num(1), TO: num(10), BY: num(1) }),
         block('controls_forEach'),
+        block('loop_info'),
         block('controls_flow_statements'),
         block('control_stop'),
         label('Organise'),
@@ -273,6 +274,10 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('ha_call_service', {
           TARGET: ent(),
           DATA: { block: { type: 'dict_create', inputs: { ITEMS: { block: { type: 'dict_pair', fields: { KEY: 'brightness_pct' }, inputs: { VALUE: num(80) } } } } } },
+        }),
+        block('ha_call_service_response', {
+          TARGET: ent(),
+          DATA: { block: { type: 'dict_create', inputs: { ITEMS: { block: { type: 'dict_pair', fields: { KEY: 'type' }, inputs: { VALUE: txt('daily') } } } } } },
         }),
         block('ha_fire_event', { EVENT_TYPE: txt('my_event') }),
         block('ha_trigger_template', { FOR: dur(0) }),

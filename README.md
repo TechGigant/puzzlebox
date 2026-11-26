@@ -13,6 +13,10 @@ error handling, schedules, webhooks, HTTP requests and MQTT.
 
 - Blocks for everything in your Home Assistant, with proper names, dropdowns
   and an entity picker. New integrations show up automatically.
+- Your devices' triggers, conditions and actions, grouped by area, and
+  Zigbee2MQTT devices and groups as blocks.
+- Timers ("turn off 5 minutes after the last motion"), "wait until",
+  rate limits, recorder history and scene cycling.
 - Real programming when you need it: variables (also ones that survive a
   restart), lists, dictionaries, loops, functions, try/catch and parallel
   branches.
@@ -57,8 +61,7 @@ You need Home Assistant OS or a Supervised installation.
 2. Install **Puzzlebox** and start it. It appears in the sidebar.
 3. Install the **Puzzlebox** integration through HACS (add this repository as a
    custom repository, category *Integration*) and restart Home Assistant.
-   Home Assistant finds the app by itself; confirm it under
-   **Settings → Devices & services**.
+   The integration finds the app and sets itself up.
 
 The integration is optional, but without it programs don't show up as
 entities and the extra actions, events and webhooks aren't available.
@@ -82,9 +85,18 @@ you enable the program.
 With the integration installed you get:
 
 - a switch per program to enable or disable it, and a button to run it
+- a sensor per global variable
 - the actions `puzzlebox.run_program` and `puzzlebox.set_variable`
 - the events `puzzlebox_program_started` and `puzzlebox_program_finished`
 - webhook triggers on your Home Assistant URL (`/api/webhook/<id>`)
+
+## Zigbee2MQTT
+
+If you use Zigbee2MQTT, its devices and groups appear under **Zigbee2MQTT**
+in the editor: button actions as triggers, "changes" triggers, typed set
+commands and group scenes. Puzzlebox uses the Mosquitto broker app
+automatically. For another broker or base topic, set `mqtt_url` and
+`zigbee2mqtt_base_topics` in the app's options.
 
 ## Extending
 

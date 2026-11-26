@@ -9,6 +9,10 @@ from the sidebar after starting the app.
   from your own installation (including integrations you add later).
 - Variables, lists, dictionaries, loops, functions, try/catch, parallel
   branches, and stored variables that survive restarts.
+- Your devices' own triggers, conditions and actions, grouped by area.
+- Zigbee2MQTT devices and groups as blocks (with the Mosquitto app or any
+  MQTT broker).
+- Timers, "wait until", rate limits, recorder history and scene cycling.
 - Schedules (cron), webhooks, HTTP requests and MQTT.
 - Run history with step traces, a live log and a debugger with breakpoints.
 - Import of existing automations and scripts.
@@ -16,10 +20,11 @@ from the sidebar after starting the app.
 ## Companion integration
 
 Install the **Puzzlebox** integration (HACS → custom repository, category
-*Integration*). Home Assistant finds this app on its own and offers to set
-it up.
+*Integration*) and restart Home Assistant. It finds this app on its own and
+sets itself up; nothing to enter.
 
-Each program then gets a switch to enable it and a button to run it. You can
+Each program then gets a switch to enable it and a button to run it, and
+global variables show up as sensors. You can
 start programs and set stored variables from automations with the
 `puzzlebox.run_program` and `puzzlebox.set_variable` actions, and
 react to runs with the `puzzlebox_program_started` and
@@ -37,3 +42,5 @@ Settings page. See the repository's `sdk/` folder for the formats.
 | Option | Description |
 | --- | --- |
 | `log_level` | `trace`, `debug`, `info` (default), `warn` or `error`. |
+| `mqtt_url` | Leave empty to use the Mosquitto broker app. For another broker: `mqtt://user:password@host:1883`. |
+| `zigbee2mqtt_base_topics` | Base topic of each Zigbee2MQTT instance (default `zigbee2mqtt`). |

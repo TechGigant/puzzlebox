@@ -1,0 +1,17 @@
+alias: Every tag
+triggers:
+  - trigger: state
+    entity_id: !env_var DOOR_SENSOR binary_sensor.front_door
+actions:
+  - action: notify.telegram
+    data:
+      message: !secret telegram_message
+      target: !env_var TELEGRAM_CHAT
+      config: !include telegram.yaml
+      many: !include_dir_list snippets
+      named: !include_dir_named named
+      merged: !include_dir_merge_list merged
+      merged_named: !include_dir_merge_named merged_named
+      device: !input notify_device
+      other: !custom_tag kept
+      typed: !!str 123

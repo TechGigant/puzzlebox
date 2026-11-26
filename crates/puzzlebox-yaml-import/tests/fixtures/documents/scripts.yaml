@@ -1,0 +1,32 @@
+morning_routine:
+  alias: Morning routine
+  description: Lights and coffee
+  icon: mdi:coffee
+  mode: restart
+  fields:
+    brightness:
+      name: Brightness
+      description: How bright
+      default: 60
+      selector:
+        number:
+          min: 0
+          max: 100
+  variables:
+    greeting: Good morning
+  sequence:
+    - action: light.turn_on
+      target:
+        area_id: kitchen
+      data:
+        brightness_pct: "{{ brightness }}"
+    - action: switch.turn_on
+      target:
+        entity_id: switch.coffee_maker
+    - delay: 2
+notify_everyone:
+  sequence:
+    - action: notify.notify
+      data:
+        message: !include messages/hello.txt
+extra_scripts: !include more_scripts.yaml

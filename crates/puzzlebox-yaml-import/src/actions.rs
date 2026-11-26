@@ -50,9 +50,6 @@ impl Lost {
     }
 }
 
-/// Builder state, to undo blocks made for an action that ends up raw after all.
-type Snapshot = (usize, usize, Vec<(String, String)>);
-
 /// Value sockets of a helper block: (socket, YAML value, kind: `n` Number, `s` String, `a` any).
 type Inputs<'a> = Vec<(&'a str, Value, char)>;
 
@@ -316,48 +313,6 @@ impl Builder {
         self.block("ha_action_raw", json!({"CONFIG": yaml(a)}), vec![], None)
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn action(&mut self, a: &Value) -> Value {
-        let blocks = self.seq(std::slice::from_ref(a)).0;
-        self.sequence_block(blocks, a)
-    }
-
-    /// Wraps several statements where one is expected.
-    pub(crate) fn sequence_block(&mut self, mut blocks: Vec<Value>, original: &Value) -> Value {
-        match blocks.len() {
-            0 => self.raw_action(original),
-            1 => blocks.remove(0),
-            _ => {
-                let br = self.block("control_branch", json!({}), vec![("DO", chain(blocks))], None);
-                // A single parallel branch runs sequentially.
-                self.block("control_parallel", json!({}), vec![("BRANCHES", Some(br))], None)
-            }
-        }
-    }
-
-    /// An action target as blocks: entity, area, device, floor and label blocks (a list of
-    /// them when mixed), or a dictionary when it has templates.
-    #[allow(dead_code)]
-    pub(crate) fn target(&mut self, t: &Value) -> Value {
-        let as_map = match t {
-            Value::Object(m) => Some(m.clone()),
-            Value::String(_) | Value::Array(_) => Some(Map::from_iter([("entity_id".to_owned(), t.clone())])),
-            _ => None,
-        };
-        match as_map.and_then(|m| self.target_from(&m)) {
-            Some(b) => b,
-            None => self.value(t),
-        }
-    }
-
-    fn snapshot(&self) -> Snapshot {
-        (self.next_id, self.raw, self.vars.clone())
-    }
-
-    fn restore(&mut self, s: Snapshot) {
-        (self.next_id, self.raw, self.vars) = s;
-    }
-
     fn raw_list(&mut self, list: &[Value]) -> Value {
         match list {
             [one] => self.raw_action(one),
@@ -474,8 +429,8 @@ impl Builder {
         let snap = self.snapshot();
         let res = match k {
             "delay" => self.delay(&m2),
-            "event" => self.event(&m2),
-            "device_id" => self.device(&m2),
+            "event" => self.fire_event(&m2),
+            "device_id" => self.device_action(&m2),
             "scene" => self.scene(&m2),
             "repeat" => self.repeat(&m2),
             "choose" => self.choose(&m2),
@@ -603,18 +558,6 @@ impl Builder {
         self.block("math_number", json!({"NUM": v}), vec![], None)
     }
 
-    /// A seconds value as a duration block, in the largest whole unit.
-    fn duration(&mut self, s: f64) -> Value {
-        let (n, unit) = match s {
-            s if s > 0.0 && s % 86400.0 == 0.0 => (s / 86400.0, "days"),
-            s if s > 0.0 && s % 3600.0 == 0.0 => (s / 3600.0, "hours"),
-            s if s > 0.0 && s % 60.0 == 0.0 => (s / 60.0, "minutes"),
-            s => (s, "seconds"),
-        };
-        let n = self.num(n);
-        self.block("duration", json!({"UNIT": unit}), vec![("N", Some(n))], None)
-    }
-
     fn delay(&mut self, m: &Map<String, Value>) -> Option<(Vec<Value>, Lost)> {
         if !only_keys(m, &["delay"]) {
             return None;
@@ -624,7 +567,7 @@ impl Builder {
         Some((vec![self.block("ha_wait", json!({}), vec![("SECONDS", Some(d))], None)], Lost::default()))
     }
 
-    fn event(&mut self, m: &Map<String, Value>) -> Option<(Vec<Value>, Lost)> {
+    fn fire_event(&mut self, m: &Map<String, Value>) -> Option<(Vec<Value>, Lost)> {
         if !only_keys(m, &["event", "event_data", "event_data_template"]) {
             return None;
         }
@@ -648,7 +591,7 @@ impl Builder {
     }
 
     /// Device actions run through HA exactly as written; the block just shows them.
-    fn device(&mut self, m: &Map<String, Value>) -> Option<(Vec<Value>, Lost)> {
+    fn device_action(&mut self, m: &Map<String, Value>) -> Option<(Vec<Value>, Lost)> {
         let domain = m.get("domain")?.as_str()?;
         m.get("device_id")?.as_str()?;
         let what = m.get("type").and_then(Value::as_str).unwrap_or("action").replace('_', " ");

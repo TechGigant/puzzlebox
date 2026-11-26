@@ -55,13 +55,6 @@ impl Builder {
         self.block("ha_trigger_raw", json!({"CONFIG": yaml(t)}), vec![], None)
     }
 
-    /// One block for one trigger (raw if it would need several blocks).
-    #[allow(dead_code)]
-    pub(crate) fn trigger(&mut self, t: &Value) -> Value {
-        let mut blocks = self.trigger_blocks(t, None, false);
-        blocks.pop().unwrap_or_else(|| self.raw_trigger(t))
-    }
-
     /// Blocks for one trigger. `id` is the user's trigger id when it may become the block id;
     /// `split` allows one block per list item (`at: [...]`, `event_type: [...]`), which HA
     /// treats exactly like separate triggers.
@@ -560,7 +553,6 @@ mod tests {
     fn plain_triggers_keep_ids_raw() {
         let mut b = Builder::default();
         let t = json!({"trigger": "state", "entity_id": "light.a", "to": "on", "id": "x"});
-        assert_eq!(b.trigger(&t)["type"], "ha_trigger_raw");
         assert_eq!(types(&b.triggers(&[t])), ["ha_trigger_raw"]);
     }
 }

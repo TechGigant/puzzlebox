@@ -60,8 +60,8 @@ fn imports_and_compiles_automation() {
     let imp = &out[0];
     assert_eq!(imp.name, "Hallway motion light");
     assert_eq!(imp.mode, "restart");
-    // Only the repeat-until stays raw.
-    assert_eq!(imp.raw_blocks, 1);
+    // Everything imports as blocks.
+    assert_eq!(imp.raw_blocks, 0);
 
     let program = compile(&imp.workspace, &NoExternals).expect("imported workspace compiles");
     let h = &program.handlers[0];
@@ -93,7 +93,8 @@ fn imports_and_compiles_automation() {
     assert_eq!(branches.len(), 1);
     assert!(otherwise.is_some());
     assert!(matches!(&actions[4].kind, StmtKind::Repeat { .. }));
-    assert!(matches!(&actions[5].kind, StmtKind::HaScript { .. }));
+    // repeat-until: loop forever, break once the condition holds after a round.
+    assert!(matches!(&actions[5].kind, StmtKind::While { .. }));
 }
 
 #[test]

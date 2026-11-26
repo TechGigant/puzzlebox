@@ -105,7 +105,7 @@ fn service_calls() {
         d,
         [
             ("brightness".into(), json!(120)),
-            ("color_name".into(), json!({"template": "{{ 'red' }}"})),
+            ("color_name".into(), json!("red")),
             ("flash".into(), json!("long")),
             ("transition".into(), json!(2.0)),
         ]
@@ -127,7 +127,8 @@ fn service_calls() {
         t,
         [
             ("area_id".into(), json!(["hall"])),
-            ("entity_id".into(), json!({"template": "{{ trigger.entity_id }}"}))
+            // The template became the "trigger entity" block.
+            ("entity_id".into(), json!("TriggerData { path: \"entity_id\" }"))
         ]
     );
 }

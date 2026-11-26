@@ -150,34 +150,20 @@ pub(crate) fn is_template(s: &str) -> bool {
     s.contains("{{") || s.contains("{%")
 }
 
-/// Seconds from `"HH:MM:SS"`, `{hours, minutes, seconds, milliseconds}` or a number.
-pub(crate) fn seconds(v: &Value) -> Option<f64> {
-    match v {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) if !is_template(s) => {
-            let parts: Vec<f64> = s.split(':').map(|p| p.trim().parse().ok()).collect::<Option<_>>()?;
-            Some(parts.iter().fold(0.0, |acc, p| acc * 60.0 + p))
-        }
-        Value::Object(m) => {
-            let g = |k: &str| m.get(k).and_then(Value::as_f64).unwrap_or(0.0);
-            Some(
-                g("days") * 86400.0
-                    + g("hours") * 3600.0
-                    + g("minutes") * 60.0
-                    + g("seconds")
-                    + g("milliseconds") / 1000.0,
-            )
-        }
-        _ => None,
-    }
-}
-
 pub(crate) fn only_keys(m: &Map<String, Value>, allowed: &[&str]) -> bool {
     m.keys().all(|k| allowed.contains(&k.as_str()))
 }
 
 pub(crate) fn yaml(v: &Value) -> String {
     serde_yaml::to_string(v).unwrap_or_default().trim_end().to_owned()
+}
+
+/// Builder state to roll back to when an attempt to build blocks is abandoned, so ids stay
+/// contiguous and the raw count stays right.
+pub(crate) struct Snapshot {
+    next_id: usize,
+    raw: usize,
+    vars: usize,
 }
 
 #[derive(Default)]
@@ -265,6 +251,16 @@ impl Builder {
             })
             .collect();
         self.block("dict_create", json!({}), vec![("ITEMS", chain(pairs))], None)
+    }
+
+    pub(crate) fn snapshot(&self) -> Snapshot {
+        Snapshot { next_id: self.next_id, raw: self.raw, vars: self.vars.len() }
+    }
+
+    pub(crate) fn restore(&mut self, s: Snapshot) {
+        self.next_id = s.next_id;
+        self.raw = s.raw;
+        self.vars.truncate(s.vars);
     }
 
     /// A "5 minutes" block for a number of seconds, in the largest unit that fits exactly.

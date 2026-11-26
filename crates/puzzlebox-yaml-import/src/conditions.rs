@@ -30,13 +30,6 @@ enum Enabled {
     Invalid,
 }
 
-/// Block counters to roll back when built blocks are thrown away.
-struct Snapshot {
-    next_id: usize,
-    raw: usize,
-    vars: usize,
-}
-
 fn with(extra: &[&'static str]) -> Vec<&'static str> {
     BASE.iter().chain(extra).copied().collect()
 }
@@ -182,10 +175,6 @@ impl Builder {
     }
 
     // Part of the interface other modules may use.
-    #[allow(dead_code)]
-    pub(crate) fn or_all(&mut self, conds: &[Value]) -> Value {
-        self.combinator("or", conds, &json!({"condition": "or", "conditions": conds}))
-    }
 
     pub(crate) fn raw_condition(&mut self, c: &Value) -> Value {
         self.raw += 1;
@@ -489,15 +478,5 @@ impl Builder {
 
     fn logic(&mut self, op: &str, a: Value, b: Value) -> Value {
         self.block("logic_operation", json!({"OP": op}), vec![("A", Some(a)), ("B", Some(b))], None)
-    }
-
-    fn snapshot(&self) -> Snapshot {
-        Snapshot { next_id: self.next_id, raw: self.raw, vars: self.vars.len() }
-    }
-
-    fn restore(&mut self, s: Snapshot) {
-        self.next_id = s.next_id;
-        self.raw = s.raw;
-        self.vars.truncate(s.vars);
     }
 }

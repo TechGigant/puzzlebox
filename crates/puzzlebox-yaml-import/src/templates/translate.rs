@@ -4,8 +4,9 @@
 //! strictly typed where Puzzlebox is loose: `'5' == 5` is false in Jinja but true in a
 //! Puzzlebox comparison, `'9' < '10'` compares as text in Jinja and as numbers in Puzzlebox,
 //! `True` prints as "True", `20.0` as "20.0" (Puzzlebox: "20"), and `round` rounds half to
-//! even. Whenever the types don't prove both sides agree, translation fails and the caller
-//! keeps the template.
+//! even. The plain blocks are used where the types prove they agree, the "like Home
+//! Assistant" blocks (strict compare, rounding, printing, float/int) where they don't; if
+//! neither is exact, translation fails and the caller keeps the template.
 
 use serde_json::{Value, json};
 
@@ -48,6 +49,41 @@ impl Ty {
     fn prints_same(self) -> bool {
         matches!(self, Ty::Int | Ty::Str | Ty::UStr)
     }
+
+    /// Ordering these two raises in Python whatever the values are.
+    fn never_ordered(self, other: Ty) -> bool {
+        let num = |t: Ty| t.numeric() || t == Ty::Bool;
+        let known = |t: Ty| !matches!(t, Ty::Any | Ty::UStr);
+        self == Ty::None
+            || other == Ty::None
+            || known(self)
+                && known(other)
+                && !(num(self) && num(other) || self == Ty::Str && other == Ty::Str)
+    }
+}
+
+/// Undefined in Jinja where the block gives null, which `is none` tells apart.
+fn maybe_undefined(t: &Tr, e: &E) -> bool {
+    t.ty == Ty::UStr || t.ty == Ty::Any && !matches!(call_name(e), Some(("state_attr", _)))
+}
+
+/// strftime codes that Python (glibc) and the engine (chrono) write the same way.
+fn strftime_ok(f: &str) -> bool {
+    let mut chars = f.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            continue;
+        }
+        let ok = match chars.next() {
+            Some('-') => chars.next().is_some_and(|c| "dmHIMSjy".contains(c)),
+            Some(c) => "HMSdmYyIpAaBbjuwez%".contains(c),
+            None => false,
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) struct Tr {
@@ -222,6 +258,16 @@ impl Tx<'_> {
         self.blk("logic_ternary", json!({}), vec![("IF", Some(c)), ("THEN", Some(a)), ("ELSE", Some(b))])
     }
 
+    /// Compares like Python: text is never read as a number.
+    fn strict(&mut self, op: &str, a: Value, b: Value) -> Value {
+        self.blk("logic_compare_strict", json!({"OP": op}), vec![("A", Some(a)), ("B", Some(b))])
+    }
+
+    fn py_text(&mut self, v: Value, float: bool) -> Value {
+        let mode = if float { "float" } else { "auto" };
+        self.blk("to_text_ha", json!({"NUMBERS": mode}), vec![("VALUE", Some(v))])
+    }
+
     fn arith(&mut self, op: &str, a: Value, b: Value) -> Value {
         self.blk("math_arithmetic", json!({"OP": op}), vec![("A", Some(a)), ("B", Some(b))])
     }
@@ -336,6 +382,14 @@ impl Tx<'_> {
                 self.tr(b, Ty::Bool)
             }
             E::Bin(op, l, r) => self.binary(*op, l, r),
+            E::IsNone(x) => {
+                let t = self.value(x)?;
+                if maybe_undefined(&t, x) {
+                    return None;
+                }
+                let b = self.blk("logic_is_null", json!({}), vec![("VALUE", Some(t.b))]);
+                self.tr(b, Ty::Bool)
+            }
             E::Cmp(op, l, r) => {
                 let b = self.cmp(*op, l, r)?;
                 self.tr(b, Ty::Bool)
@@ -365,7 +419,14 @@ impl Tx<'_> {
             return Some(items);
         }
         let t = self.value(e)?;
-        t.ty.prints_same().then(|| vec![t.b])
+        let b = match t.ty {
+            ty if ty.prints_same() => t.b,
+            Ty::Bool | Ty::None => self.py_text(t.b, false),
+            // Python's timestamps have microseconds, Puzzlebox's milliseconds.
+            Ty::Float if !format!("{e:?}").contains("timestamp") => self.py_text(t.b, true),
+            _ => return None,
+        };
+        Some(vec![b])
     }
 
     /// `trigger.…`, `states.domain.object.…`.
@@ -423,6 +484,14 @@ impl Tx<'_> {
     }
 
     fn call(&mut self, f: &E, args: &Args) -> Option<Tr> {
+        if let E::Attr(base, method) = f
+            && is_now(base)
+            && method == "strftime"
+            && args.kw.is_empty()
+            && let [E::Str(fmt)] = args.pos.as_slice()
+        {
+            return self.time_format(fmt);
+        }
         // now().weekday() / isoweekday() / timestamp()
         if let E::Attr(base, method) = f
             && is_now(base)
@@ -461,12 +530,9 @@ impl Tx<'_> {
                 // is_state (also for 'unknown').
                 let mut acc: Option<Value> = None;
                 for w in wanted {
-                    if numeric_text(w) {
-                        return None;
-                    }
                     let s = self.state_plain(entity);
                     let t = self.text(w);
-                    let eq = self.compare("EQ", s, t);
+                    let eq = if numeric_text(w) { self.strict("EQ", s, t) } else { self.compare("EQ", s, t) };
                     acc = Some(match acc {
                         Some(prev) => self.logic("OR", prev, eq),
                         None => eq,
@@ -487,13 +553,13 @@ impl Tx<'_> {
                 let entity = entity_arg(&pos[0])?;
                 let attr = lit_str(&pos[1])?;
                 // Puzzlebox compares "5" and 5 as equal, Jinja doesn't; text and true/false agree.
-                let v = match &pos[2] {
-                    E::Str(s) if !numeric_text(s) => self.text(s),
-                    E::Bool(v) => self.boolean(*v),
-                    _ => return None,
+                let (v, strict) = match &pos[2] {
+                    E::Str(s) => (self.text(s), numeric_text(s)),
+                    E::Bool(v) => (self.boolean(*v), false),
+                    n => (self.number(lit_num(n)?), true),
                 };
                 let a = self.attribute(entity, attr)?;
-                let b = self.compare("EQ", a, v);
+                let b = if strict { self.strict("EQ", a, v) } else { self.compare("EQ", a, v) };
                 self.tr(b, Ty::Bool)
             }
             "has_value" if args.kw.is_empty() && pos.len() == 1 => {
@@ -609,21 +675,48 @@ impl Tx<'_> {
             "round" if only_args(args, 2, &["precision", "method"]) => {
                 let precision = arg(args, 0, "precision").map_or(Some(0), lit_int)?;
                 let method = arg(args, 1, "method").map_or(Some("common"), lit_str)?;
-                // "common" and "half" round half to even, unlike Puzzlebox's round.
+                if !(0..=15).contains(&precision) {
+                    return None;
+                }
+                // Puzzlebox's round goes away from zero, so only floor and ceil use it.
                 let op = match method {
                     "floor" => "ROUNDDOWN",
                     "ceil" => "ROUNDUP",
-                    _ => return None,
+                    _ => "",
                 };
-                if precision != 0 {
-                    return None;
+                if precision == 0
+                    && !op.is_empty()
+                    && let Some(t) = self.value_if_numeric(x)
+                {
+                    let b = self.blk("math_round", json!({"OP": op}), vec![("NUM", Some(t.b))]);
+                    return self.tr(b, Ty::Int);
                 }
-                let t = self.value(x)?;
-                if !t.ty.numeric() {
-                    return None;
+                // HA treats any other method as "common".
+                let method = if matches!(method, "floor" | "ceil" | "half") { method } else { "common" };
+                let t = self.number_input(x)?;
+                let b = self.blk(
+                    "math_round_ha",
+                    json!({"DECIMALS": precision, "METHOD": method}),
+                    vec![("NUM", Some(t))],
+                );
+                self.tr(b, if precision == 0 { Ty::Int } else { Ty::Float })
+            }
+            "timestamp_custom" if only_args(args, 2, &["date_format", "local"]) => {
+                let is_ts = match x {
+                    E::Call(f, a) => {
+                        a.pos.is_empty()
+                            && a.kw.is_empty()
+                            && matches!(&**f, E::Attr(base, m) if m == "timestamp" && is_now(base))
+                            || matches!(call_name(x), Some(("as_timestamp", a)) if a.kw.is_empty() && matches!(a.pos.as_slice(), [n] if is_now(n)))
+                    }
+                    _ => false,
+                };
+                let local = arg(args, 1, "local").is_none_or(|l| matches!(l, E::Bool(true)));
+                match arg(args, 0, "date_format") {
+                    Some(E::Str(fmt)) if is_ts && local => self.time_format(fmt),
+                    None if is_ts && local => self.time_format("%Y-%m-%d"),
+                    _ => None,
                 }
-                let b = self.blk("math_round", json!({"OP": op}), vec![("NUM", Some(t.b))]);
-                self.tr(b, Ty::Int)
             }
             "default" | "d" if pos.len() == 1 && args.kw.is_empty() => {
                 // Only applies to undefined values; these never are.
@@ -647,19 +740,55 @@ impl Tx<'_> {
     /// `float(x, default)` / `int(x, default)`, also as filters.
     fn convert(&mut self, x: &E, default: Option<&E>, int: bool) -> Option<Tr> {
         if let Some(t) = self.value_if_numeric(x) {
-            // float(number) is that number; int() of a float would truncate.
+            // float(number) is that number; int() of a float truncates.
             return match (int, t.ty) {
                 (false, _) => self.tr(t.b, Ty::Float),
                 (true, Ty::Int) => Some(t),
-                _ => None,
+                _ => {
+                    let b = self.blk("to_number_ha", json!({"KIND": "int"}), vec![("VALUE", Some(t.b))]);
+                    self.tr(b, Ty::Int)
+                }
             };
         }
-        // Without a default, a non-number is an error in HA, which no block reproduces.
-        let d = default?;
-        if int {
+        match default {
+            Some(d) if !int => self.float_with_default(x, d),
+            _ => self.ha_number(x, default, int),
+        }
+    }
+
+    /// The input of float() and friends; a missing entity's null fails like "unknown".
+    fn number_input(&mut self, x: &E) -> Option<Value> {
+        match states_call(x) {
+            Some(entity) => Some(self.state_plain(entity)),
+            None => self.value(x).map(|t| t.b),
+        }
+    }
+
+    /// The "as a number like Home Assistant" block: Python's float() or int(), with the
+    /// default if it fails, or an error without one.
+    fn ha_number(&mut self, x: &E, default: Option<&E>, int: bool) -> Option<Tr> {
+        let v = self.number_input(x)?;
+        let base = if int { Ty::Int } else { Ty::Float };
+        let (d, ty) = match default {
+            Some(d) => {
+                let t = self.value(d)?;
+                let ty = base.join(t.ty);
+                (Some(t.b), ty)
+            }
+            None => (None, base),
+        };
+        let kind = if int { "int" } else { "float" };
+        let b = self.blk("to_number_ha", json!({"KIND": kind}), vec![("VALUE", Some(v)), ("DEFAULT", d)]);
+        self.tr(b, ty)
+    }
+
+    fn time_format(&mut self, fmt: &str) -> Option<Tr> {
+        if !strftime_ok(fmt) {
             return None;
         }
-        self.float_with_default(x, d)
+        let now = self.blk("time_now", json!({}), vec![]);
+        let b = self.blk("time_format", json!({"FORMAT": fmt}), vec![("DATETIME", Some(now))]);
+        self.tr(b, Ty::Str)
     }
 
     fn value_if_numeric(&mut self, x: &E) -> Option<Tr> {
@@ -679,29 +808,17 @@ impl Tx<'_> {
 
     /// `float(x, d)` for a value that isn't certainly a number.
     fn float_with_default(&mut self, x: &E, d: &E) -> Option<Tr> {
-        let dv = lit_num(d)?;
-        let dty = if matches!(d, E::Float(_)) || matches!(d, E::Neg(i) if matches!(**i, E::Float(_))) {
-            Ty::Float
-        } else {
-            Ty::Int
-        };
-        if let Some(entity) = states_call(x) {
+        if let (Some(entity), Some(dv)) = (states_call(x), lit_num(d)) {
+            let dty = if matches!(d, E::Float(_)) || matches!(d, E::Neg(i) if matches!(**i, E::Float(_))) {
+                Ty::Float
+            } else {
+                Ty::Int
+            };
             let default = self.number(dv);
             let b = self.entity_block("ha_number_state", entity, json!({}), vec![("DEFAULT", Some(default))]);
             return self.tr(b, Ty::Float.join(dty));
         }
-        // "number from" gives 0 for null (where float() fails), so only a 0 default agrees.
-        if dv != 0.0 {
-            return None;
-        }
-        let t = self.value(x)?;
-        if !matches!(t.ty, Ty::Str | Ty::UStr | Ty::Any) {
-            return None;
-        }
-        let n = self.blk("text_to_number", json!({}), vec![("TEXT", Some(t.b))]);
-        let zero = self.number(dv);
-        let b = self.blk("logic_or_default", json!({}), vec![("A", Some(n)), ("B", Some(zero))]);
-        self.tr(b, Ty::Float.join(dty))
+        self.ha_number(x, Some(d), false)
     }
 
     fn binary(&mut self, op: Op, l: &E, r: &E) -> Option<Tr> {
@@ -812,9 +929,6 @@ impl Tx<'_> {
             return Some(b);
         }
         if let (Some(entity), Some(s)) = (states_call(l), lit_str(r)) {
-            if numeric_text(s) {
-                return None;
-            }
             // A missing entity is null in Puzzlebox, "unknown" in HA; for (in)equality with
             // other texts both differ, so the plain state block is enough.
             let a = if matches!(op, Cmp::Eq | Cmp::Ne) && s != "unknown" {
@@ -823,7 +937,12 @@ impl Tx<'_> {
                 self.state_exact(entity)
             };
             let b = self.text(s);
-            return Some(self.compare(name, a, b));
+            return Some(if numeric_text(s) { self.strict(name, a, b) } else { self.compare(name, a, b) });
+        }
+        if matches!(op, Cmp::Eq | Cmp::Ne) && (matches!(l, E::None) || matches!(r, E::None)) {
+            let x = if matches!(r, E::None) { l } else { r };
+            let is = self.value(&E::IsNone(Box::new(x.clone())))?;
+            return Some(if op == Cmp::Ne { self.negate(is.b) } else { is.b });
         }
         let a = self.value(l)?;
         let b = self.value(r)?;
@@ -838,7 +957,19 @@ impl Tx<'_> {
         } else {
             false
         };
-        ok.then(|| self.compare(name, a.b, b.b))
+        if ok {
+            return Some(self.compare(name, a.b, b.b));
+        }
+        if eq {
+            // An undefined value isn't none in Jinja but is null here.
+            if a.ty == Ty::None && maybe_undefined(&b, r) || b.ty == Ty::None && maybe_undefined(&a, l) {
+                return None;
+            }
+        } else if a.ty.never_ordered(b.ty) {
+            // Always an error in HA: more likely a mistake to show than a program to run.
+            return None;
+        }
+        Some(self.strict(name, a.b, b.b))
     }
 
     /// `x in [..]` and `'text' in x`.

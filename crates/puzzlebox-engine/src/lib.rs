@@ -5,6 +5,7 @@ mod debug;
 mod engine;
 mod ha;
 mod interp;
+pub mod python;
 mod sources;
 pub mod value;
 

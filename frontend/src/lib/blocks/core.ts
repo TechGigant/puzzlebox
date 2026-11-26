@@ -13,6 +13,49 @@ const dropdown = (name: string, options: [string, string][]) => ({ type: 'field_
 const value = (name: string, check?: string | string[]) => ({ type: 'input_value', name, ...(check ? { check } : {}) });
 const statements = (name: string, check?: string) => ({ type: 'input_statement', name, ...(check ? { check } : {}) });
 const variable = (name: string, v = 'item') => ({ type: 'field_variable', name, variable: v });
+const checkbox = (name: string, checked = true) => ({ type: 'field_checkbox', name, checked });
+const dummy = { type: 'input_dummy' };
+
+/** Short description of a trigger block for the "triggered by" dropdown. */
+function describeTrigger(b: Blockly.Block): string {
+  const t = b.toString(42).replace(/\s+/g, ' ').trim();
+  return t || b.type;
+}
+
+/**
+ * Dropdown of the workspace's trigger blocks (value = block id). Saved ids stay valid while
+ * the workspace is still loading, and a deleted trigger shows as missing instead of vanishing.
+ */
+class FieldTriggerRef extends Blockly.FieldDropdown {
+  private kept: string | null = null;
+
+  constructor() {
+    super(function (this: Blockly.FieldDropdown) {
+      return (this as FieldTriggerRef).menu();
+    });
+  }
+
+  static fromJson() {
+    return new FieldTriggerRef();
+  }
+
+  private menu(): [string, string][] {
+    const ws = this.getSourceBlock()?.workspace;
+    const triggers = (ws?.getAllBlocks(true) ?? []).filter(
+      (b) => !b.isShadow() && b.previousConnection?.getCheck()?.includes('Trigger'),
+    );
+    const opts = triggers.map((b) => [describeTrigger(b), b.id] as [string, string]);
+    if (this.kept && !opts.some(([, id]) => id === this.kept)) {
+      opts.push([ws?.getBlockById(this.kept) ? describeTrigger(ws.getBlockById(this.kept)!) : '(missing trigger)', this.kept]);
+    }
+    return opts.length ? opts : [['(add a trigger first)', '']];
+  }
+
+  protected override doClassValidation_(v?: string): string | null {
+    if (typeof v === 'string') this.kept = v;
+    return super.doClassValidation_(v);
+  }
+}
 
 const trigger = (type: string, message0: string, args0: Json[], tooltip: string): Json => ({
   type,
@@ -131,6 +174,131 @@ export const CORE_BLOCKS: Json[] = [
   expr('ha_template', 'template %1', [multiline('TEMPLATE', "{{ states('sun.sun') }}")], null, 'condition_blocks', 'Rendered by Home Assistant. Program variables and "trigger" are available.'),
   expr('ha_trigger_data', 'trigger %1', [text('PATH', 'to_state.state')], null, 'trigger_blocks', 'A value from what triggered this run (dotted path).'),
 
+
+  // --- timers, waiting & rate limits -----------------------------------------
+  action(
+    'timer_start',
+    'start timer %1 if running %2 %3 delay (s) %4 then do %5',
+    [text('NAME', 'lights off'), dropdown('MODE', [['restart', 'restart'], ['keep running', 'keep']]), dummy, value('SECONDS', 'Number'), statements('DO')],
+    'Runs the blocks inside after the delay, without blocking this run. Starting it again restarts the countdown, so "turn off 5 minutes after the last motion" needs no extra logic.',
+    'flow_blocks',
+  ),
+  action('timer_cancel', 'cancel timer %1', [text('NAME', 'lights off')], 'Stops a running timer before it fires.', 'flow_blocks'),
+  expr('timer_running', 'timer %1 is running', [text('NAME', 'lights off')], 'Boolean', 'flow_blocks', 'True while the timer is counting down.'),
+  action(
+    'wait_until',
+    'wait until %1 stays true for (s) %2 give up after (s) %3',
+    [value('COND', 'Boolean'), value('HOLD', 'Number'), value('TIMEOUT', 'Number')],
+    'Waits until the condition is true (and stays true for the given seconds, if set). The variable "wait" holds {"completed": true/false}; false means the timeout passed first.',
+    'flow_blocks',
+  ),
+  expr(
+    'throttle',
+    'at most once every %1 s',
+    [value('SECONDS', 'Number')],
+    'Boolean',
+    'flow_blocks',
+    'True the first time, then false until the seconds have passed. Put it in an "if" to stop notifications from repeating. Each block keeps its own limit.',
+  ),
+  expr('duration', '%1 %2', [value('N', 'Number'), dropdown('UNIT', [['seconds', 'seconds'], ['minutes', 'minutes'], ['hours', 'hours'], ['days', 'days']])], 'Number', 'time_blocks', 'A duration in seconds.'),
+
+  // --- more state & conditions ---------------------------------------------------
+  expr(
+    'ha_state_for',
+    '%1 has been %2 for %3 s',
+    [entity('ENTITY', 'binary_sensor.motion'), text('STATE', 'off'), value('SECONDS', 'Number')],
+    'Boolean',
+    'condition_blocks',
+    'True if the entity has been in the state for at least the given time.',
+  ),
+  expr('ha_has_value', '%1 has a value', [entity('ENTITY', 'sensor.temperature')], 'Boolean', 'condition_blocks', 'False while the entity is unknown or unavailable (or missing).'),
+  expr('ha_number_state', 'number state of %1 or %2', [entity('ENTITY', 'sensor.temperature'), value('DEFAULT')], 'Number', 'condition_blocks', 'The state as a number, or the fallback when it is not numeric.'),
+  expr('ha_friendly_name', 'name of %1', [entity('ENTITY', 'light.kitchen')], 'String', 'condition_blocks', 'The friendly name of an entity.'),
+  expr(
+    'ha_seconds_since',
+    'seconds since %1 %2',
+    [entity('ENTITY', 'binary_sensor.motion'), dropdown('FIELD', [['changed', 'last_changed'], ['updated', 'last_updated'], ['reported', 'last_reported']])],
+    'Number',
+    'condition_blocks',
+    'How long ago the entity changed state (or reported any update).',
+  ),
+  expr(
+    'ha_state_check',
+    '%1 of %2 %3 %4',
+    [
+      dropdown('MODE', [['any', 'any'], ['all', 'all'], ['none', 'none'], ['how many', 'count']]),
+      value('LIST'),
+      dropdown('OP', [['are', 'is'], ['are not', 'is_not']]),
+      text('STATE', 'on'),
+    ],
+    null,
+    'condition_blocks',
+    'Checks several entities at once (a list or comma-separated ids). "How many" returns a number.',
+  ),
+  expr(
+    'ha_states_aggregate',
+    '%1 of states of %2',
+    [dropdown('OP', [['average', 'average'], ['minimum', 'min'], ['maximum', 'max'], ['sum', 'sum'], ['median', 'median']]), value('LIST')],
+    'Number',
+    'condition_blocks',
+    'Combines the numeric states of several entities, skipping unavailable ones.',
+  ),
+  expr(
+    'time_is_between',
+    'time is between %1 and %2 %3 on Mon %4 Tue %5 Wed %6 Thu %7 Fri %8 Sat %9 Sun %10',
+    [text('AFTER', '22:00'), text('BEFORE', '06:00'), dummy, checkbox('MON'), checkbox('TUE'), checkbox('WED'), checkbox('THU'), checkbox('FRI'), checkbox('SAT'), checkbox('SUN')],
+    'Boolean',
+    'condition_blocks',
+    'True between the two times (it can span midnight) on the ticked days. Leave a time empty for no limit on that side.',
+  ),
+  expr(
+    'ha_history',
+    '%1 of %2 over the last %3 s %4',
+    [
+      dropdown('OP', [['average', 'average'], ['minimum', 'min'], ['maximum', 'max'], ['state', 'state_ago'], ['number of changes', 'changes'], ['seconds in state', 'time_in_state']]),
+      entity('ENTITY', 'sensor.temperature'),
+      value('SECONDS', 'Number'),
+      { ...text('STATE', ''), name: 'STATE' },
+    ],
+    null,
+    'condition_blocks',
+    'From Home Assistant\'s recorder. "state" is the state the given seconds ago; "seconds in state" needs the state in the last field. The average is weighted by time.',
+  ),
+  expr(
+    'ha_entities_in',
+    'entities in %1 %2 of domain %3',
+    [dropdown('KIND', [['area', 'area'], ['floor', 'floor'], ['label', 'label'], ['device', 'device'], ['integration', 'integration']]), text('NAME', 'Kitchen'), text('DOMAIN', 'light')],
+    'Array',
+    'condition_blocks',
+    'Entity ids in an area, floor, label, device or integration (name or id). Leave the domain empty for all.',
+  ),
+
+  // --- scenes --------------------------------------------------------------------
+  expr('ha_scene_last', 'last activated scene of %1', [value('SCENES')], 'String', 'condition_blocks', 'The scene from the list that was activated most recently (empty if none was).'),
+  action(
+    'ha_scene_next',
+    'activate %1 scene of %2',
+    [dropdown('DIRECTION', [['next', 'next'], ['previous', 'previous']]), value('SCENES')],
+    'Activates the scene after (or before) the last activated one in the list, wrapping around. Good for one button that cycles through scenes.',
+  ),
+
+  // --- trigger info ----------------------------------------------------------------
+  expr('triggered_by', 'triggered by %1', [{ type: 'field_trigger_ref', name: 'TRIGGER' }], 'Boolean', 'trigger_blocks', 'True if this run was started by the chosen trigger.'),
+  expr(
+    'trigger_info',
+    'trigger %1 %2',
+    [
+      dropdown('WHAT', [['entity', 'entity'], ['old state', 'from'], ['new state', 'to'], ['old attribute', 'from_attr'], ['new attribute', 'to_attr'], ['trigger id', 'id'], ['type', 'platform']]),
+      { ...text('ATTR', ''), name: 'ATTR' },
+    ],
+    null,
+    'trigger_blocks',
+    'Details of what started this run. For attributes, put the attribute name in the text field.',
+  ),
+
+  // --- values ----------------------------------------------------------------------
+  expr('yaml_value', 'YAML %1', [multiline('CONFIG', '')], null, 'dict_blocks', 'A list, dictionary or other value written as YAML or JSON. Empty means "not set".'),
+
   // --- flow -----------------------------------------------------------------
   {
     type: 'control_try',
@@ -193,6 +361,17 @@ export const CORE_BLOCKS: Json[] = [
   expr('to_text', 'text of %1', [value('VALUE')], 'String', 'text_blocks', 'Converts any value to text.'),
   expr('text_contains', '%1 contains %2', [value('TEXT'), value('FIND')], 'Boolean', 'text_blocks', 'True if the text (or list) contains the value.'),
   expr('time_now', 'now', [], 'String', 'time_blocks', 'Current local date/time (ISO 8601).'),
+  expr('time_today_at', 'today at %1', [text('TIME', '07:00')], 'String', 'time_blocks', 'Today at the given local time.'),
+  expr('time_add', '%1 plus %2 s', [value('DATETIME'), value('SECONDS', 'Number')], 'String', 'time_blocks', 'A date/time moved by some seconds (negative to go back).'),
+  expr('time_seconds_between', 'seconds from %1 to %2', [value('A'), value('B')], 'Number', 'time_blocks', 'Seconds between two date/times (negative if the second is earlier).'),
+  expr(
+    'format_duration',
+    'format %1 s as %2',
+    [value('SECONDS', 'Number'), dropdown('STYLE', [['words (1 h 5 min)', 'words'], ['clock (1:05:00)', 'clock']])],
+    'String',
+    'time_blocks',
+    'Turns seconds into readable text.',
+  ),
   expr(
     'time_part',
     'current %1',
@@ -228,6 +407,7 @@ export function registerCoreBlocks(): void {
   registerFieldMultilineInput();
   registerFieldColour();
   registerFieldEntity();
+  Blockly.fieldRegistry.register('field_trigger_ref', FieldTriggerRef);
   for (const b of CORE_BLOCKS) {
     if ((b as { nextStatement?: unknown }).nextStatement === undefined) delete (b as Json).nextStatement;
   }

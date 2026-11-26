@@ -4,9 +4,12 @@
   import '@blockly/block-plus-minus';
   import * as En from 'blockly/msg/en';
   import { registerCoreBlocks } from './blocks/core';
+  import { registerDeviceBlocks, registerDeviceCallbacks } from './blocks/devices';
+  import { registry } from './registry.svelte';
 
   Blockly.setLocale(En as unknown as Record<string, string>);
   registerCoreBlocks();
+  registerDeviceBlocks();
 
   const breakpointHandlers = new Map<string, (blockId: string) => void>();
   const breakpointSets = new Map<string, Set<string>>();
@@ -176,6 +179,7 @@
 
   $effect(() => {
     if (!workspace) return;
+    registerDeviceCallbacks(workspace, registry.ha);
     workspace.updateToolbox(buildToolbox(extraCategories));
     workspace.setTheme(buildTheme(tokens, extraStyles));
   });
@@ -195,6 +199,7 @@
       maxTrashcanContents: 64,
     });
     registerStoredVariablesCategory(workspace);
+    registerDeviceCallbacks(workspace, registry.ha);
     // The minimap copies the theme once at creation, so rebuild it when the theme changes.
     let minimap = new PositionedMinimap(workspace);
     minimap.init();

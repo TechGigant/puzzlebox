@@ -27,9 +27,14 @@ export function entityState(id: string): EntityState | undefined {
   return cache.find((s) => s.entity_id === id);
 }
 
-/** Resolves which domains the slot this field sits in accepts (set by dynamic blocks). */
-export type DomainResolver = (parent: Blockly.Block, inputName: string) => string[];
-let resolveDomains: DomainResolver = () => [];
+export interface EntityFilter {
+  domains: string[];
+  deviceClasses?: string[];
+}
+
+/** Resolves which entities the slot this field sits in accepts (set by dynamic blocks). */
+export type DomainResolver = (parent: Blockly.Block, inputName: string) => EntityFilter;
+let resolveDomains: DomainResolver = () => ({ domains: [] });
 export function setDomainResolver(r: DomainResolver) {
   resolveDomains = r;
 }
@@ -51,6 +56,19 @@ export abstract class FieldSuggest extends Blockly.FieldTextInput {
 
   protected abstract suggestions(query: string): Suggestion[];
   protected abstract emptyText(): string;
+  protected load(): Promise<void> {
+    return loadEntities();
+  }
+
+  /** Suggestions for the part after the last comma, keeping the values before it. */
+  protected commaList(q: string, candidates: Suggestion[]): Suggestion[] {
+    const raw = (this.htmlInput_ as HTMLInputElement | null)?.value ?? '';
+    const head = raw.includes(',') ? raw.slice(0, raw.lastIndexOf(',') + 1) + ' ' : '';
+    const part = q.includes(',') ? q.slice(q.lastIndexOf(',') + 1).trim() : q;
+    return candidates
+      .filter((c) => !part || c.label.toLowerCase().includes(part) || c.value.toLowerCase().includes(part))
+      .map((c) => ({ ...c, value: head + c.value }));
+  }
 
   protected override showEditor_(e?: Event): void {
     super.showEditor_(e);
@@ -58,7 +76,7 @@ export abstract class FieldSuggest extends Blockly.FieldTextInput {
     if (!input) return;
     input.addEventListener('input', () => this.renderList(input.value));
     input.addEventListener('keydown', (ev) => this.onKey(ev as KeyboardEvent));
-    loadEntities().then(() => this.renderList(input.value));
+    this.load().then(() => this.renderList(input.value));
   }
 
   private onKey(ev: KeyboardEvent) {
@@ -139,28 +157,30 @@ export class FieldEntity extends FieldSuggest {
     return f;
   }
 
-  private allowedDomains(): string[] {
+  private filter(): EntityFilter {
     const block = this.getSourceBlock();
     const parent = block?.getParent();
     if (block && parent) {
       const input = parent.getInputWithBlock(block);
       if (input) {
-        const d = resolveDomains(parent, input.name);
-        if (d.length) return d;
+        const f = resolveDomains(parent, input.name);
+        if (f.domains.length || f.deviceClasses?.length) return f;
       }
     }
-    return this.domains;
+    return { domains: this.domains };
   }
 
   protected suggestions(q: string): Suggestion[] {
-    const domains = this.allowedDomains();
-    return cache
+    const { domains, deviceClasses = [] } = this.filter();
+    const all = cache
       .filter((s) => !domains.length || domains.includes(s.entity_id.split('.')[0]))
-      .filter(
-        (s) =>
-          !q || s.entity_id.toLowerCase().includes(q) || (s.attributes.friendly_name ?? '').toLowerCase().includes(q),
-      )
+      .filter((s) => !deviceClasses.length || deviceClasses.includes(String(s.attributes.device_class ?? '')))
       .map((s) => ({ value: s.entity_id, label: s.attributes.friendly_name ?? s.entity_id, meta: `${s.entity_id} · ${s.state}` }));
+    // Several entities can be listed with commas.
+    const raw = (this.htmlInput_ as HTMLInputElement | null)?.value ?? '';
+    if (raw.includes(',')) return this.commaList(q, all);
+    return all
+      .filter((s) => !q || s.value.toLowerCase().includes(q) || s.label.toLowerCase().includes(q));
   }
 
   protected emptyText() {
@@ -255,18 +275,109 @@ export class FieldStateValue extends FieldSuggest {
   }
 
   protected suggestions(q: string): Suggestion[] {
-    // Suggest for the part after the last comma, keeping earlier values.
-    const raw = (this.htmlInput_ as HTMLInputElement | null)?.value ?? '';
-    const head = raw.includes(',') ? raw.slice(0, raw.lastIndexOf(',') + 1) + ' ' : '';
-    const part = q.includes(',') ? q.slice(q.lastIndexOf(',') + 1).trim() : q;
-    return this.candidates()
-      .filter((v) => !part || v.toLowerCase().includes(part))
-      .map((v) => ({ value: head + v, label: v }));
+    return this.commaList(q, this.candidates().map((v) => ({ value: v, label: v })));
   }
 
   protected emptyText() {
     const block = this.getSourceBlock();
     return block && resolveTarget(block).length ? 'No known values; type one' : 'Choose an entity first';
+  }
+}
+
+/** Free text suggesting fixed options; several values can be separated with commas. */
+export class FieldOptions extends FieldSuggest {
+  constructor(
+    value: string,
+    private options: Suggestion[],
+  ) {
+    super(value);
+  }
+
+  protected override load() {
+    return Promise.resolve();
+  }
+
+  protected suggestions(q: string): Suggestion[] {
+    return this.commaList(q, this.options);
+  }
+
+  protected emptyText() {
+    return 'Type a value';
+  }
+}
+
+export interface HaRegistry {
+  areas: { area_id: string; name: string; floor_id?: string | null }[];
+  floors: { floor_id: string; name: string }[];
+  labels: { label_id: string; name: string }[];
+  devices: { id: string; name: string | null; area_id: string | null; manufacturer?: string | null; model?: string | null }[];
+  entities: { entity_id: string; device_id: string | null; area_id: string | null }[];
+}
+
+let registryCache: HaRegistry | null = null;
+let registryAt = 0;
+let registryInflight: Promise<HaRegistry | null> | null = null;
+
+export function loadRegistry(force = false): Promise<HaRegistry | null> {
+  if (!force && registryCache && Date.now() - registryAt < 60_000) return Promise.resolve(registryCache);
+  registryInflight ??= getJson<HaRegistry>('api/ha/registry')
+    .then((r) => {
+      registryCache = r;
+      registryAt = Date.now();
+      return r;
+    })
+    .catch(() => registryCache)
+    .finally(() => (registryInflight = null));
+  return registryInflight;
+}
+
+export function registrySuggestions(r: HaRegistry | null, kind: string): Suggestion[] {
+  if (!r) return [];
+  const areaName = (id: string | null | undefined) => r.areas.find((a) => a.area_id === id)?.name;
+  switch (kind) {
+    case 'area':
+      return r.areas.map((a) => ({ value: a.area_id, label: a.name, meta: a.area_id }));
+    case 'floor':
+      return r.floors.map((f) => ({ value: f.floor_id, label: f.name, meta: f.floor_id }));
+    case 'label':
+      return r.labels.map((l) => ({ value: l.label_id, label: l.name, meta: l.label_id }));
+    default:
+      return r.devices
+        .filter((d) => d.name)
+        .map((d) => ({ value: d.id, label: d.name ?? d.id, meta: [areaName(d.area_id), d.model].filter(Boolean).join(' · ') }));
+  }
+}
+
+/** Area, floor, label or device picker (the value is the registry id). */
+export class FieldRegistry extends FieldSuggest {
+  constructor(
+    value: string,
+    private kind: string,
+  ) {
+    super(value);
+  }
+
+  protected override load() {
+    return loadRegistry().then(() => undefined);
+  }
+
+  protected suggestions(q: string): Suggestion[] {
+    return this.commaList(q, registrySuggestions(registryCache, this.kind));
+  }
+
+  protected emptyText() {
+    return registryCache ? `No ${this.kind}s found` : 'Loading…';
+  }
+
+  protected override getText_(): string | null {
+    // Show names instead of ids.
+    const v = String(this.getValue() ?? '');
+    if (!registryCache || !v) return null;
+    const names = registrySuggestions(registryCache, this.kind);
+    return v
+      .split(',')
+      .map((id) => names.find((n) => n.value === id.trim())?.label ?? id.trim())
+      .join(', ');
   }
 }
 

@@ -972,7 +972,9 @@ impl<'a> Compiler<'a> {
                 self.builtin("engine:timer_running", vec![name])
             }
             "throttle" => {
-                let key = Expr::lit(b.id(), json!(b.field_str("KEY").unwrap_or("").trim().to_owned()));
+                // Each throttle block limits on its own unless blocks share a key.
+                let key = b.field_str("KEY").map(str::trim).filter(|k| !k.is_empty()).unwrap_or(b.id());
+                let key = Expr::lit(b.id(), json!(key));
                 let secs = self.value(b, "SECONDS");
                 self.builtin("engine:throttle", vec![key, secs])
             }

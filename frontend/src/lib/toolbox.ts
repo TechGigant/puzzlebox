@@ -6,6 +6,13 @@ type Def = Blockly.utils.toolbox.ToolboxDefinition;
 const num = (n: number) => ({ shadow: { type: 'math_number', fields: { NUM: n } } });
 const txt = (s: string) => ({ shadow: { type: 'text', fields: { TEXT: s } } });
 const entity = (e: string) => ({ block: { type: 'ha_entity', fields: { ENTITY: e } } });
+const entities = (...ids: string[]) => ({
+  block: {
+    type: 'lists_create_with',
+    extraState: { itemCount: ids.length },
+    inputs: Object.fromEntries(ids.map((id, i) => [`ADD${i}`, entity(id)])),
+  },
+});
 
 const block = (type: string, inputs?: Record<string, unknown>, extra: Record<string, unknown> = {}): Item =>
   ({ kind: 'block', type, ...(inputs ? { inputs } : {}), ...extra }) as Item;
@@ -19,10 +26,12 @@ export interface ExtraCategory {
   style: string;
   blocks: Item[];
   subcategories?: ExtraCategory[];
+  /** Flyout filled by a registered callback instead of `blocks`. */
+  custom?: string;
 }
 
-
 function extraToItem(c: ExtraCategory): Item {
+  if (c.custom) return cat(c.name, c.style, [], { custom: c.custom });
   const contents: Item[] = [...(c.subcategories ?? []).map(extraToItem), ...c.blocks];
   return cat(c.name, c.style, contents);
 }
@@ -45,6 +54,8 @@ export function buildToolbox(extra: ExtraCategory[] = []): Def {
         block('engine_trigger_webhook'),
         block('engine_trigger_mqtt'),
         block('ha_trigger_raw'),
+        block('triggered_by'),
+        block('trigger_info'),
         block('ha_trigger_data'),
       ]),
       cat('State', 'condition', [
@@ -52,6 +63,17 @@ export function buildToolbox(extra: ExtraCategory[] = []): Def {
         block('ha_state'),
         block('ha_attribute'),
         block('ha_is_state'),
+        block('ha_state_for', { SECONDS: num(300) }),
+        block('ha_has_value'),
+        block('ha_number_state', { DEFAULT: num(0) }),
+        block('ha_friendly_name'),
+        block('ha_seconds_since'),
+        block('time_is_between'),
+        block('ha_state_check', { LIST: entities('light.kitchen', 'light.hallway') }),
+        block('ha_states_aggregate', { LIST: entities('sensor.living_room_temperature', 'sensor.bedroom_temperature') }),
+        block('ha_entities_in'),
+        block('ha_history', { SECONDS: num(3600) }),
+        block('ha_scene_last', { SCENES: entities('scene.day', 'scene.evening') }),
         block('ha_template'),
         block('ha_condition_raw'),
       ]),
@@ -64,6 +86,7 @@ export function buildToolbox(extra: ExtraCategory[] = []): Def {
         block('ha_wait_for_trigger', { TIMEOUT: num(60) }),
         block('ha_log', { MESSAGE: txt('Hello') }),
         block('ha_fire_event', { EVENT_TYPE: txt('my_event') }),
+        block('ha_scene_next', { SCENES: entities('scene.day', 'scene.evening') }),
         block('ha_action_raw'),
       ]),
       ...extra.map(extraToItem),
@@ -71,6 +94,11 @@ export function buildToolbox(extra: ExtraCategory[] = []): Def {
       cat('Flow', 'flow', [
         block('controls_if'),
         block('controls_if', undefined, { extraState: { hasElse: true } }),
+        block('timer_start', { SECONDS: num(300) }),
+        block('timer_cancel'),
+        block('timer_running'),
+        block('wait_until', { TIMEOUT: num(600) }),
+        block('throttle', { SECONDS: num(600) }),
         block('control_try'),
         block('control_throw', { MESSAGE: txt('Something went wrong') }),
         block('control_stop'),
@@ -139,8 +167,17 @@ export function buildToolbox(extra: ExtraCategory[] = []): Def {
         block('dict_values'),
         block('json_parse'),
         block('json_stringify'),
+        block('yaml_value'),
       ]),
-      cat('Time', 'time', [block('time_now'), block('time_part')]),
+      cat('Time', 'time', [
+        block('time_now'),
+        block('time_part'),
+        block('time_today_at'),
+        block('duration', { N: num(5) }),
+        block('time_add', { DATETIME: { block: { type: 'time_now' } }, SECONDS: num(3600) }),
+        block('time_seconds_between', { A: { block: { type: 'time_now' } } }),
+        block('format_duration', { SECONDS: num(3725) }),
+      ]),
       cat('Network', 'http', [
         block('http_request', { URL: txt('https://example.com/api') }),
         block('mqtt_publish', { TOPIC: txt('home/test'), PAYLOAD: txt('hello') }),

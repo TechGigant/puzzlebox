@@ -171,7 +171,13 @@ fn selector_input(
                 .filter(|e| integration.is_none_or(|i| e.get("domain").and_then(Value::as_str) == Some(i)))
                 .filter_map(|e| {
                     Some(SelectOption {
-                        label: e.get("title").and_then(Value::as_str).unwrap_or("entry").to_owned(),
+                        label: e
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .filter(|t| !t.trim().is_empty())
+                            .or_else(|| e.get("domain").and_then(Value::as_str))
+                            .unwrap_or("entry")
+                            .to_owned(),
                         value: e.get("entry_id")?.as_str()?.to_owned(),
                     })
                 })

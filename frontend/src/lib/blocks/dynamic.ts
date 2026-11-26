@@ -3,7 +3,7 @@
 import * as Blockly from 'blockly/core';
 import { FieldColour } from '@blockly/field-colour';
 import type { ExtraCategory } from '../toolbox';
-import { FieldStateValue, setDomainResolver, setTargetResolver } from './field_entity';
+import { FieldOptions, FieldRegistry, FieldStateValue, setDomainResolver, setTargetResolver } from './field_entity';
 
 export interface SelectOption {
   label: string;
@@ -14,8 +14,9 @@ export type ParamInput =
   | { input: 'number'; min?: number; max?: number; step?: number; unit?: string }
   | { input: 'text'; multiline?: boolean }
   | { input: 'boolean' }
-  | { input: 'select'; options: SelectOption[] }
-  | { input: 'entity'; domains: string[] }
+  | { input: 'select'; options: SelectOption[]; multiple?: boolean }
+  | { input: 'entity'; domains: string[]; multiple?: boolean; device_classes?: string[] }
+  | { input: 'registry'; kind: string; multiple?: boolean }
   | { input: 'duration' }
   | { input: 'time' }
   | { input: 'color' }
@@ -39,7 +40,7 @@ export interface BlockDef {
   title: string;
   tooltip?: string;
   help_url?: string;
-  target?: { domains: string[]; required: boolean };
+  target?: { domains: string[]; device_classes?: string[]; required: boolean };
   params: Param[];
   source: string;
 }
@@ -72,10 +73,10 @@ const THRESHOLD_TYPES: [string, string][] = [
 
 setDomainResolver((parent, inputName) => {
   const def = defs.get(parent.type);
-  if (!def) return [];
-  if (inputName === 'TARGET') return def.target?.domains ?? [];
+  if (!def) return { domains: [] };
+  if (inputName === 'TARGET') return { domains: def.target?.domains ?? [], deviceClasses: def.target?.device_classes };
   const p = def.params.find((x) => slot(x) === inputName);
-  return p?.input === 'entity' ? p.domains : [];
+  return p?.input === 'entity' ? { domains: p.domains, deviceClasses: p.device_classes } : { domains: [] };
 });
 
 function shadowFor(p: Param): Blockly.serialization.blocks.State | null {
@@ -89,6 +90,9 @@ function shadowFor(p: Param): Blockly.serialization.blocks.State | null {
       return { type: 'text', fields: { TEXT: typeof d === 'string' ? d : '' } };
     case 'entity':
       return { type: 'ha_entity', fields: { ENTITY: typeof d === 'string' ? d : '' } };
+    case 'any':
+      // Lists, dictionaries and other structured values; empty means "not set".
+      return { type: 'yaml_value', fields: { CONFIG: d == null ? '' : typeof d === 'string' ? d : JSON.stringify(d) } };
     default:
       return null;
   }
@@ -107,7 +111,13 @@ function appendParam(block: DynBlock, p: Param, withShadow: boolean, removable: 
   let input: Blockly.Input;
   switch (p.input) {
     case 'select': {
-      const options = p.options.map((o) => [o.label, o.value] as [string, string]);
+      if (p.multiple) {
+        const d = Array.isArray(p.default) ? p.default.join(', ') : typeof p.default === 'string' ? p.default : '';
+        const field = new FieldOptions(d, p.options.map((o) => ({ value: o.value, label: o.label })));
+        input = block.appendDummyInput(name).appendField(p.label).appendField(field, name);
+        break;
+      }
+      const options = p.options.map((o) => [o.label || o.value, o.value] as [string, string]);
       const field = new Blockly.FieldDropdown(options);
       if (typeof p.default === 'string' && p.options.some((o) => o.value === p.default)) field.setValue(p.default);
       input = block.appendDummyInput(name).appendField(p.label).appendField(field, name);
@@ -118,6 +128,12 @@ function appendParam(block: DynBlock, p: Param, withShadow: boolean, removable: 
         .appendDummyInput(name)
         .appendField(p.label)
         .appendField(new Blockly.FieldCheckbox(p.default === true ? 'TRUE' : 'FALSE'), name);
+      break;
+    case 'registry':
+      input = block
+        .appendDummyInput(name)
+        .appendField(p.label)
+        .appendField(new FieldRegistry(typeof p.default === 'string' ? p.default : '', p.kind), name);
       break;
     case 'color':
       input = block.appendDummyInput(name).appendField(p.label).appendField(new FieldColour('#ffcc66'), name);
@@ -131,17 +147,27 @@ function appendParam(block: DynBlock, p: Param, withShadow: boolean, removable: 
     case 'threshold': {
       // One HA value, several editor parts: type, optional unit, and one or two numbers.
       const types = p.mode === 'changed' ? [...THRESHOLD_TYPES, ['any value', 'any'] as [string, string]] : THRESHOLD_TYPES;
-      input = block.appendDummyInput(name).appendField(p.label).appendField(new Blockly.FieldDropdown(types), name);
+      // Only "between" and "outside" use the second number; "any value" uses none.
+      const showInputs = (type: string) => {
+        block.getInput(`${name}__a`)?.setVisible(type !== 'any');
+        block.getInput(`${name}__b`)?.setVisible(type === 'between' || type === 'outside');
+      };
+      const typeField = new Blockly.FieldDropdown(types, (v) => {
+        if (v) setTimeout(() => (showInputs(v), block.rendered && block.render()));
+        return v;
+      });
+      input = block.appendDummyInput(name).appendField(p.label).appendField(typeField, name);
       if (p.units.length) {
         const units = p.units.map((u) => [u ?? 'no unit', u ?? '__none__'] as [string, string]);
         input.appendField(new Blockly.FieldDropdown(units), `${name}__unit`);
       }
-      for (const [suffix, label] of [['a', 'value'], ['b', 'and (between / outside)']]) {
+      for (const [suffix, label] of [['a', 'value'], ['b', 'and']]) {
         const v = block.appendValueInput(`${name}__${suffix}`).appendField(label).setCheck('Number');
         v.setAlign(Blockly.inputs.Align.RIGHT);
         if (withShadow) v.connection?.setShadowState({ type: 'math_number', fields: { NUM: suffix === 'a' ? 0 : 100 } });
         if (block.getInput('ADD')) block.moveInputBefore(v.name, 'ADD');
       }
+      showInputs(typeField.getValue() ?? 'above');
       break;
     }
     default:
@@ -293,13 +319,24 @@ export function installRegistry(blocks: BlockDef[]): { categories: ExtraCategory
   defs.clear();
   for (const b of blocks) defineBlock(b);
 
-  const group = (list: BlockDef[]) => {
+  const group = (list: BlockDef[], depth = 0) => {
     const by = new Map<string, BlockDef[]>();
     for (const b of list) {
-      const key = b.category[0] ?? 'Other';
+      const key = b.category[depth] ?? 'Other';
       by.set(key, [...(by.get(key) ?? []), b]);
     }
     return [...by.entries()].sort(([a], [b]) => a.localeCompare(b));
+  };
+  // Categories nest when blocks have a second category level (e.g. Zigbee2MQTT → device).
+  const tree = (name: string, list: BlockDef[], depth: number): ExtraCategory => {
+    const flat = list.filter((b) => b.category.length <= depth + 1);
+    const nested = list.filter((b) => b.category.length > depth + 1);
+    return {
+      name,
+      style: list[0].style,
+      blocks: categoryContents(flat),
+      subcategories: group(nested, depth + 1).map(([n, l]) => tree(n, l, depth + 1)),
+    };
   };
 
   const ha = blocks.filter((b) => b.source === 'ha');
@@ -313,9 +350,7 @@ export function installRegistry(blocks: BlockDef[]): { categories: ExtraCategory
       subcategories: group(ha).map(([name, list]) => ({ name, style: 'action', blocks: categoryContents(list) })),
     });
   }
-  for (const [name, list] of group(others)) {
-    categories.push({ name, style: list[0].style, blocks: categoryContents(list) });
-  }
+  for (const [name, list] of group(others)) categories.push(tree(name, list, 0));
   const styles = [...new Set(blocks.map((b) => b.style))];
   return { categories, styles };
 }

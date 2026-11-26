@@ -482,6 +482,12 @@ pub fn ha_builtin(name: &str, a: &[Value], lookup: &dyn Fn(&str) -> Option<Value
                 "min" => num(vals.iter().copied().fold(f64::INFINITY, f64::min)),
                 "max" => num(vals.iter().copied().fold(f64::NEG_INFINITY, f64::max)),
                 "sum" => num(vals.iter().sum()),
+                "median" => {
+                    let mut v = vals;
+                    v.sort_by(f64::total_cmp);
+                    let m = v.len() / 2;
+                    num(if v.len() % 2 == 0 { (v[m - 1] + v[m]) / 2.0 } else { v[m] })
+                }
                 _ => num(vals.iter().sum::<f64>() / vals.len() as f64),
             }
         }

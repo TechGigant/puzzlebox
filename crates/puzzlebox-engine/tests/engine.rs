@@ -538,3 +538,24 @@ async fn setting_a_global_announces_it() {
     assert_eq!(changed, ("shared".to_owned(), json!(7)));
     assert_eq!(engine.globals()["shared"], json!(7));
 }
+
+#[tokio::test]
+async fn loose_stacks_run_on_request_only() {
+    let (engine, ha) = setup().await;
+    let mut events = engine.subscribe();
+    let mut loose = call("loose", "light.turn_on", "light.a");
+    loose["x"] = json!(300);
+    let half_built = b("math_number", "stray", json!({"NUM": 1}), json!({}));
+    let ws = workspace(vec![on_run(call("main", "light.turn_off", "light.a")), loose, half_built], json!([]));
+    let (_, errors) = engine.save(program("lo", ws, "parallel")).await.unwrap();
+    assert!(errors.is_empty(), "loose blocks don't make the program invalid: {errors:?}");
+    let idx = engine.handler_index("lo", "loose").expect("loose stack has a handler");
+    assert_eq!(engine.handler_index("lo", "stray"), None);
+    assert!(engine.run_now("lo", Some(idx), None));
+    next_finished(&mut events).await;
+    assert_eq!(ha.calls(), ["light.turn_on"]);
+    // The default run is still the entry block, not the loose stack.
+    assert!(engine.run_now("lo", None, None));
+    next_finished(&mut events).await;
+    assert_eq!(ha.calls(), ["light.turn_on", "light.turn_off"]);
+}

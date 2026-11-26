@@ -6,10 +6,45 @@
   import { registerCoreBlocks } from './blocks/core';
   import { registerDeviceBlocks, registerDeviceCallbacks } from './blocks/devices';
   import { registry } from './registry.svelte';
+  import { registerSwitchMenu } from './editor/switching';
+  import { registerUsageMenu } from './editor/usages';
 
   Blockly.setLocale(En as unknown as Record<string, string>);
   registerCoreBlocks();
   registerDeviceBlocks();
+  registerSwitchMenu();
+  registerUsageMenu();
+
+  /** Per-workspace callbacks for the editor that owns it (menus are registered globally). */
+  const runStackHandlers = new Map<string, (topBlockId: string) => void>();
+  const quickAddHandlers = new Map<string, () => void>();
+  const ENTRY_BLOCKS = new Set(['ha_when', 'ha_on_run', 'ha_on_start']);
+
+  Blockly.ContextMenuRegistry.registry.register({
+    id: 'puzzlebox_run_stack',
+    scopeType: Blockly.ContextMenuRegistry.ScopeType.BLOCK,
+    weight: -1,
+    displayText: (scope) => (ENTRY_BLOCKS.has(scope.block!.getRootBlock().type) ? 'Run these blocks now' : 'Run this stack'),
+    preconditionFn: (scope) => {
+      const b = scope.block;
+      if (!b || b.isInFlyout || !runStackHandlers.has(b.workspace.id)) return 'hidden';
+      const root = b.getRootBlock();
+      // Entry blocks, or loose statement stacks (not values or triggers).
+      if (ENTRY_BLOCKS.has(root.type)) return 'enabled';
+      if (root.outputConnection || root.previousConnection?.getCheck()?.includes('Trigger')) return 'hidden';
+      return root.previousConnection || root.nextConnection ? 'enabled' : 'hidden';
+    },
+    callback: (scope) => runStackHandlers.get(scope.block!.workspace.id)?.(scope.block!.getRootBlock().id),
+  });
+
+  Blockly.ContextMenuRegistry.registry.register({
+    id: 'puzzlebox_quick_add',
+    scopeType: Blockly.ContextMenuRegistry.ScopeType.WORKSPACE,
+    weight: -10,
+    displayText: () => 'Add a block… (Ctrl+Space)',
+    preconditionFn: (scope) => (scope.workspace && quickAddHandlers.has(scope.workspace.id) ? 'enabled' : 'hidden'),
+    callback: (scope) => quickAddHandlers.get(scope.workspace!.id)?.(),
+  });
 
   const breakpointHandlers = new Map<string, (blockId: string) => void>();
   const breakpointSets = new Map<string, Set<string>>();
@@ -62,7 +97,11 @@
   import { WorkspaceSearch } from '@blockly/plugin-workspace-search';
   import { buildTheme, applyCssTokens, readHaTokens, watchTheme, type HaTokens } from './theme';
   import { buildToolbox, registerStoredVariablesCategory, type ExtraCategory } from './toolbox';
-  import type { CompileError } from './api';
+  import { Backpack } from '@blockly/workspace-backpack';
+  import { api, type CompileError } from './api';
+  import QuickAdd from './editor/QuickAdd.svelte';
+  import { insert, toolboxEntries, workspaceEntries, type Entry } from './editor/quickadd';
+  import { applyZebra, loadPrefs, rendererName } from './editor/appearance';
 
   let {
     initial,
@@ -70,13 +109,39 @@
     extraStyles = [],
     onchange,
     onbreakpoints,
+    onrunstack,
   }: {
     initial?: object;
     extraCategories?: ExtraCategory[];
     extraStyles?: string[];
     onchange?: (state: object) => void;
     onbreakpoints?: (ids: string[]) => void;
+    /** "Run this stack": the id of the stack's top block. */
+    onrunstack?: (topBlockId: string) => void;
   } = $props();
+
+  const prefs = loadPrefs();
+  let quick = $state<{ entries: Entry[]; x: number; y: number; at: Blockly.utils.Coordinate } | null>(null);
+  let mouse = { x: 80, y: 80, clientX: 0, clientY: 0 };
+  let toolboxDef: Blockly.utils.toolbox.ToolboxInfo | null = null;
+
+  function openQuickAdd() {
+    if (!workspace || !toolboxDef) return;
+    const rect = host.getBoundingClientRect();
+    const x = Math.min(Math.max(mouse.x, 16), rect.width - 300);
+    const y = Math.min(Math.max(mouse.y, 16), rect.height - 200);
+    // Where the block lands if nothing is selected: under the mouse.
+    const at = mouse.clientX
+      ? Blockly.utils.svgMath.screenToWsCoordinates(workspace, new Blockly.utils.Coordinate(mouse.clientX, mouse.clientY))
+      : new Blockly.utils.Coordinate(40, 40);
+    quick = { entries: [...workspaceEntries(workspace), ...toolboxEntries(toolboxDef)], x, y, at };
+  }
+
+  function pick(e: Entry) {
+    if (workspace && quick) insert(workspace, e.state, quick.at);
+    quick = null;
+    host.querySelector<HTMLElement>('.blocklySvg')?.focus();
+  }
 
   let host: HTMLDivElement;
   let workspace: Blockly.WorkspaceSvg | null = null;
@@ -180,17 +245,19 @@
   $effect(() => {
     if (!workspace) return;
     registerDeviceCallbacks(workspace, registry.ha);
-    workspace.updateToolbox(buildToolbox(extraCategories));
+    toolboxDef = buildToolbox(extraCategories);
+    workspace.updateToolbox(toolboxDef);
     workspace.setTheme(buildTheme(tokens, extraStyles));
   });
 
   onMount(() => {
     applyCssTokens(tokens);
+    toolboxDef = buildToolbox(extraCategories);
     workspace = Blockly.inject(host, {
-      renderer: 'zelos',
+      renderer: rendererName(prefs),
       media: 'blockly-media/',
       theme: buildTheme(tokens, extraStyles),
-      toolbox: buildToolbox(extraCategories),
+      toolbox: toolboxDef,
       grid: { spacing: 24, length: 2, colour: tokens.divider, snap: true },
       zoom: { controls: true, wheel: true, startScale: 0.75, maxScale: 2, minScale: 0.3, scaleSpeed: 1.15 },
       move: { scrollbars: true, drag: true, wheel: false },
@@ -219,6 +286,55 @@
     };
     new WorkspaceSearch(workspace).init();
 
+    const backpack = new Backpack(workspace, {
+      skipSerializerRegistration: true,
+      allowEmptyBackpackOpen: false,
+      useFilledBackpackImage: true,
+      contextMenu: { copyAllToBackpack: true, pasteAllToBackpack: true, emptyBackpack: true, removeFromBackpack: true },
+    });
+    backpack.init();
+    // The backpack is shared by all programs and kept by the app, not in this program.
+    let restoring = true;
+    api
+      .backpack()
+      .then((c) => backpack.setContents(c))
+      .catch(() => {})
+      .finally(() => (restoring = false));
+
+    const wsId = workspace.id;
+    runStackHandlers.set(wsId, (id) => onrunstack?.(id));
+    quickAddHandlers.set(wsId, openQuickAdd);
+    const onMouse = (e: MouseEvent) => {
+      const r = host.getBoundingClientRect();
+      mouse = { x: e.clientX - r.left, y: e.clientY - r.top, clientX: e.clientX, clientY: e.clientY };
+    };
+    const onKey = (e: KeyboardEvent) => {
+      const typing = (e.target as HTMLElement)?.closest('input, textarea, [contenteditable]');
+      if (e.code === 'Space' && (e.ctrlKey || e.metaKey) && !typing) {
+        e.preventDefault();
+        openQuickAdd();
+      }
+    };
+    const onMiddle = (e: MouseEvent) => {
+      if (e.button !== 1 || !(e.target as Element)?.classList?.contains('blocklyMainBackground')) return;
+      e.preventDefault();
+      onMouse(e);
+      openQuickAdd();
+    };
+    host.addEventListener('mousemove', onMouse);
+    host.addEventListener('keydown', onKey);
+    host.addEventListener('mousedown', onMiddle);
+
+    let zebraQueued = false;
+    const zebra = () => {
+      if (zebraQueued) return;
+      zebraQueued = true;
+      requestAnimationFrame(() => {
+        zebraQueued = false;
+        if (workspace) applyZebra(workspace, prefs.zebra);
+      });
+    };
+
     breakpointHandlers.set(workspace.id, toggleBreakpoint);
     breakpointSets.set(workspace.id, breakpoints);
 
@@ -230,6 +346,10 @@
     });
 
     workspace.addChangeListener((e) => {
+      if (e.type === 'backpack_change' && !restoring) {
+        api.setBackpack(backpack.getContents()).catch(() => {});
+      }
+      if (!e.isUiEvent || e.type === Blockly.Events.THEME_CHANGE) zebra();
       if (loading || e.isUiEvent || !onchange || !workspace) return;
       if (e.type === Blockly.Events.BLOCK_DELETE) {
         for (const id of (e as Blockly.Events.BlockDelete).ids ?? []) breakpoints.delete(id);
@@ -244,6 +364,11 @@
 
     return () => {
       resize.disconnect();
+      host.removeEventListener('mousemove', onMouse);
+      host.removeEventListener('keydown', onKey);
+      host.removeEventListener('mousedown', onMiddle);
+      runStackHandlers.delete(wsId);
+      quickAddHandlers.delete(wsId);
       stopTheme();
       if (workspace) {
         breakpointHandlers.delete(workspace.id);
@@ -256,6 +381,9 @@
 </script>
 
 <div class="workspace" bind:this={host}></div>
+{#if quick}
+  <QuickAdd entries={quick.entries} x={quick.x} y={quick.y} onpick={pick} onclose={() => (quick = null)} />
+{/if}
 
 <style>
   .workspace {
@@ -307,6 +435,10 @@
     stroke: #e53935;
     stroke-width: 4px;
     filter: drop-shadow(0 0 8px #e53935);
+  }
+  .workspace :global(.pb-usage > .blocklyPath) {
+    stroke: var(--pb-primary);
+    stroke-width: 3px;
   }
   .workspace :global(.pb-failed > .blocklyPath) {
     stroke: #e53935;

@@ -36,7 +36,7 @@ function extraToItem(c: ExtraCategory): Item {
   return cat(c.name, c.style, contents);
 }
 
-export function buildToolbox(extra: ExtraCategory[] = []): Def {
+export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox.ToolboxInfo {
   return {
     kind: 'categoryToolbox',
     contents: [

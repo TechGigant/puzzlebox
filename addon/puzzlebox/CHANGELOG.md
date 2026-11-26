@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.0
+
+- **Add a block by typing**: press Ctrl+Space (or middle-click the canvas),
+  type what you want ("turn off light", "wait until") and press Enter. The
+  block lands after the selected block, or where you clicked.
+- **Switch a block** from its right-click menu to a related one: turn on ↔
+  turn off ↔ toggle, state ↔ number state, entity ↔ area, a device's other
+  triggers or actions, and so on. Inner blocks and the stack stay in place.
+- **Find uses** of a variable, timer, entity, function or area (repeat to
+  step through them), and **rename** a variable, timer or entity everywhere
+  in the program.
+- **Run this stack** from the right-click menu. Loose stacks of blocks
+  outside any "when" block run only this way, so you can keep test snippets
+  next to a program.
+- **Backpack** (top right): drop blocks in to reuse them in other programs.
+- Nested blocks of the same colour alternate between two shades, and there's
+  a compact block size for big programs (Settings → Editor).
+
 ## 0.3.0
 
 - **Version check between the app and the integration.** On connecting, both

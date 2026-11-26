@@ -1,7 +1,7 @@
 {
   "name": "puzzlebox-frontend",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -26,6 +26,7 @@
     "@blockly/field-colour": "^13.5.0",
     "@blockly/field-multilineinput": "^13.5.0",
     "@blockly/plugin-workspace-search": "^13.5.0",
+    "@blockly/workspace-backpack": "^13.5.0",
     "@blockly/workspace-minimap": "^13.5.0",
     "blockly": "^13.5.0"
   }

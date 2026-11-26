@@ -116,6 +116,8 @@ pub async fn delete(State(st): State<AppState>, Path(id): Path<String>) -> ApiRe
 #[derive(Deserialize, Default)]
 pub struct RunInput {
     handler: Option<usize>,
+    /// Top block of the stack to run (an entry block or a loose stack), instead of `handler`.
+    block: Option<String>,
     trigger: Option<Value>,
 }
 
@@ -125,7 +127,16 @@ pub async fn run(
     body: Option<Json<RunInput>>,
 ) -> ApiResult {
     let input = body.map(|b| b.0).unwrap_or_default();
-    if !st.engine.run_now(&id, input.handler, input.trigger) {
+    let handler = match &input.block {
+        Some(block) => Some(st.engine.handler_index(&id, block).ok_or_else(|| {
+            ApiError(
+                StatusCode::CONFLICT,
+                "this stack can't run: save the program, and fix any problems in it".into(),
+            )
+        })?),
+        None => input.handler,
+    };
+    if !st.engine.run_now(&id, handler, input.trigger) {
         return Err(ApiError(StatusCode::CONFLICT, "program is not running (disabled or invalid)".into()));
     }
     Ok(Json(json!({"ok": true})))

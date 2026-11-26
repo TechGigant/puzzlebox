@@ -82,6 +82,16 @@
     }
   }
 
+  async function runStack(topBlockId: string) {
+    if (dirty) await save();
+    try {
+      await api.runStack(id, topBlockId);
+      flash('Running');
+    } catch (e) {
+      flash(String(e));
+    }
+  }
+
   async function remove() {
     if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
     await api.remove(id);
@@ -208,6 +218,7 @@
           extraStyles={registry.styles}
           {onchange}
           onbreakpoints={setBreakpoints}
+          onrunstack={runStack}
         />
       {/if}
     </div>

@@ -22,6 +22,9 @@ error handling, schedules, webhooks, HTTP requests and MQTT.
   branches.
 - A run history with step-by-step traces, a live log, and a debugger with
   breakpoints.
+- Editor helpers: add blocks by typing (Ctrl+Space), switch a block to a
+  related one, find and rename uses, run a single stack, and a backpack for
+  reusing blocks across programs.
 - Import your existing automations and scripts.
 - Each program gets a switch and a run button in Home Assistant.
 - Follows your Home Assistant theme, including dark mode.

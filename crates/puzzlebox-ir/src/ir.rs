@@ -32,6 +32,9 @@ pub enum HandlerKind {
     Timer {
         name: String,
     },
+    /// A loose stack of blocks outside any entry block; runs only when asked to
+    /// ("Run this stack" in the editor).
+    Manual,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

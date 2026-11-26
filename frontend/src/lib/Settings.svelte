@@ -2,6 +2,10 @@
   import { onMount } from 'svelte';
   import { api, apiUrl, type PluginsInfo, type Settings } from './api';
   import { loadRegistry, registry } from './registry.svelte';
+  import { loadPrefs, savePrefs } from './editor/appearance';
+
+  let prefs = $state(loadPrefs());
+  $effect(() => savePrefs({ ...prefs }));
 
   let settings = $state<Settings | null>(null);
   let plugins = $state<PluginsInfo | null>(null);
@@ -46,6 +50,17 @@
 
 <div class="page">
   {#if message}<p class="message">{message}</p>{/if}
+
+  <section>
+    <h2>Editor</h2>
+    <label class="check"><input type="checkbox" bind:checked={prefs.zebra} /> Alternate shades for blocks nested in blocks of the same colour</label>
+    <label class="check"><input type="checkbox" bind:checked={prefs.compact} /> Compact blocks (smaller, for big programs)</label>
+    <p class="muted">
+      Applies when you next open a program; saved in this browser. In the editor, press <kbd>Ctrl</kbd>+<kbd>Space</kbd>
+      (or middle-click the canvas) to add a block by typing, and right-click a block to switch it to a related one, find
+      its uses or run its stack.
+    </p>
+  </section>
 
   <section>
     <h2>Home Assistant integration</h2>
@@ -194,6 +209,19 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+  }
+  .check {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: 6px 0;
+  }
+  kbd {
+    font: inherit;
+    font-size: 12px;
+    padding: 0 4px;
+    border: 1px solid var(--pb-divider);
+    border-radius: 4px;
   }
   .row {
     display: flex;

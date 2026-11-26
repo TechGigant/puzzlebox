@@ -138,6 +138,17 @@ export function devicesCategory(reg: HaRegistry | null): ExtraCategory | null {
 }
 
 const automations = new Map<string, DeviceAutomation[]>();
+
+/** Other loaded automations of the same device and kind, as states for the same block type. */
+export function deviceAlternatives(block: Blockly.Block): { label: string; extraState: DeviceState }[] {
+  const st = (block as DeviceBlock).device;
+  const deviceId = st?.config?.device_id;
+  const kind = (Object.entries(BLOCK_TYPE).find(([, t]) => t === block.type)?.[0] ?? '') as DeviceAutomation['kind'];
+  if (typeof deviceId !== 'string' || !kind) return [];
+  return (automations.get(deviceId) ?? [])
+    .filter((a) => a.kind === kind && a.label !== st?.label)
+    .map((a) => ({ label: a.label, extraState: { config: a.config, label: a.label, params: a.params } }));
+}
 const pending = new Set<string>();
 
 function shadowsFor(params: DeviceParam[]) {

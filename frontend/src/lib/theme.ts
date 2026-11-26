@@ -139,6 +139,14 @@ export function buildTheme(t: HaTokens, extraStyles: string[] = []): Blockly.The
       colourTertiary: mix(colour, '#000000', 0.25),
       hat: '',
     };
+    // Second shade for nested blocks of the same colour (zebra striping).
+    const alt = mix(colour, t.dark ? '#ffffff' : '#000000', t.dark ? 0.18 : 0.16);
+    blockStyles[`${name}_blocks_alt`] = {
+      colourPrimary: alt,
+      colourSecondary: mix(alt, t.card, 0.35),
+      colourTertiary: mix(alt, '#000000', 0.25),
+      hat: '',
+    };
     categoryStyles[`${name}_category`] = { colour };
   }
 

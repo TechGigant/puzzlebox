@@ -47,6 +47,14 @@ export interface BlockDef {
 
 const defs = new Map<string, BlockDef>();
 
+export function blockDef(type: string): BlockDef | undefined {
+  return defs.get(type);
+}
+
+export function allBlockDefs(): Iterable<BlockDef> {
+  return defs.values();
+}
+
 const slot = (p: Param) => `P_${p.name}`;
 
 const REMOVE_ICON =

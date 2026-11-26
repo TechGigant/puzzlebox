@@ -109,6 +109,7 @@ pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec
     }
 
     let mut program = Program::default();
+    let mut loose = Vec::new();
     let tops = workspace.pointer("/blocks/blocks").and_then(Value::as_array).cloned().unwrap_or_default();
     for top in &tops {
         let b = Block(top);
@@ -164,9 +165,22 @@ pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec
             ty if ty.starts_with("ha_on") || ty.starts_with("ha_when") => {
                 c.err(&b, format!("unknown entry block '{ty}'"));
             }
-            _ => {}
+            // Loose statement stacks become handlers that only run on request. Anything that
+            // doesn't compile as statements (values, triggers, half-built stacks) is skipped
+            // without making the program invalid.
+            _ => {
+                let (errors, timers) = (c.errors.len(), c.timer_handlers.len());
+                let body = c.stmt_chain(Some(b));
+                if c.errors.len() == errors && !body.is_empty() {
+                    loose.push(Handler { id: b.id().into(), kind: HandlerKind::Manual, body });
+                } else {
+                    c.errors.truncate(errors);
+                    c.timer_handlers.truncate(timers);
+                }
+            }
         }
     }
+    program.handlers.append(&mut loose);
     program.persistent = std::mem::take(&mut c.persistent);
     program.handlers.append(&mut c.timer_handlers);
     // Every HA trigger reports its block id as `trigger.id`, for "triggered by".

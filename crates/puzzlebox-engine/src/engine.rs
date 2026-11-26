@@ -333,6 +333,11 @@ impl Engine {
         }
     }
 
+    /// Index of the handler whose entry (or loose stack) is the block `block_id`.
+    pub fn handler_index(&self, id: &str, block_id: &str) -> Option<usize> {
+        lock(&self.inner.running).get(id)?.program.handlers.iter().position(|h| h.id == block_id)
+    }
+
     /// Manually runs a handler (default: the first one), bypassing its triggers.
     pub fn run_now(&self, id: &str, handler: Option<usize>, trigger: Option<Value>) -> bool {
         let running = lock(&self.inner.running);

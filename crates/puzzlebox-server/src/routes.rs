@@ -97,6 +97,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plugins/reload", post(plugins_reload))
         .route("/api/settings", get(settings))
         .route("/api/variables", get(variables).put(set_variable))
+        .route("/api/backpack", get(backpack).put(set_backpack))
         .route("/api/bridge", get(bridge::upgrade))
         .route("/api/webhook/{id}", axum::routing::any(webhooks::receive))
         .route("/api/registry/reload", post(registry_reload))
@@ -278,6 +279,23 @@ async fn settings(State(st): State<AppState>) -> Json<Value> {
         "supervised": st.cfg.supervisor_token.is_some(),
         "webhooks": st.webhooks.ids(),
     }))
+}
+
+/// Editor backpack: saved block snippets (serialized blocks), shared by every program.
+async fn backpack(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let all = st.engine.store().kv_all("editor").await.map_err(ApiError::from)?;
+    Ok(Json(all.get("backpack").cloned().unwrap_or_else(|| json!([]))))
+}
+
+async fn set_backpack(
+    State(st): State<AppState>,
+    Json(contents): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    if !contents.is_array() {
+        return Err(ApiError(StatusCode::BAD_REQUEST, "expected a list of blocks".into()));
+    }
+    st.engine.store().kv_set("editor", "backpack", &contents).await.map_err(ApiError::from)?;
+    Ok(Json(json!({"ok": true})))
 }
 
 async fn variables(State(st): State<AppState>) -> Result<Json<Value>, ApiError> {

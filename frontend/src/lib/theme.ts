@@ -51,6 +51,7 @@ const CATEGORIES: Record<string, { light: string; dark: string }> = {
   favourite: { light: '#f9a825', dark: '#fdd835' },
   section: { light: '#9e9e9e', dark: '#616161' },
   colour: { light: '#d4a017', dark: '#e6b422' },
+  home: { light: '#0288d1', dark: '#4fc3f7' },
 };
 
 /** Stable colour for runtime-contributed categories (HA domains, plugins). */

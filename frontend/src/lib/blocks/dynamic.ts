@@ -3,6 +3,7 @@
 import * as Blockly from 'blockly/core';
 import { FieldColour } from '@blockly/field-colour';
 import type { ExtraCategory } from '../toolbox';
+import { HELPER_DOMAINS } from './helpers';
 import { FieldOptions, FieldRegistry, FieldStateValue, setDomainResolver, setTargetResolver } from './field_entity';
 
 export interface SelectOption {
@@ -82,7 +83,10 @@ const THRESHOLD_TYPES: [string, string][] = [
 setDomainResolver((parent, inputName) => {
   const def = defs.get(parent.type);
   // Light helper blocks only take lights.
-  if (!def && parent.type.startsWith('light_') && inputName === 'TARGET') return { domains: ['light'] };
+  if (!def && inputName === 'TARGET') {
+    if (parent.type.startsWith('light_')) return { domains: ['light'] };
+    if (HELPER_DOMAINS[parent.type]) return { domains: HELPER_DOMAINS[parent.type] };
+  }
   if (!def) return { domains: [] };
   if (inputName === 'TARGET') return { domains: def.target?.domains ?? [], deviceClasses: def.target?.device_classes };
   const p = def.params.find((x) => slot(x) === inputName);

@@ -5,6 +5,7 @@
   import * as En from 'blockly/msg/en';
   import { registerCoreBlocks } from './blocks/core';
   import { registerDeviceBlocks, registerDeviceCallbacks } from './blocks/devices';
+  import { registerHelperBlocks } from './blocks/helpers';
   import { registry } from './registry.svelte';
   import { registerSwitchMenu } from './editor/switching';
   import { registerUsageMenu } from './editor/usages';
@@ -14,6 +15,7 @@
   Blockly.setLocale(En as unknown as Record<string, string>);
   registerCoreBlocks();
   registerDeviceBlocks();
+  registerHelperBlocks();
   registerSwitchMenu();
   registerUsageMenu();
   registerFavouritesMenu();

@@ -706,3 +706,71 @@ async fn light_helpers_build_light_actions() {
         ]
     );
 }
+
+#[tokio::test]
+async fn device_helpers_call_the_right_actions() {
+    let (engine, ha) = setup().await;
+    let mut events = engine.subscribe();
+    ha.states.lock().unwrap().insert(
+        "media_player.tv".into(),
+        json!({"entity_id": "media_player.tv", "state": "playing", "attributes": {"volume_level": 0.25}}),
+    );
+    let t = |e: &str| blk(text(&format!("t_{e}"), e));
+    let blocks = vec![
+        b(
+            "cover_set_position",
+            "cp",
+            json!({"WHAT": "position"}),
+            json!({"TARGET": t("cover.blinds"), "POSITION": blk(num("p", 40.0))}),
+        ),
+        b("climate_set_mode", "cm", json!({"MODE": "cool"}), json!({"TARGET": t("climate.living")})),
+        b(
+            "media_set_volume",
+            "mv",
+            json!({}),
+            json!({"TARGET": t("media_player.tv"),
+            "VOLUME": blk(b("media_volume_of", "vo", json!({"ENTITY": "media_player.tv"}), json!({})))}),
+        ),
+        b("lock_command", "lk", json!({"MODE": "unlock"}), json!({"TARGET": t("lock.front")})),
+        b(
+            "helper_set",
+            "hs",
+            json!({"ENTITY": "input_boolean.guest"}),
+            json!({"VALUE": blk(b("logic_boolean", "f", json!({"BOOL": "FALSE"}), json!({})))}),
+        ),
+        b(
+            "helper_set",
+            "hn",
+            json!({"ENTITY": "input_select.mode"}),
+            json!({"VALUE": blk(text("o", "night"))}),
+        ),
+        b(
+            "notify_send",
+            "ns",
+            json!({"TO": "mobile_app_phone"}),
+            json!({"MESSAGE": blk(text("m", "hi")), "TITLE": blk(text("ti", "Home"))}),
+        ),
+    ];
+    let (_, errors) = engine
+        .save(program("dh", workspace(vec![on_run(chain(blocks))], json!([])), "single"))
+        .await
+        .unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(engine.run_now("dh", None, None));
+    let (status, error) = next_finished(&mut events).await;
+    assert_eq!(status, "ok", "{error:?}");
+    let calls: Vec<(String, Option<Value>)> =
+        ha.calls.lock().unwrap().iter().map(|c| (c.0.clone(), c.1.clone())).collect();
+    assert_eq!(
+        calls,
+        [
+            ("cover.set_cover_position".into(), Some(json!({"position": 40}))),
+            ("climate.set_hvac_mode".into(), Some(json!({"hvac_mode": "cool"}))),
+            ("media_player.volume_set".into(), Some(json!({"volume_level": 0.25}))),
+            ("lock.unlock".into(), None),
+            ("homeassistant.turn_off".into(), None),
+            ("input_select.select_option".into(), Some(json!({"option": "night"}))),
+            ("notify.mobile_app_phone".into(), Some(json!({"message": "hi", "title": "Home"}))),
+        ]
+    );
+}

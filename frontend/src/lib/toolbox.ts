@@ -14,6 +14,7 @@ const entities = (...ids: string[]) => ({
   },
 });
 
+const label = (text: string): Item => ({ kind: 'label', text }) as Item;
 const block = (type: string, inputs?: Record<string, unknown>, extra: Record<string, unknown> = {}): Item =>
   ({ kind: 'block', type, ...(inputs ? { inputs } : {}), ...extra }) as Item;
 
@@ -94,6 +95,38 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('ha_fire_event', { EVENT_TYPE: txt('my_event') }),
         block('ha_scene_next', { SCENES: entities('scene.day', 'scene.evening') }),
         block('ha_action_raw'),
+      ]),
+      cat('Home', 'home', [
+        label('Switches & plugs'),
+        block('device_power', { TARGET: entity('') }),
+        label('Covers'),
+        block('cover_command', { TARGET: entity('') }),
+        block('cover_set_position', { TARGET: entity(''), POSITION: num(50) }),
+        block('cover_position_of'),
+        label('Climate'),
+        block('climate_set_temperature', { TARGET: entity(''), TEMPERATURE: num(21) }),
+        block('climate_set_mode', { TARGET: entity('') }),
+        block('climate_set_preset', { TARGET: entity(''), PRESET: txt('eco') }),
+        block('climate_temperature_of'),
+        label('Media'),
+        block('media_command', { TARGET: entity('') }),
+        block('media_set_volume', { TARGET: entity(''), VOLUME: num(30) }),
+        block('media_play', { TARGET: entity(''), MEDIA: txt('https://') }),
+        block('media_say', { MESSAGE: txt('Dinner is ready'), TARGET: entity('') }),
+        block('media_volume_of'),
+        block('media_title_of'),
+        label('Fans, locks & vacuums'),
+        block('fan_set_speed', { TARGET: entity(''), SPEED: num(50) }),
+        block('fan_speed_of'),
+        block('lock_command', { TARGET: entity('') }),
+        block('vacuum_command', { TARGET: entity('') }),
+        label('Scenes, scripts & helpers'),
+        block('scene_activate', { TARGET: entity('') }),
+        block('script_run', { TARGET: entity('') }),
+        block('helper_set', { VALUE: txt('') }),
+        block('counter_command', { TARGET: entity('') }),
+        label('Notifications'),
+        block('notify_send', { MESSAGE: txt('Hello from Puzzlebox'), TITLE: txt('Puzzlebox') }),
       ]),
       cat('Lights & colours', 'colour', [
         block('light_set_colour', { TARGET: entity('light.kitchen'), COLOUR: { shadow: { type: 'colour_picker', fields: { COLOUR: '#ffcc66' } } }, BRIGHTNESS: num(80) }),

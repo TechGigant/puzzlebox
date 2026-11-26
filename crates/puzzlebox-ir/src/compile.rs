@@ -7,6 +7,9 @@ use serde_json::{Map, Value, json};
 
 use crate::ir::*;
 
+#[path = "compile_helpers.rs"]
+mod helpers;
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CompileError {
     pub block_id: Option<BlockId>,
@@ -816,6 +819,9 @@ impl<'a> Compiler<'a> {
                 data: self.value_opt(&b, "DATA"),
             },
             _ => {
+                if let Some(k) = self.helper_stmt(&b) {
+                    return Some(k);
+                }
                 let ext = self.ext;
                 if let Some(k) = ext.lower_stmt(b, self) {
                     return Some(k);
@@ -1361,6 +1367,9 @@ impl<'a> Compiler<'a> {
                 headers: self.value_opt(b, "HEADERS").map(Box::new),
             },
             _ => {
+                if let Some(k) = self.helper_expr(b) {
+                    return k;
+                }
                 let ext = self.ext;
                 if let Some(k) = ext.lower_expr(*b, self) {
                     return k;

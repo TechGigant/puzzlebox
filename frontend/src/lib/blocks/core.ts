@@ -125,32 +125,33 @@ const SHOW_WHEN: Record<string, ShowRule[]> = {
 function registerShowWhen() {
   for (const [name, rules] of Object.entries(SHOW_WHEN)) {
     Blockly.Extensions.register(name, function (this: Blockly.Block) {
-      const update = () => {
+      // Rendering while the block is still being built (on load) leaves its children unrendered.
+      const update = (render: boolean) => {
         if (this.isDeadOrDying()) return;
         for (const [field, control, values] of rules) {
           this.getField(field)?.setVisible(values.includes(String(this.getFieldValue(control))));
         }
-        if (this.rendered) (this as Blockly.BlockSvg).render();
+        if (render && this.rendered) (this as Blockly.BlockSvg).render();
       };
       for (const control of new Set(rules.map(([, c]) => c))) {
         // Runs before the new value is stored, so look again afterwards.
-        this.getField(control)?.setValidator((v) => (setTimeout(update), v));
+        this.getField(control)?.setValidator((v) => (setTimeout(() => update(true)), v));
       }
-      update();
+      update(false);
     });
   }
 }
 
 function registerTimeLimit() {
   Blockly.Extensions.register('pb_time_limit', function (this: Blockly.Block) {
-    const update = () => {
+    const update = (render: boolean) => {
       if (this.isDeadOrDying()) return;
       this.getInput('TIMEOUT')?.setVisible(this.getFieldValue('LIMIT') !== 'none');
-      if (this.rendered) (this as Blockly.BlockSvg).render();
+      if (render && this.rendered) (this as Blockly.BlockSvg).render();
     };
     // Runs before the new value is stored, so look again afterwards.
-    this.getField('LIMIT')?.setValidator((v) => (setTimeout(update), v));
-    update();
+    this.getField('LIMIT')?.setValidator((v) => (setTimeout(() => update(true)), v));
+    update(false);
   });
 }
 

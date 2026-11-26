@@ -70,8 +70,10 @@ describe('trigger id and name', () => {
     expect(chooseTriggerSetting(b, '+TRIGGER_ID')).toBe(true);
     b.setFieldValue('morning', 'TRIGGER_ID');
     expect(save(b)!.fields).toMatchObject({ TRIGGER_ID: 'morning' });
-    // The menu stays last.
-    expect(b.inputList.at(-1)!.name).toBe('TRIGGER_MENU');
+    // The menu stays on the block's own line, the setting goes on a line below it.
+    const menuAt = b.inputList.findIndex((i) => i.fieldRow.some((f) => f.name === 'TRIGGER_MENU_FIELD'));
+    expect(menuAt).toBeGreaterThanOrEqual(0);
+    expect(b.inputList.findIndex((i) => i.name === 'TRIGGER_ID')).toBeGreaterThan(menuAt);
     chooseTriggerSetting(b, '-TRIGGER_ID');
     expect(b.getField('TRIGGER_ID')).toBeNull();
     expect(save(b)!.extraState).toBeUndefined();

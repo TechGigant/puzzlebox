@@ -41,7 +41,7 @@ jobs:
       - run: cargo test --locked -p puzzlebox-ha-client --test live_ha
         env:
           HA_WS_URL: ws://localhost:8123/api/websocket
-      - run: cargo test --locked -p puzzlebox-engine --test live_ha
+      - run: cargo test --locked -p puzzlebox-engine --test live_ha --test template_parity
         env:
           HA_WS_URL: ws://localhost:8123/api/websocket
 

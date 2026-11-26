@@ -87,7 +87,7 @@ export function chooseTriggerSetting(block: Blockly.Block, choice: string): bool
 }
 
 function ensureMenu(block: SettingsBlock) {
-  if (block.triggerMenuBefore || block.getInput(MENU_INPUT)) return;
+  if (block.triggerMenuBefore || block.getInput(MENU_INPUT) || block.getField(`${MENU_INPUT}_FIELD`)) return;
   const field = new MenuField(
     () => [['＋ option', MENU], ...triggerSettingItems(block)],
     (v) => {
@@ -95,7 +95,14 @@ function ensureMenu(block: SettingsBlock) {
       return null;
     },
   );
-  block.appendDummyInput(MENU_INPUT).appendField(field, `${MENU_INPUT}_FIELD`);
+  // On the block's last line when that is a row of fields: a new input would start its own
+  // line in blocks with external inputs. Rows for the settings then go after it.
+  const last = block.inputList.at(-1);
+  if (last && last.type === Blockly.inputs.inputTypes.DUMMY && last.isVisible()) {
+    last.appendField(field, `${MENU_INPUT}_FIELD`);
+  } else {
+    block.appendDummyInput(MENU_INPUT).appendField(field, `${MENU_INPUT}_FIELD`);
+  }
 }
 
 /** Shows the rows in `wanted` (and only those), e.g. after the block rebuilt its inputs. */

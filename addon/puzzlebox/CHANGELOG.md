@@ -13,6 +13,12 @@
 - New triggers: the clock shows (hour/minute/second patterns), Home Assistant
   shuts down, a template becomes true, calendar events, NFC tags, Assist
   sentences, and Home Assistant's own MQTT and webhook triggers.
+- Home Assistant triggers can have a trigger id and a name ("＋ option"). Several
+  triggers may share an id, and "triggered by" uses it.
+- "Home Assistant trigger … on … with options …" and the matching condition
+  cover the newer integration triggers and conditions (such as
+  `light.turned_on`). "Switch to" offers the integration's own block when your
+  Home Assistant has it.
 
 ### Conditions
 
@@ -37,6 +43,22 @@
   use the program's variables.
 - "Wait until" a template reacts as soon as something the template uses
   changes, instead of checking once a second.
+- "Carry on if this fails" runs the blocks inside and, if Home Assistant
+  reports an error it would skip with `continue_on_error`, carries on below.
+  Unknown actions, invalid data and lost connections still stop the run.
+- Waits have "at most …" or "with no time limit"; 0 now means give up at once.
+  Saved programs keep waiting without a limit where they had 0.
+
+### Values
+
+- "… as a decimal / whole number, if not a number …" reads numbers the way
+  Home Assistant templates do, and can stop with an error like `| float`.
+- "round … to … decimals" rounds like Home Assistant (halves to even, or
+  floor, ceil, half).
+- "text of … like Home Assistant" writes True, None and 20.0 as templates do.
+- "… = …, text stays text" compares without turning text into numbers, and
+  "… is nothing" checks for an empty value.
+- "format … as …" formats a time with strftime codes.
 
 ### Import
 

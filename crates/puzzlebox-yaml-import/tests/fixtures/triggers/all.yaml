@@ -38,6 +38,10 @@ triggers:
     to: heating
   - trigger: state
     entity_id: light.a
+    attribute: brightness
+    not_to: 255
+  - trigger: state
+    entity_id: light.a
     to: "on"
     for: "{{ states('input_number.delay') | int }}"
   - trigger: state
@@ -98,6 +102,9 @@ triggers:
   - trigger: time_pattern
     hours: 7
     minutes: "/5"
+  - trigger: time_pattern
+    hours: "/2"
+    minutes: 30
   # sun
   - trigger: sun
     event: sunset
@@ -140,6 +147,9 @@ triggers:
     topic: home/door
     payload: "open"
     value_template: "{{ value_json.state }}"
+  - trigger: mqtt
+    topic: home/+/state
+    qos: 1
   - trigger: webhook
     webhook_id: my-hook
     allowed_methods: [POST, PUT]
@@ -164,6 +174,11 @@ triggers:
     event: start
     entity_id: calendar.work
     offset: "-0:15:0"
+  - trigger: calendar.event_started
+    target:
+      entity_id: calendar.work
+    options:
+      offset: "-00:05:00"
   - trigger: tag
     tag_id: A7-6B-90-5F
     device_id: [abc]

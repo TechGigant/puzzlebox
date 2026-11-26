@@ -57,4 +57,17 @@ describe('Zigbee2MQTT group units', () => {
     expect(g.inputs.P_color_temp_kelvin.block?.type).toBe('math_arithmetic');
     expect(g.inputs.P_brightness).toBeUndefined();
   });
+
+  it('gives older triggers the new duration sockets, set to nothing', () => {
+    const out = migrateWorkspace(
+      ws(
+        { type: 'ha_trigger_numeric', fields: { ENTITY: 'sensor.t', ABOVE: '25', BELOW: '' } },
+        { type: 'ha_trigger_time', fields: { AT: '07:00' }, inputs: { OFFSET: { block: { type: 'math_number', fields: { NUM: 60 } } } } },
+      ),
+    ) as { blocks: { blocks: { inputs: Record<string, { block?: { fields: object }; shadow?: { type: string; fields: object } }> }[] } };
+    const [numeric, time] = out.blocks.blocks;
+    expect(numeric.inputs.FOR.shadow?.type).toBe('duration');
+    expect(numeric.inputs.FOR.shadow?.fields).toEqual({ UNIT: 'seconds' });
+    expect(time.inputs.OFFSET.block?.fields).toEqual({ NUM: 60 });
+  });
 });

@@ -322,7 +322,9 @@ impl Compiler<'_> {
             "ha_trigger_becomes" => {
                 let entity = self.required_str(b, "ENTITY");
                 let state = self.required_str(b, "STATE");
-                let mut cfg = json!({"trigger": "state", "entity_id": entity, "to": state});
+                let states = super::triggers::comma_list(&state).into_iter().map(Value::from).collect();
+                let to = super::triggers::one_or_list(states).unwrap_or(json!(state));
+                let mut cfg = json!({"trigger": "state", "entity_id": entity, "to": to});
                 if let Some(d) = self.fixed_number(b, "FOR").filter(|d| *d > 0.0) {
                     cfg["for"] = json!({"seconds": d});
                 }

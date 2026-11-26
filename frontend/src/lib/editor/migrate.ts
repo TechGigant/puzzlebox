@@ -49,6 +49,12 @@ const SECONDS: Record<string, string[]> = {
   ha_history: ['SECONDS'],
 };
 
+/** Duration sockets added to older triggers; an empty one compiles like before. */
+const NEW_DURATION: Record<string, [string, 'seconds' | 'minutes'][]> = {
+  ha_trigger_numeric: [['FOR', 'seconds']],
+  ha_trigger_time: [['OFFSET', 'minutes']],
+};
+
 const duration = (n: unknown) => ({
   type: 'duration',
   inputs: { N: { shadow: { type: 'math_number', fields: { NUM: n } } } },
@@ -73,6 +79,9 @@ function migrateBlock(b: State) {
       b.inputs[name] = { shadow: duration(b.fields[name]) as State };
       delete b.fields[name];
     }
+  }
+  for (const [name, unit] of NEW_DURATION[b.type] ?? []) {
+    b.inputs[name] ??= { shadow: { ...duration(0), fields: { UNIT: unit } } as State };
   }
   for (const name of SECONDS[b.type] ?? []) {
     const slot = b.inputs[name];

@@ -305,17 +305,19 @@ export class FieldStateValue extends FieldSuggest {
     const block = this.getSourceBlock();
     const ids = block ? resolveTarget(block) : [];
     const values = new Set<string>();
+    // A state trigger set to one detail suggests that detail's values.
+    const attribute = this.attribute ?? (block?.getFieldValue('WHAT') === 'attribute' ? String(block.getFieldValue('ATTRIBUTE') ?? '') || null : null);
     for (const id of ids) {
       const s = entityState(id);
       const domain = id.split('.')[0];
-      const listAttr = DOMAIN_OPTIONS_ATTRIBUTES[domain]?.[this.attribute ?? '_'];
+      const listAttr = DOMAIN_OPTIONS_ATTRIBUTES[domain]?.[attribute ?? '_'];
       const listed = listAttr ? s?.attributes[listAttr] : undefined;
       if (Array.isArray(listed)) listed.forEach((v) => values.add(String(v)));
-      if (!this.attribute) {
+      if (!attribute) {
         (FIXED_DOMAIN_STATES[domain] ?? []).forEach((v) => values.add(v));
         if (s && !['unknown', 'unavailable'].includes(s.state)) values.add(s.state);
-      } else if (s && s.attributes[this.attribute] != null) {
-        values.add(String(s.attributes[this.attribute]));
+      } else if (s && s.attributes[attribute] != null) {
+        values.add(String(s.attributes[attribute]));
       }
     }
     return [...values];

@@ -3,12 +3,14 @@
 use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::ir::*;
 
 #[path = "compile_helpers.rs"]
 mod helpers;
+#[path = "compile_triggers.rs"]
+mod triggers;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CompileError {
@@ -518,62 +520,16 @@ impl<'a> Compiler<'a> {
         let id: BlockId = b.id().into();
         let ha = |config: Value| Some(Trigger::Ha { id: id.clone(), config });
         match b.ty() {
-            "ha_trigger_state" => {
-                let mut cfg = Map::new();
-                cfg.insert("trigger".into(), json!("state"));
-                cfg.insert("entity_id".into(), json!(self.required_str(&b, "ENTITY")));
-                for (field, key) in [("FROM", "from"), ("TO", "to")] {
-                    if let Some(v) = b.field_str(field).map(str::trim).filter(|s| !s.is_empty()) {
-                        cfg.insert(key.into(), json!(v));
-                    }
-                }
-                if let Some(d) = duration_or_none(self.fixed_number(&b, "FOR")) {
-                    cfg.insert("for".into(), d);
-                }
-                // "changes" means the state; without from/to HA would also fire on attribute changes.
-                if !cfg.contains_key("from") && !cfg.contains_key("to") {
-                    cfg.insert("to".into(), Value::Null);
-                }
-                ha(Value::Object(cfg))
-            }
-            "ha_trigger_numeric" => {
-                let mut cfg =
-                    json!({"trigger": "numeric_state", "entity_id": self.required_str(&b, "ENTITY")});
-                // A number, or an entity id (e.g. input_number.limit), as HA accepts both.
-                for (field, key) in [("ABOVE", "above"), ("BELOW", "below")] {
-                    match b.field_str(field).map(str::trim).filter(|s| !s.is_empty()) {
-                        Some(raw) => match raw.parse::<f64>() {
-                            Ok(n) => cfg[key] = number(n),
-                            Err(_) if raw.contains('.') => cfg[key] = json!(raw),
-                            Err(_) => self.err(&b, format!("'{}' must be a number or an entity id", key)),
-                        },
-                        None => {
-                            if let Some(n) = b.field_f64(field) {
-                                cfg[key] = number(n);
-                            }
-                        }
-                    }
-                }
-                if cfg.get("above").is_none() && cfg.get("below").is_none() {
-                    self.err(&b, "set 'above' and/or 'below'");
-                }
-                ha(cfg)
-            }
-            "ha_trigger_time" => ha(json!({"trigger": "time", "at": self.required_str(&b, "AT")})),
             "ha_trigger_event" => {
                 ha(json!({"trigger": "event", "event_type": self.required_str(&b, "EVENT_TYPE")}))
             }
             "ha_trigger_sun" => {
                 let mut cfg = json!({"trigger": "sun", "event": b.field_str("EVENT").unwrap_or("sunset")});
                 if let Some(off) = self.fixed_number(&b, "OFFSET").filter(|o| *o != 0.0) {
-                    let sign = if off < 0.0 { "-" } else { "" };
-                    let s = off.abs() as u64;
-                    cfg["offset"] =
-                        json!(format!("{sign}{:02}:{:02}:{:02}", s / 3600, (s / 60) % 60, s % 60));
+                    cfg["offset"] = json!(triggers::offset_text(off));
                 }
                 ha(cfg)
             }
-            "ha_trigger_ha_start" => ha(json!({"trigger": "homeassistant", "event": "start"})),
             "ha_trigger_every" => {
                 let n = b.field_f64("N").unwrap_or(5.0).max(1.0) as u64;
                 let (unit, max) = match b.field_str("UNIT") {
@@ -651,6 +607,9 @@ impl<'a> Compiler<'a> {
                 Some(Trigger::Mqtt { id, topic: self.required_str(&b, "TOPIC"), filter: None })
             }
             _ => {
+                if let Some(cfg) = self.ha_trigger(&b) {
+                    return cfg.and_then(ha);
+                }
                 if let Some(t) = self.helper_trigger(&b) {
                     return t;
                 }

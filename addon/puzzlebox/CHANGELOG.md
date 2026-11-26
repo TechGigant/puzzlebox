@@ -1,5 +1,35 @@
 # Changelog
 
+## Unreleased
+
+### Import
+
+- Import understands whatever you paste: a single automation or script,
+  `automations.yaml`, `scripts.yaml`, `configuration.yaml` (including
+  `automation manual:` style keys and packages), several documents separated
+  by `---`, or just a list of actions.
+- Blueprints import with their defaults filled in. Paste a blueprint together
+  with automations that use it and they are expanded too.
+- `!secret`, `!include` and other Home Assistant tags are kept as visible
+  placeholders, never resolved, and listed as warnings in the preview.
+- Far more becomes real blocks instead of YAML: state, numeric, time, time
+  pattern, sun, zone, event and device triggers with their ids; state, time,
+  weekday, trigger and device conditions in any and/or/not form; every kind
+  of delay, wait, choose, if, repeat (count, while, until), parallel and
+  stop; and service calls that have a Home or Lights block, such as
+  `light.turn_on` with a colour or `climate.set_temperature`.
+- Templates become blocks when the result is exactly the same:
+  `states('sensor.x')`, `is_state(…)`, `state_attr(…)`, `trigger.to_state`,
+  variables, comparisons, maths, `now().hour` and text with values in it.
+- Anything that would behave even slightly differently stays a Home Assistant
+  YAML block, as small as possible, so imported programs run exactly like the
+  original.
+
+### Fixes
+
+- Programs with long stacks (about 60 blocks or more in one stack) could not
+  be saved, and the backpack could not hold them.
+
 ## 0.4.0
 
 ### Blocks

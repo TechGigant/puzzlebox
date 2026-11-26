@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Path, Request, State};
+use axum::extract::{ConnectInfo, FromRequest, Path, Request, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
@@ -142,6 +142,21 @@ pub struct ApiError(pub StatusCode, pub String);
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         (self.0, Json(json!({"error": self.1}))).into_response()
+    }
+}
+
+/// A JSON body of any nesting depth, for requests that carry blocks (axum's `Json` stops at
+/// 128 levels, about 60 blocks in one stack).
+pub struct DeepJson<T>(pub T);
+
+impl<T: serde::de::DeserializeOwned, S: Send + Sync> FromRequest<S> for DeepJson<T> {
+    type Rejection = ApiError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, ApiError> {
+        let text = String::from_request(req, state).await.map_err(|e| ApiError(e.status(), e.body_text()))?;
+        puzzlebox_storage::from_str_deep(&text)
+            .map(DeepJson)
+            .map_err(|e| ApiError(StatusCode::BAD_REQUEST, format!("invalid JSON: {e}")))
     }
 }
 
@@ -304,7 +319,7 @@ async fn editor_data(State(st): State<AppState>, Path(key): Path<String>) -> Res
 async fn set_editor_data(
     State(st): State<AppState>,
     Path(key): Path<String>,
-    Json(contents): Json<Value>,
+    DeepJson(contents): DeepJson<Value>,
 ) -> Result<Json<Value>, ApiError> {
     let key = editor_key(&key)?;
     if !contents.as_array().is_some_and(|a| a.len() <= 500) {

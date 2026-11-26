@@ -112,7 +112,18 @@ pub fn now_ms() -> i64 {
 }
 
 fn json_col(v: Option<String>) -> Option<Value> {
-    v.and_then(|s| serde_json::from_str(&s).ok())
+    v.and_then(|s| from_str_deep(&s).ok())
+}
+
+/// Parses JSON of any nesting depth. Blockly nests each block of a stack inside the previous
+/// one (`next.block`), so a long stack goes far past serde_json's default limit of 128 levels;
+/// serde_stacker grows the stack instead of overflowing it.
+pub fn from_str_deep<T: serde::de::DeserializeOwned>(s: &str) -> serde_json::Result<T> {
+    let mut de = serde_json::Deserializer::from_str(s);
+    de.disable_recursion_limit();
+    let value = T::deserialize(serde_stacker::Deserializer::new(&mut de))?;
+    de.end()?;
+    Ok(value)
 }
 
 impl Store {
@@ -256,7 +267,7 @@ impl Store {
                         id: r.get(0)?,
                         saved_at: r.get(1)?,
                         name: r.get(2)?,
-                        workspace: serde_json::from_str(&ws).ok(),
+                        workspace: from_str_deep(&ws).ok(),
                     })
                 },
             )
@@ -287,7 +298,7 @@ impl Store {
             let mut out = serde_json::Map::new();
             for row in rows {
                 let (k, v) = row?;
-                out.insert(k, serde_json::from_str(&v).unwrap_or(Value::Null));
+                out.insert(k, from_str_deep(&v).unwrap_or(Value::Null));
             }
             Ok(out)
         })
@@ -405,7 +416,7 @@ fn row_to_program(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProgramRecord> {
         enabled: r.get(3)?,
         mode: r.get(4)?,
         max_runs: r.get(5)?,
-        workspace: serde_json::from_str(&ws).unwrap_or(Value::Null),
+        workspace: from_str_deep(&ws).unwrap_or(Value::Null),
         created_at: r.get(7)?,
         updated_at: r.get(8)?,
         folder: r.get(9)?,
@@ -469,6 +480,19 @@ mod tests {
         let runs = s.list_runs("p", 10).await.unwrap();
         assert_eq!(runs.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["r4", "r3", "r2"]);
         assert_eq!(s.get_run("r4").await.unwrap().unwrap().trace, Some(json!([4])));
+    }
+
+    #[tokio::test]
+    async fn long_stacks_round_trip() {
+        let s = Store::open_in_memory().unwrap();
+        let mut stack = json!({"type": "text_print"});
+        for _ in 0..500 {
+            stack = json!({"type": "text_print", "next": {"block": stack}});
+        }
+        let mut p = program("deep");
+        p.workspace = json!({"blocks": {"blocks": [stack]}});
+        s.save_program(p.clone()).await.unwrap();
+        assert_eq!(s.get_program("deep").await.unwrap().unwrap().workspace, p.workspace);
     }
 
     #[tokio::test]

@@ -5,7 +5,7 @@ use puzzlebox_storage::ProgramRecord;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::routes::{ApiError, AppState, not_found};
+use crate::routes::{ApiError, AppState, DeepJson, not_found};
 
 type ApiResult = Result<Json<Value>, ApiError>;
 
@@ -85,7 +85,7 @@ async fn save(st: &AppState, rec: ProgramRecord) -> ApiResult {
     Ok(Json(out))
 }
 
-pub async fn create(State(st): State<AppState>, Json(input): Json<ProgramInput>) -> ApiResult {
+pub async fn create(State(st): State<AppState>, DeepJson(input): DeepJson<ProgramInput>) -> ApiResult {
     let mut rec = ProgramRecord {
         id: new_id(),
         name: "New program".into(),
@@ -105,7 +105,7 @@ pub async fn create(State(st): State<AppState>, Json(input): Json<ProgramInput>)
 pub async fn update(
     State(st): State<AppState>,
     Path(id): Path<String>,
-    Json(input): Json<ProgramInput>,
+    DeepJson(input): DeepJson<ProgramInput>,
 ) -> ApiResult {
     let mut rec = st.engine.store().get_program(&id).await?.ok_or_else(not_found)?;
     apply(&mut rec, input)?;
@@ -188,7 +188,7 @@ pub struct CompileInput {
 }
 
 /// Validates a workspace without saving, for live error markers in the editor.
-pub async fn compile(State(st): State<AppState>, Json(input): Json<CompileInput>) -> ApiResult {
+pub async fn compile(State(st): State<AppState>, DeepJson(input): DeepJson<CompileInput>) -> ApiResult {
     let errors = st.engine.compile(&input.workspace).err().unwrap_or_default();
     Ok(Json(json!({"errors": errors})))
 }

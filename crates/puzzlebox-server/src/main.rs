@@ -24,8 +24,17 @@ use puzzlebox_storage::Store;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    // Blocks nest (each block of a stack sits inside the previous one), and saving, compiling
+    // and storing them recurse once per block: the 2 MiB default runs out in long stacks.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(8 << 20)
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<()> {
     let cfg = config::Config::from_env()?;
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_new(&cfg.log_level).unwrap_or_else(|_| EnvFilter::new("info")))

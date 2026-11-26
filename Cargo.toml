@@ -26,7 +26,8 @@ futures-util = "0.3"
 rust-embed = "8"
 mime_guess = "2"
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["preserve_order"] }
+serde_json = { version = "1", features = ["preserve_order", "unbounded_depth"] }
+serde_stacker = "0.1"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = "0.24"

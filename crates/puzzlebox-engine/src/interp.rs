@@ -13,7 +13,7 @@ use puzzlebox_storage::Store;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::ha::{ConditionError, HaApi, TemplateStream};
+use crate::ha::{ActionError, ConditionError, HaApi, OnError, TemplateStream};
 use crate::value::{self, to_num, to_text, truthy};
 
 pub const MAX_STEPS: u64 = 5_000_000;
@@ -34,11 +34,19 @@ pub struct RunError {
     pub block_id: Option<BlockId>,
     pub message: String,
     pub kind: ErrorKind,
+    /// Whether "carry on if this fails" skips it, as HA's `continue_on_error` would.
+    #[serde(skip)]
+    pub on_error: OnError,
 }
 
 impl RunError {
     fn at(block: &str, message: impl Into<String>) -> Self {
-        Self { block_id: Some(block.to_owned()), message: message.into(), kind: ErrorKind::Error }
+        Self {
+            block_id: Some(block.to_owned()),
+            message: message.into(),
+            kind: ErrorKind::Error,
+            on_error: OnError::Stop,
+        }
     }
 }
 
@@ -50,6 +58,11 @@ trait AtBlock<T> {
 impl<T> AtBlock<T> for Result<T, String> {
     fn at(self, block: &str) -> R<T> {
         self.map_err(|m| RunError::at(block, m))
+    }
+}
+impl<T> AtBlock<T> for Result<T, ActionError> {
+    fn at(self, block: &str) -> R<T> {
+        self.map_err(|e| RunError { on_error: e.on_error, ..RunError::at(block, e.message) })
     }
 }
 
@@ -414,11 +427,7 @@ impl RunCtx {
                 return Ok(Flow::Return(v));
             }
             StmtKind::Stop => {
-                return Err(RunError {
-                    block_id: Some(id.into()),
-                    message: "stopped".into(),
-                    kind: ErrorKind::Stopped,
-                });
+                return Err(RunError { kind: ErrorKind::Stopped, ..RunError::at(id, "stopped") });
             }
             StmtKind::TryCatch { body, error_var, handler } => match self.exec_block(frame, body).await {
                 Ok(flow) => return Ok(flow),
@@ -442,35 +451,36 @@ impl RunCtx {
             }
             StmtKind::CallService { service, target, data, response_var } => {
                 let target = match target {
-                    Some(t) => Some(value::to_target(self.eval(frame, t).await?).at(id)?),
+                    Some(t) => {
+                        let v = self.eval(frame, t).await.map_err(|e| template_failed(e, t))?;
+                        Some(value::to_target(v).at(id).map_err(|e| rendered_wrong(e, t))?)
+                    }
                     None => None,
                 };
                 let data = match data {
-                    Some(d) => match self.eval(frame, d).await? {
+                    Some(d) => match self.eval(frame, d).await.map_err(|e| template_failed(e, d))? {
                         Value::Null => None,
                         v @ Value::Object(_) => Some(v),
                         other => {
-                            return Err(RunError::at(
-                                id,
-                                format!("action data must be a dictionary, got {other}"),
-                            ));
+                            let e =
+                                RunError::at(id, format!("action data must be a dictionary, got {other}"));
+                            return Err(rendered_wrong(e, d));
                         }
                     },
                     None => None,
                 };
-                match response_var {
-                    Some(var) => {
-                        let resp = self.ha.call_service_response(service, data, target).await.at(id)?;
-                        self.set_var(frame, var, VarScope::Local, resp).await;
-                    }
-                    None => {
-                        self.ha.call_service(service, data, target).await.at(id)?;
-                    }
+                let resp = self
+                    .ha
+                    .call_service_checked(service, data, target, response_var.is_some())
+                    .await
+                    .at(id)?;
+                if let Some(var) = response_var {
+                    self.set_var(frame, var, VarScope::Local, resp).await;
                 }
             }
             StmtKind::HaScript { sequence, args } => {
                 let sequence = self.substitute(frame, sequence, args).await?;
-                self.ha.execute_script(sequence, self.ha_vars(frame)).await.at(id)?;
+                self.ha.execute_script_checked(sequence, self.ha_vars(frame)).await.at(id)?;
             }
             StmtKind::Wait { seconds } => {
                 let s = to_num(&self.eval(frame, seconds).await?).at(id)?;
@@ -478,11 +488,15 @@ impl RunCtx {
                     tokio::time::sleep(Duration::from_secs_f64(s)).await;
                 }
             }
-            StmtKind::WaitForTrigger { triggers, timeout, result_var } => {
-                let timeout = match timeout {
-                    Some(t) => Some(to_num(&self.eval(frame, t).await?).at(id)?).filter(|t| *t > 0.0),
-                    None => None,
-                };
+            StmtKind::WaitForTrigger { triggers, timeout, result_var, zero_is_no_limit } => {
+                let timeout = self.time_limit(frame, id, timeout.as_ref(), *zero_is_no_limit).await?;
+                let var = result_var.clone().unwrap_or_else(|| "wait".into());
+                // Like HA, which doesn't even set the triggers up.
+                if timeout == Some(0.0) {
+                    let wait = json!({"remaining": 0.0, "completed": false, "trigger": null});
+                    self.set_var(frame, &var, VarScope::Local, wait).await;
+                    return Ok(Flow::Normal);
+                }
                 let started = Instant::now();
                 // One subscription for all of them, so HA numbers them (`trigger.idx`, the
                 // default `trigger.id`) as in a script, and renders their templates with the
@@ -505,7 +519,6 @@ impl RunCtx {
                     "completed": completed,
                     "trigger": fired,
                 });
-                let var = result_var.clone().unwrap_or_else(|| "wait".into());
                 self.set_var(frame, &var, VarScope::Local, wait).await;
             }
             StmtKind::Log { level, message } => {
@@ -536,15 +549,12 @@ impl RunCtx {
                 self.hooks.timer_start(self, &name, secs, *if_running, handler, data).at(id)?;
             }
             StmtKind::TimerCancel { name } => self.hooks.timer_cancel(self, name),
-            StmtKind::WaitUntil { cond, hold, timeout } => {
+            StmtKind::WaitUntil { cond, hold, timeout, zero_is_no_limit } => {
                 let hold = match hold {
                     Some(h) => to_num(&self.eval(frame, h).await?).at(id)?.max(0.0),
                     None => 0.0,
                 };
-                let timeout = match timeout {
-                    Some(t) => Some(to_num(&self.eval(frame, t).await?).at(id)?).filter(|t| *t > 0.0),
-                    None => None,
-                };
+                let timeout = self.time_limit(frame, id, timeout.as_ref(), *zero_is_no_limit).await?;
                 let started = Instant::now();
                 let until = Until {
                     hold: Duration::from_secs_f64(hold),
@@ -568,8 +578,48 @@ impl RunCtx {
                 let wait = json!({"remaining": remaining, "completed": completed});
                 self.set_var(frame, "wait", VarScope::Local, wait).await;
             }
+            StmtKind::ContinueOnError { body } => match self.exec_block(frame, body).await {
+                Err(e) if e.kind == ErrorKind::Error && skips(&e, body) => self.error_skipped(&e),
+                other => return other,
+            },
         }
         Ok(Flow::Normal)
+    }
+
+    /// A wait's time limit in seconds; `None` waits as long as it takes.
+    async fn time_limit(
+        &self,
+        frame: &Frame,
+        id: &str,
+        timeout: Option<&Expr>,
+        zero_is_no_limit: bool,
+    ) -> R<Option<f64>> {
+        let Some(t) = timeout else { return Ok(None) };
+        let v = self.eval(frame, t).await?;
+        if v.is_null() {
+            return Ok(None);
+        }
+        let t = to_num(&v).at(id)?;
+        if zero_is_no_limit {
+            return Ok(Some(t).filter(|t| *t > 0.0));
+        }
+        if t < 0.0 {
+            return Err(RunError::at(id, format!("the time limit must not be negative, got {t}")));
+        }
+        Ok(Some(t))
+    }
+
+    /// HA marks the step as failed and goes on.
+    fn error_skipped(&self, e: &RunError) {
+        let message = format!("carried on after an error: {}", e.message);
+        if let Some(b) = &e.block_id {
+            let mut trace = lock(&self.trace);
+            if trace.steps.len() < MAX_TRACE {
+                let t = self.started.elapsed().as_millis() as u64;
+                trace.steps.push(TraceEntry { block: b.clone(), t, error: Some(message.clone()) });
+            }
+        }
+        self.hooks.on_log(self, LogLevel::Warning, &message);
     }
 
     /// "wait until" a condition: `(completed, at_once)`.
@@ -610,7 +660,9 @@ impl RunCtx {
         let mut first = true;
         loop {
             let wake = [until.deadline, true_since.map(|s| s + until.hold)].into_iter().flatten().min();
-            let next = match wake {
+            // HA looks at the template before it starts counting, so even a limit of 0 waits
+            // for the first result.
+            let next = match wake.filter(|_| !first) {
                 Some(w) => tokio::time::timeout_at(w.into(), results.next()).await.ok(),
                 None => Some(results.next().await),
             };
@@ -967,6 +1019,51 @@ impl RunCtx {
 struct Until {
     hold: Duration,
     deadline: Option<Instant>,
+}
+
+/// HA turns any problem with the templates of an action's target or data into a
+/// `HomeAssistantError`, which `continue_on_error` skips: here, an error rendering one of the
+/// templates in `expr`...
+fn template_failed(mut e: RunError, expr: &Expr) -> RunError {
+    fn has(v: &Value, id: &str) -> bool {
+        match v {
+            Value::Object(m) => {
+                (m.get("id").and_then(Value::as_str) == Some(id)
+                    && m.get("kind").and_then(|k| k.get("op")).and_then(Value::as_str) == Some("template"))
+                    || m.values().any(|x| has(x, id))
+            }
+            Value::Array(a) => a.iter().any(|x| has(x, id)),
+            _ => false,
+        }
+    }
+    // HA's answer, not a lost connection.
+    let from_ha = e.message.starts_with("Home Assistant returned an error (");
+    if let Some(b) = &e.block_id
+        && from_ha
+        && e.kind == ErrorKind::Error
+        && has(&serde_json::to_value(expr).unwrap_or_default(), b)
+    {
+        e.on_error = OnError::Skip;
+    }
+    e
+}
+
+/// ...or a template that gave something that isn't a target (or data).
+fn rendered_wrong(mut e: RunError, expr: &Expr) -> RunError {
+    if matches!(expr.kind, ExprKind::Template { .. }) {
+        e.on_error = OnError::Skip;
+    }
+    e
+}
+
+/// Whether "carry on if this fails" around `body` skips `e`.
+fn skips(e: &RunError, body: &[Stmt]) -> bool {
+    match e.on_error {
+        OnError::Stop => false,
+        OnError::Skip => true,
+        // Only when the flag is on the call itself: the one block inside.
+        OnError::SkipIfCall => matches!(body, [only] if e.block_id.as_deref() == Some(only.id.as_str())),
+    }
 }
 
 /// HA's `wait.remaining`: the time left, 0 after a timeout, null without a timeout.

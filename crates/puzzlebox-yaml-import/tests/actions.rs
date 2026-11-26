@@ -354,7 +354,11 @@ fn waits_set_wait_like_home_assistant() {
     assert_eq!(last_if["inputs"]["IF0"]["block"]["type"], "ha_template_condition");
     let StmtKind::WaitForTrigger { triggers, .. } = &body(&p)[1].kind else { panic!() };
     assert_eq!(triggers.len(), 2);
-    let StmtKind::WaitUntil { cond, hold: None, timeout: Some(t) } = &body(&p)[3].kind else { panic!() };
+    let StmtKind::WaitUntil { cond, hold: None, timeout: Some(t), zero_is_no_limit: false } =
+        &body(&p)[3].kind
+    else {
+        panic!()
+    };
     // Kept as a template, which is followed change by change.
     assert_eq!(cond.kind, ExprKind::Template { template: "{{ is_state('a.b', 'on') }}".into() });
     assert_eq!(lit(t), &json!(60));
@@ -381,16 +385,27 @@ fn waits_set_wait_like_home_assistant() {
 "#,
     );
     assert_eq!(top(&imp), ["ha_wait_for_trigger", "notify_send"]);
-    // A zero timeout times out at once in HA but means "no limit" for the blocks.
-    let (imp, _) = script(
+    // A zero timeout gives up at once; no timeout is "no time limit".
+    let (imp, p) = script(
         r#"
   - wait_for_trigger: {trigger: event, event_type: x}
     timeout: 0
   - wait_template: "{{ is_state('a.b', 'on') }}"
     timeout: 0
+  - wait_template: "{{ is_state('a.b', 'on') }}"
 "#,
     );
-    assert_eq!(top(&imp), ["ha_action_raw"; 2]);
+    assert_eq!(top(&imp), ["ha_wait_for_trigger", "wait_until", "wait_until"]);
+    assert_eq!(first_block(&imp)["fields"]["LIMIT"], "limit");
+    let StmtKind::WaitForTrigger { timeout: Some(t), zero_is_no_limit: false, .. } = &body(&p)[0].kind else {
+        panic!()
+    };
+    assert_eq!(lit(t), &json!(0));
+    let StmtKind::WaitUntil { timeout: Some(t), zero_is_no_limit: false, .. } = &body(&p)[1].kind else {
+        panic!()
+    };
+    assert_eq!(lit(t), &json!(0));
+    assert!(matches!(body(&p)[2].kind, StmtKind::WaitUntil { timeout: None, .. }));
 }
 
 #[test]
@@ -899,7 +914,7 @@ fn options_disabled_alias_and_errors() {
     assert_eq!(
         top(&imp),
         [
-            "ha_action_raw",
+            "control_carry_on",
             "light_power",
             "ha_wait",
             "light_power",
@@ -908,14 +923,88 @@ fn options_disabled_alias_and_errors() {
             "ha_wait"
         ]
     );
-    assert_eq!(raw_config(&imp, 0)["continue_on_error"], true);
+    let careful = first_block(&imp);
+    assert_eq!(careful["icons"]["comment"]["text"], "Careful");
+    assert_eq!(chain_types(careful.pointer("/inputs/DO/block")), ["light_power"]);
     let second = first_block(&imp).pointer("/next/block").unwrap();
     assert_eq!(second["icons"]["comment"]["text"], "Lights on");
     // Disabled actions are kept but don't run.
     let b = body(&p);
     assert_eq!(b.len(), 5);
+    let StmtKind::ContinueOnError { body: inner } = &b[0].kind else { panic!("{:?}", b[0].kind) };
+    assert!(matches!(inner[..], [Stmt { kind: StmtKind::CallService { .. }, .. }]));
     assert!(matches!(b[3].kind, StmtKind::HaScript { .. }));
     assert!(matches!(b[4].kind, StmtKind::Wait { .. }));
+}
+
+#[test]
+fn continue_on_error_carries_on_like_home_assistant() {
+    let (imp, p) = script(
+        r#"
+  - action: weather.get_forecasts
+    target: {entity_id: weather.home}
+    data: {type: daily}
+    response_variable: forecast
+    continue_on_error: true
+  - if: "{{ true }}"
+    then:
+      - action: light.turn_on
+        target: {entity_id: light.a}
+      - action: light.turn_off
+        target: {entity_id: light.b}
+    continue_on_error: true
+  - sequence:
+      - action: light.turn_on
+        target: {entity_id: light.a}
+      - delay: 1
+    continue_on_error: true
+  - parallel:
+      - action: light.turn_on
+        target: {entity_id: light.a}
+      - action: light.turn_on
+        target: {entity_id: light.b}
+    continue_on_error: true
+  - scene: scene.evening
+    continue_on_error: true
+  - sequence:
+      - action: light.turn_on
+        target: {entity_id: light.a}
+    continue_on_error: true
+  - variables: {x: 1}
+    continue_on_error: true
+  - event: done
+    continue_on_error: "{{ true }}"
+"#,
+    );
+    assert_eq!(
+        top(&imp),
+        [
+            "control_carry_on",
+            "control_carry_on",
+            "control_carry_on",
+            "control_carry_on",
+            "ha_action_raw",
+            "ha_action_raw",
+            "variables_set",
+            "ha_action_raw"
+        ]
+    );
+    let inner = |i: usize| {
+        let mut b = first_block(&imp);
+        for _ in 0..i {
+            b = b.pointer("/next/block").unwrap();
+        }
+        chain_types(b.pointer("/inputs/DO/block"))
+    };
+    assert_eq!(inner(0), ["ha_call_service_response"]);
+    assert_eq!(inner(1), ["controls_if"]);
+    assert_eq!(inner(2), ["light_power", "ha_wait"]);
+    assert_eq!(inner(3), ["control_parallel"]);
+    // HA passes on other exceptions of a scene, and of an action inside a sequence.
+    assert_eq!(raw_config(&imp, 4)["continue_on_error"], true);
+    assert_eq!(raw_config(&imp, 5)["continue_on_error"], true);
+    let b = body(&p);
+    assert!(b[..4].iter().all(|s| matches!(s.kind, StmtKind::ContinueOnError { .. })));
 }
 
 #[test]

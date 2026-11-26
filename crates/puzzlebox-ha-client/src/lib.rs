@@ -165,6 +165,7 @@ impl HaClient {
             return Err(Error::Ha {
                 code: "template_error".into(),
                 message: err.as_str().unwrap_or_default().to_owned(),
+                translation_key: None,
             });
         }
         Ok(ev.get("result").cloned().unwrap_or(Value::Null))

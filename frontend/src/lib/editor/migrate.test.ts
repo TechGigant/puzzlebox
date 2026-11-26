@@ -71,3 +71,36 @@ describe('Zigbee2MQTT group units', () => {
     expect(time.inputs.OFFSET.block?.fields).toEqual({ NUM: 60 });
   });
 });
+
+describe('wait time limits', () => {
+  type Wait = { type: string; fields: Record<string, unknown>; inputs?: Record<string, { block?: Record<string, any>; shadow?: Record<string, any> }> };
+  const secs = (n: number) => ({ shadow: { type: 'math_number', fields: { NUM: n } } });
+  const minutes = (n: number) => ({ shadow: { type: 'duration', fields: { UNIT: 'minutes' }, inputs: { N: { shadow: { type: 'math_number', fields: { NUM: n } } } } } });
+
+  it('keeps an old time of 0 meaning no limit', () => {
+    const out = migrateWorkspace(
+      ws(
+        { type: 'ha_wait_for_trigger', inputs: { TIMEOUT: secs(0) } },
+        { type: 'ha_wait_for_trigger', inputs: { TIMEOUT: minutes(10) } },
+        { type: 'wait_until', inputs: { TIMEOUT: minutes(0) } },
+        { type: 'wait_until', inputs: {} },
+        { type: 'wait_until', fields: { LIMIT: 'limit' }, inputs: { TIMEOUT: secs(0) } },
+      ),
+    ) as { blocks: { blocks: Wait[] } };
+    expect(out.blocks.blocks.map((b) => b.fields.LIMIT)).toEqual(['none', 'limit', 'none', 'none', 'limit']);
+  });
+
+  it('gives a worked-out time no limit when it comes to 0', () => {
+    const v = { type: 'variables_get', id: 'g1', fields: { VAR: { id: 'v' } } };
+    const out = migrateWorkspace(ws({ type: 'wait_until', inputs: { TIMEOUT: { ...secs(5), block: v } } })) as { blocks: { blocks: Wait[] } };
+    const [w] = out.blocks.blocks;
+    expect(w.fields.LIMIT).toBe('limit');
+    const t = w.inputs!.TIMEOUT;
+    expect(t.shadow?.type).toBe('math_number');
+    expect(t.block?.type).toBe('logic_ternary');
+    expect(t.block?.inputs.IF.block.fields.OP).toBe('GT');
+    expect(t.block?.inputs.IF.block.inputs.A.block).toEqual({ type: 'variables_get', fields: { VAR: { id: 'v' } } });
+    expect(t.block?.inputs.THEN.block).toBe(v);
+    expect(t.block?.inputs.ELSE.block.type).toBe('logic_null');
+  });
+});

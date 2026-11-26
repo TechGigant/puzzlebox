@@ -144,10 +144,21 @@ fn selector_input(selector: &Value, t: &Translations, domain: &str, mode: &str) 
             ParamInput::Entity { domains }
         }
         "duration" => ParamInput::Duration,
+        "numeric_threshold" => ParamInput::Threshold {
+            mode: cfg.get("mode").and_then(Value::as_str).unwrap_or("is").to_owned(),
+            units: cfg
+                .get("unit_of_measurement")
+                .and_then(Value::as_array)
+                .map(|u| u.iter().map(|v| v.as_str().map(str::to_owned)).collect())
+                .unwrap_or_default(),
+        },
+        "state" => ParamInput::StateValue {
+            attribute: cfg.get("attribute").and_then(Value::as_str).map(str::to_owned),
+            multiple,
+        },
         "time" => ParamInput::Time,
         "color_rgb" => ParamInput::Color,
-        "date" | "datetime" | "state" | "device" | "area" | "floor" | "label" | "icon"
-        | "conversation_agent"
+        "date" | "datetime" | "device" | "area" | "floor" | "label" | "icon" | "conversation_agent"
             if !multiple =>
         {
             ParamInput::Text { multiline: false }

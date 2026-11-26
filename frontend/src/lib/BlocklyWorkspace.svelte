@@ -11,6 +11,31 @@
   const breakpointHandlers = new Map<string, (blockId: string) => void>();
   const breakpointSets = new Map<string, Set<string>>();
 
+  // The plus/minus "if" block can add "else if" rows but has no control for "else".
+  type IfBlock = Blockly.BlockSvg & { hasElse_?: boolean };
+  Blockly.ContextMenuRegistry.registry.register({
+    id: 'puzzlebox_toggle_else',
+    scopeType: Blockly.ContextMenuRegistry.ScopeType.BLOCK,
+    weight: 1,
+    displayText: (scope) => ((scope.block as IfBlock).getInput('ELSE') ? 'Remove else' : 'Add else'),
+    preconditionFn: (scope) =>
+      scope.block?.type === 'controls_if' && !scope.block.isInFlyout && scope.block.isEditable() ? 'enabled' : 'hidden',
+    callback: (scope) => {
+      const b = scope.block as IfBlock;
+      const before = JSON.stringify(b.saveExtraState?.() ?? null);
+      if (b.getInput('ELSE')) {
+        b.removeInput('ELSE');
+        b.hasElse_ = false;
+      } else {
+        b.hasElse_ = true;
+        b.appendStatementInput('ELSE').appendField(Blockly.Msg['CONTROLS_IF_MSG_ELSE']);
+      }
+      const after = JSON.stringify(b.saveExtraState?.() ?? null);
+      const Change = Blockly.Events.get(Blockly.Events.BLOCK_CHANGE);
+      Blockly.Events.fire(new Change(b, 'mutation', null, before, after));
+    },
+  });
+
   Blockly.ContextMenuRegistry.registry.register({
     id: 'puzzlebox_toggle_breakpoint',
     scopeType: Blockly.ContextMenuRegistry.ScopeType.BLOCK,

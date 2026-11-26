@@ -27,7 +27,8 @@ COPY --from=web /src/frontend/dist frontend/dist
 RUN cargo build --release --locked -p puzzlebox-server
 
 FROM alpine:3.22
-RUN apk add --no-cache ca-certificates tini
+# tzdata: the Supervisor sets TZ, but chrono needs zoneinfo to resolve it (else local time = UTC).
+RUN apk add --no-cache ca-certificates tini tzdata
 COPY --from=rust /src/target/release/puzzlebox /usr/bin/puzzlebox
 ENV PUZZLEBOX_DATA_DIR=/data
 EXPOSE 8099

@@ -103,3 +103,23 @@ fn raw_yaml_trigger() {
         }
     );
 }
+
+#[test]
+fn numeric_trigger_accepts_numbers_and_entities() {
+    let ws = json!({"blocks": {"blocks": [{"type": "ha_when", "id": "w", "inputs": {"TRIGGERS": {"block": {
+        "type": "ha_trigger_numeric", "id": "n",
+        "fields": {"ENTITY": "sensor.t", "ABOVE": "input_number.limit", "BELOW": "30"}}}}}]}});
+    let p = compile(&ws, &NoExternals).unwrap();
+    let HandlerKind::Triggers { triggers } = &p.handlers[0].kind else { panic!() };
+    assert_eq!(
+        triggers[0],
+        Trigger::Ha {
+            id: "n".into(),
+            config: json!({
+        "trigger": "numeric_state", "entity_id": "sensor.t", "above": "input_number.limit", "below": 30})
+        }
+    );
+    let bad = json!({"blocks": {"blocks": [{"type": "ha_when", "id": "w", "inputs": {"TRIGGERS": {"block": {
+        "type": "ha_trigger_numeric", "id": "n", "fields": {"ENTITY": "sensor.t", "ABOVE": "warm"}}}}}]}});
+    assert!(compile(&bad, &NoExternals).is_err());
+}

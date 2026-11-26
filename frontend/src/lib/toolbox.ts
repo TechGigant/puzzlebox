@@ -70,6 +70,7 @@ export function buildToolbox(extra: ExtraCategory[] = []): Def {
       { kind: 'sep' } as Item,
       cat('Flow', 'flow', [
         block('controls_if'),
+        block('controls_if', undefined, { extraState: { hasElse: true } }),
         block('control_try'),
         block('control_throw', { MESSAGE: txt('Something went wrong') }),
         block('control_stop'),

@@ -3,7 +3,7 @@
 import * as Blockly from 'blockly/core';
 import { FieldColour } from '@blockly/field-colour';
 import type { ExtraCategory } from '../toolbox';
-import { setDomainResolver } from './field_entity';
+import { FieldStateValue, setDomainResolver, setTargetResolver } from './field_entity';
 
 export interface SelectOption {
   label: string;
@@ -19,6 +19,8 @@ export type ParamInput =
   | { input: 'duration' }
   | { input: 'time' }
   | { input: 'color' }
+  | { input: 'threshold'; mode: string; units: (string | null)[] }
+  | { input: 'state_value'; attribute?: string; multiple: boolean }
   | { input: 'any' };
 
 export type Param = ParamInput & {
@@ -51,6 +53,22 @@ const REMOVE_ICON =
   encodeURIComponent(
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="white" d="M19 6.4 17.6 5 12 10.6 6.4 5 5 6.4 10.6 12 5 17.6 6.4 19 12 13.4 17.6 19 19 17.6 13.4 12z"/></svg>',
   );
+
+setTargetResolver((block) => {
+  const target = block.getInputTargetBlock('TARGET');
+  const raw = target?.type === 'ha_entity' ? String(target.getFieldValue('ENTITY') ?? '') : '';
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+});
+
+const THRESHOLD_TYPES: [string, string][] = [
+  ['above', 'above'],
+  ['below', 'below'],
+  ['between', 'between'],
+  ['outside', 'outside'],
+];
 
 setDomainResolver((parent, inputName) => {
   const def = defs.get(parent.type);
@@ -104,6 +122,28 @@ function appendParam(block: DynBlock, p: Param, withShadow: boolean, removable: 
     case 'color':
       input = block.appendDummyInput(name).appendField(p.label).appendField(new FieldColour('#ffcc66'), name);
       break;
+    case 'state_value': {
+      const field = new FieldStateValue(typeof p.default === 'string' ? p.default : '');
+      field.attribute = p.attribute ?? null;
+      input = block.appendDummyInput(name).appendField(p.label).appendField(field, name);
+      break;
+    }
+    case 'threshold': {
+      // One HA value, several editor parts: type, optional unit, and one or two numbers.
+      const types = p.mode === 'changed' ? [...THRESHOLD_TYPES, ['any value', 'any'] as [string, string]] : THRESHOLD_TYPES;
+      input = block.appendDummyInput(name).appendField(p.label).appendField(new Blockly.FieldDropdown(types), name);
+      if (p.units.length) {
+        const units = p.units.map((u) => [u ?? 'no unit', u ?? '__none__'] as [string, string]);
+        input.appendField(new Blockly.FieldDropdown(units), `${name}__unit`);
+      }
+      for (const [suffix, label] of [['a', 'value'], ['b', 'and (between / outside)']]) {
+        const v = block.appendValueInput(`${name}__${suffix}`).appendField(label).setCheck('Number');
+        v.setAlign(Blockly.inputs.Align.RIGHT);
+        if (withShadow) v.connection?.setShadowState({ type: 'math_number', fields: { NUM: suffix === 'a' ? 0 : 100 } });
+        if (block.getInput('ADD')) block.moveInputBefore(v.name, 'ADD');
+      }
+      break;
+    }
     default:
       input = block.appendValueInput(name).appendField(labelFor(p));
       input.setAlign(Blockly.inputs.Align.RIGHT);
@@ -142,7 +182,9 @@ function removeOptional(block: DynBlock, name: string) {
   if (!p) return;
   const before = JSON.stringify({ optional: block.optional });
   block.optional = block.optional.filter((n) => n !== name);
-  block.removeInput(slot(p), true);
+  for (const input of [...block.inputList]) {
+    if (input.name === slot(p) || input.name.startsWith(`${slot(p)}__`)) block.removeInput(input.name, true);
+  }
   fireMutation(block, before);
 }
 
@@ -216,6 +258,11 @@ function toolboxItem(def: BlockDef): Blockly.utils.toolbox.ToolboxItemInfo {
   const inputs: Record<string, unknown> = {};
   if (def.target) inputs.TARGET = { shadow: { type: 'ha_entity', fields: { ENTITY: '' } } };
   for (const p of def.params.filter((x) => x.required)) {
+    if (p.input === 'threshold') {
+      inputs[`${slot(p)}__a`] = { shadow: { type: 'math_number', fields: { NUM: 0 } } };
+      inputs[`${slot(p)}__b`] = { shadow: { type: 'math_number', fields: { NUM: 100 } } };
+      continue;
+    }
     const s = shadowFor(p);
     if (s) inputs[slot(p)] = { shadow: s };
   }

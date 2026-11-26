@@ -408,3 +408,42 @@ async fn invalid_program_is_saved_but_not_started() {
     assert!(ha.triggers.lock().unwrap().is_empty());
     assert!(engine.store().get_program(&saved.id).await.unwrap().is_some());
 }
+
+/// Maps block `x_trg` to an HA trigger on a configurable entity, like a generated device block.
+struct TestLowerer(&'static str);
+impl puzzlebox_ir::BlockLowerer for TestLowerer {
+    fn lower_trigger(
+        &self,
+        b: puzzlebox_ir::Block<'_>,
+        _c: &mut puzzlebox_ir::Compiler<'_>,
+    ) -> Option<puzzlebox_ir::Trigger> {
+        (b.ty() == "x_trg").then(|| puzzlebox_ir::Trigger::Ha {
+            id: b.id().into(),
+            config: json!({"trigger": "state", "entity_id": self.0}),
+        })
+    }
+}
+
+#[tokio::test]
+async fn registry_change_restarts_only_affected_programs() {
+    let (engine, ha) = setup().await;
+    engine.set_lowerer(Arc::new(TestLowerer("sensor.old")));
+    let custom =
+        workspace(vec![when("w", b("x_trg", "t", json!({}), json!({})), call("c", "a.b", "x.y"))], json!([]));
+    let plain = workspace(vec![when("w2", state_trigger("t2", "x.z"), call("c2", "a.b", "x.y"))], json!([]));
+    engine.save(program("custom", custom, "single")).await.unwrap();
+    engine.save(program("plain", plain, "single")).await.unwrap();
+    let subscribed = |ha: &MockHa| -> Vec<String> {
+        ha.triggers
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(t, _)| t["entity_id"].as_str().unwrap_or("").to_owned())
+            .collect()
+    };
+    assert_eq!(subscribed(&ha), ["sensor.old", "x.z"]);
+
+    engine.registry_changed(Arc::new(TestLowerer("sensor.new"))).await.unwrap();
+    // Only the affected program resubscribed (the old stream stays in the mock's list).
+    assert_eq!(subscribed(&ha), ["sensor.old", "x.z", "sensor.new"]);
+}

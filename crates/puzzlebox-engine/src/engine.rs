@@ -100,6 +100,7 @@ pub enum EngineEvent {
 }
 
 struct RunningProgram {
+    program: Arc<Program>,
     program_vars: Arc<Mutex<Map<String, Value>>>,
     tasks: Vec<JoinHandle<()>>,
     runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
@@ -230,13 +231,22 @@ impl Engine {
     pub async fn registry_changed(&self, lowerer: Arc<dyn BlockLowerer>) -> anyhow::Result<()> {
         self.set_lowerer(lowerer);
         let _ = self.inner.events.send(EngineEvent::RegistryChanged);
-        let invalid: Vec<String> = lock(&self.inner.status)
-            .iter()
-            .filter(|(_, s)| s.state == "invalid" || s.state == "error")
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in invalid {
-            if let Some(rec) = self.inner.store.get_program(&id).await? {
+        for rec in self.inner.store.list_programs().await? {
+            let state = self.status(&rec.id).map(|s| s.state).unwrap_or_default();
+            // Failing programs may compile now; running ones restart only if the change
+            // affects them (e.g. a renamed device changed a trigger's config).
+            let restart = match state.as_str() {
+                "invalid" | "error" => true,
+                "disabled" => false,
+                _ => {
+                    let running = lock(&self.inner.running).get(&rec.id).map(|rp| rp.program.clone());
+                    match (running, self.compile(&rec.workspace)) {
+                        (Some(old), Ok(new)) => *old != new,
+                        _ => true,
+                    }
+                }
+            };
+            if restart {
                 self.start(&rec).await;
             }
         }
@@ -430,7 +440,10 @@ impl Engine {
             }
         }
 
-        lock(&self.inner.running).insert(rec.id.clone(), RunningProgram { program_vars, tasks, runs, tx });
+        lock(&self.inner.running).insert(
+            rec.id.clone(),
+            RunningProgram { program: program.clone(), program_vars, tasks, runs, tx },
+        );
         if !errors.is_empty() {
             let msg = errors.iter().map(|e| e.message.as_str()).collect::<Vec<_>>().join("; ");
             self.update_status(&rec.id, |s| {

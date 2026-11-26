@@ -8,10 +8,32 @@ import aiohttp
 import voluptuous as vol
 
 from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.hassio import is_hassio
 from homeassistant.helpers.service_info.hassio import HassioServiceInfo
 
 from .const import CONF_TOKEN, CONF_URL, DOMAIN
+
+APP_PORT = 8099
+
+
+def _guess_app_url(hass: HomeAssistant) -> str:
+    """URL of the installed Puzzlebox app, if Home Assistant runs under the Supervisor."""
+    if not is_hassio(hass):
+        return "http://"
+    try:
+        from homeassistant.components.hassio import get_addons_list
+
+        for addon in get_addons_list(hass):
+            slug = str(addon.get("slug", ""))
+            if slug == "puzzlebox" or slug.endswith("_puzzlebox"):
+                # The Supervisor derives app host names from the slug.
+                host = addon.get("hostname") or slug.replace("_", "-")
+                return f"http://{host}:{APP_PORT}"
+    except Exception:  # noqa: BLE001 - only a convenience prefill
+        pass
+    return "http://"
 
 
 async def _validate(hass, url: str, token: str) -> str | None:
@@ -46,7 +68,9 @@ class PuzzleboxConfigFlow(ConfigFlow, domain=DOMAIN):
             errors["base"] = error
         schema = vol.Schema(
             {
-                vol.Required(CONF_URL, default=(user_input or {}).get(CONF_URL, "http://")): str,
+                vol.Required(
+                    CONF_URL, default=(user_input or {}).get(CONF_URL) or _guess_app_url(self.hass)
+                ): str,
                 vol.Required(CONF_TOKEN): str,
             }
         )

@@ -1957,7 +1957,7 @@ dependencies = [
 
 [[package]]
 name = "puzzlebox-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1978,7 +1978,7 @@ dependencies = [
 
 [[package]]
 name = "puzzlebox-ha-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "futures-util",
  "serde",
@@ -1991,7 +1991,7 @@ dependencies = [
 
 [[package]]
 name = "puzzlebox-ir"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -2000,7 +2000,7 @@ dependencies = [
 
 [[package]]
 name = "puzzlebox-registry"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "puzzlebox-ir",
  "serde",
@@ -2010,7 +2010,7 @@ dependencies = [
 
 [[package]]
 name = "puzzlebox-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2040,7 +2040,7 @@ dependencies = [
 
 [[package]]
 name = "puzzlebox-storage"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -2051,7 +2051,7 @@ dependencies = [
 
 [[package]]
 name = "puzzlebox-yaml-import"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "puzzlebox-ir",
  "serde",

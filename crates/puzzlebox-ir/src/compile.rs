@@ -343,11 +343,20 @@ impl<'a> Compiler<'a> {
             "ha_trigger_numeric" => {
                 let mut cfg =
                     json!({"trigger": "numeric_state", "entity_id": self.required_str(&b, "ENTITY")});
-                if let Some(v) = b.field_f64("ABOVE").filter(|_| b.field_str("USE_ABOVE") != Some("FALSE")) {
-                    cfg["above"] = json!(v);
-                }
-                if let Some(v) = b.field_f64("BELOW").filter(|_| b.field_str("USE_BELOW") != Some("FALSE")) {
-                    cfg["below"] = json!(v);
+                // A number, or an entity id (e.g. input_number.limit), as HA accepts both.
+                for (field, key) in [("ABOVE", "above"), ("BELOW", "below")] {
+                    match b.field_str(field).map(str::trim).filter(|s| !s.is_empty()) {
+                        Some(raw) => match raw.parse::<f64>() {
+                            Ok(n) => cfg[key] = number(n),
+                            Err(_) if raw.contains('.') => cfg[key] = json!(raw),
+                            Err(_) => self.err(&b, format!("'{}' must be a number or an entity id", key)),
+                        },
+                        None => {
+                            if let Some(n) = b.field_f64(field) {
+                                cfg[key] = number(n);
+                            }
+                        }
+                    }
                 }
                 if cfg.get("above").is_none() && cfg.get("below").is_none() {
                     self.err(&b, "set 'above' and/or 'below'");

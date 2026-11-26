@@ -214,24 +214,44 @@ impl Bridge {
     }
 
     /// Announces this app to Home Assistant so the companion configures itself.
+    /// Announces this app to Home Assistant so the companion configures itself. Repeats while
+    /// no integration is connected (it may be installed after the app started), replacing the
+    /// previous announcement instead of piling up new ones.
     pub fn spawn_discovery(self: &Arc<Self>, supervisor_token: String, port: u16) {
         let this = self.clone();
         tokio::spawn(async move {
             let client = reqwest::Client::new();
-            for attempt in 0..10u32 {
-                match this.discover_once(&client, &supervisor_token, port).await {
-                    Ok(()) => {
-                        info!("announced to Home Assistant via Supervisor discovery");
-                        return;
+            let mut previous: Option<String> = None;
+            let mut failures = 0u32;
+            loop {
+                if !this.connected().await {
+                    match this.discover_once(&client, &supervisor_token, port, previous.as_deref()).await {
+                        Ok(uuid) => {
+                            if previous.is_none() {
+                                info!("announced to Home Assistant via Supervisor discovery");
+                            }
+                            previous = uuid;
+                            failures = 0;
+                        }
+                        Err(e) => {
+                            failures += 1;
+                            warn!(failures, "Supervisor discovery failed: {e}");
+                        }
                     }
-                    Err(e) => warn!(attempt, "Supervisor discovery failed: {e}"),
                 }
-                tokio::time::sleep(Duration::from_secs(10 * u64::from(attempt + 1))).await;
+                let wait = if failures > 0 { 30 * u64::from(failures.min(10)) } else { 300 };
+                tokio::time::sleep(Duration::from_secs(wait)).await;
             }
         });
     }
 
-    async fn discover_once(&self, client: &reqwest::Client, token: &str, port: u16) -> anyhow::Result<()> {
+    async fn discover_once(
+        &self,
+        client: &reqwest::Client,
+        token: &str,
+        port: u16,
+        previous: Option<&str>,
+    ) -> anyhow::Result<Option<String>> {
         let info: Value = client
             .get("http://supervisor/addons/self/info")
             .bearer_auth(token)
@@ -241,7 +261,12 @@ impl Bridge {
             .json()
             .await?;
         let host = info.pointer("/data/hostname").and_then(Value::as_str).unwrap_or("localhost").to_owned();
-        client
+        if let Some(uuid) = previous {
+            // Best effort: an expired entry is fine to ignore.
+            let _ =
+                client.delete(format!("http://supervisor/discovery/{uuid}")).bearer_auth(token).send().await;
+        }
+        let res: Value = client
             .post("http://supervisor/discovery")
             .bearer_auth(token)
             .json(
@@ -249,8 +274,11 @@ impl Bridge {
             )
             .send()
             .await?
-            .error_for_status()?;
-        Ok(())
+            .error_for_status()?
+            .json()
+            .await
+            .unwrap_or_default();
+        Ok(res.pointer("/data/uuid").and_then(Value::as_str).map(str::to_owned))
     }
 }
 

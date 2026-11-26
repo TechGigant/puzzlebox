@@ -107,6 +107,22 @@ pub enum ParamInput {
     Time,
     /// Hex colour field, lowered to `[r, g, b]`.
     Color,
+    /// HA `numeric_threshold`: a type (above/below/between/outside/any), one or two
+    /// numbers and, when `units` is non-empty, a unit; lowered to HA's threshold object.
+    Threshold {
+        #[serde(default)]
+        mode: String,
+        #[serde(default)]
+        units: Vec<Option<String>>,
+    },
+    /// A state (or attribute value) of the block's target entity, e.g. an event entity's
+    /// event types; the editor suggests values from that entity. `multiple` lowers to a list.
+    StateValue {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attribute: Option<String>,
+        #[serde(default)]
+        multiple: bool,
+    },
     /// Anything (dict/list/expression).
     Any,
 }

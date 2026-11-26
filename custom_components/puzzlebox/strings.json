@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Connect to the Puzzlebox app",
-        "description": "Enter the address of the Puzzlebox app and its bridge token (shown on the app's Settings page).",
+        "description": "Enter the address of the Puzzlebox app and its bridge token. Both are shown on the Settings page inside Puzzlebox. With Home Assistant OS the address is usually filled in already.",
         "data": {
           "url": "App URL",
           "token": "Bridge token"

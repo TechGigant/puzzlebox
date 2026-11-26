@@ -25,6 +25,10 @@ fn field_value(p: &Param, raw: &Value) -> Value {
     match (&p.input, raw) {
         (ParamInput::Boolean, Value::String(s)) => json!(s == "TRUE"),
         (ParamInput::Color, Value::String(s)) => hex_to_rgb(s).unwrap_or(Value::Null),
+        (ParamInput::StateValue { multiple: true, .. }, Value::String(s)) => {
+            let items: Vec<&str> = s.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+            if items.is_empty() { Value::Null } else { json!(items) }
+        }
         (_, Value::String(s)) if s.is_empty() => Value::Null,
         (_, v) => v.clone(),
     }
@@ -42,6 +46,27 @@ fn const_target(v: &Value) -> Value {
     }
 }
 
+/// Turns a dictionary of literals into one literal, so fixed thresholds work in triggers.
+fn const_fold(e: Expr) -> Expr {
+    fn lit(e: &Expr) -> Option<Value> {
+        match &e.kind {
+            ExprKind::Lit { value } => Some(value.clone()),
+            ExprKind::Dict { entries } => {
+                let mut m = Map::new();
+                for (k, v) in entries {
+                    m.insert(k.clone(), lit(v)?);
+                }
+                Some(Value::Object(m))
+            }
+            _ => None,
+        }
+    }
+    match lit(&e) {
+        Some(v) => Expr::lit(e.id, v),
+        None => e,
+    }
+}
+
 struct Args {
     /// Param name → expression (fields become literals).
     exprs: BTreeMap<String, Expr>,
@@ -53,7 +78,9 @@ impl RegistryLowerer {
         let mut exprs = BTreeMap::new();
         for p in &def.params {
             let slot = p.slot();
-            let e = if let Some(raw) = b.field(&slot) {
+            let e = if let ParamInput::Threshold { units, .. } = &p.input {
+                Self::threshold(p, units, b, c)
+            } else if let Some(raw) = b.field(&slot) {
                 let v = field_value(p, raw);
                 (!v.is_null()).then(|| Expr::lit(b.id(), v))
             } else {
@@ -78,6 +105,40 @@ impl RegistryLowerer {
             c.err(&b, "choose a target");
         }
         Args { exprs, target }
+    }
+
+    /// Builds HA's numeric threshold object from the type dropdown (`P_x`), optional unit
+    /// dropdown (`P_x__unit`) and number inputs (`P_x__a`, `P_x__b`).
+    fn threshold(p: &Param, units: &[Option<String>], b: Block<'_>, c: &mut Compiler<'_>) -> Option<Expr> {
+        let slot = p.slot();
+        let kind = b.field_str(&slot)?.to_owned();
+        if kind == "any" {
+            return Some(Expr::lit(b.id(), json!({"type": "any"})));
+        }
+        let unit = if units.is_empty() {
+            None
+        } else {
+            Some(match b.field_str(&format!("{slot}__unit")) {
+                Some("__none__") | None => Value::Null,
+                Some(u) => json!(u),
+            })
+        };
+        let entry = |c: &mut Compiler<'_>, input: &str| -> Expr {
+            let number = c.value(&b, &format!("{slot}__{input}"));
+            let mut entries = vec![("number".to_owned(), number)];
+            if let Some(u) = &unit {
+                entries.push(("unit_of_measurement".to_owned(), Expr::lit(b.id(), u.clone())));
+            }
+            Expr { id: b.id().into(), kind: ExprKind::Dict { entries } }
+        };
+        let mut entries = vec![("type".to_owned(), Expr::lit(b.id(), json!(kind)))];
+        if kind == "between" || kind == "outside" {
+            entries.push(("value_min".to_owned(), entry(c, "a")));
+            entries.push(("value_max".to_owned(), entry(c, "b")));
+        } else {
+            entries.push(("value".to_owned(), entry(c, "a")));
+        }
+        Some(const_fold(Expr { id: b.id().into(), kind: ExprKind::Dict { entries } }))
     }
 
     /// Triggers are subscribed once, so every argument must be a constant.

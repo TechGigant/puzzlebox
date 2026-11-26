@@ -193,3 +193,45 @@ fn example_pack_compiles() {
     assert_eq!(sequence[0]["data"]["temperature"], json!({"$arg": "temperature"}));
     assert!(args.contains_key("target") && args.contains_key("temperature"));
 }
+
+#[test]
+fn thresholds_and_state_values_lower_to_ha_shapes() {
+    let triggers = json!({
+        "light.brightness_crossed_threshold": {
+            "fields": {"threshold": {"required": true, "selector": {"numeric_threshold": {"mode": "crossed", "unit_of_measurement": ["%"]}}}},
+            "target": {"entity": [{"domain": ["light"]}]}},
+        "event.received": {
+            "fields": {"event_type": {"required": true, "selector": {"state": {"attribute": "event_type", "multiple": true}}}},
+            "target": {"entity": [{"domain": ["event"]}]}}
+    });
+    let r = Registry::default();
+    r.set_source(
+        "ha",
+        generate(&HaDescriptions {
+            services: &json!({}),
+            triggers: &triggers,
+            conditions: &json!({}),
+            translations: &serde_json::Map::new(),
+        }),
+    );
+    let ent = |id: &str, e: &str| json!({"shadow": {"type": "ha_entity", "id": id, "fields": {"ENTITY": e}}});
+    let num = |id: &str, n: f64| json!({"shadow": {"type": "math_number", "id": id, "fields": {"NUM": n}}});
+    let ws = json!({"blocks": {"blocks": [{"type": "ha_when", "id": "w", "inputs": {
+        "TRIGGERS": blk(json!({"type": "ha_trg__light__brightness_crossed_threshold", "id": "t1",
+            "fields": {"P_threshold": "between", "P_threshold__unit": "%"},
+            "inputs": {"TARGET": ent("e1", "light.a"), "P_threshold__a": num("a", 20.0), "P_threshold__b": num("b", 80.0)},
+            "next": {"block": {"type": "ha_trg__event__received", "id": "t2",
+                "fields": {"P_event_type": "double_press, long_press"},
+                "inputs": {"TARGET": ent("e2", "event.button")}}}}))}}]}});
+    let p = compile(&ws, r.lowerer().as_ref()).unwrap();
+    let HandlerKind::Triggers { triggers } = &p.handlers[0].kind else { panic!() };
+    let Trigger::Ha { config, .. } = &triggers[0] else { panic!() };
+    assert_eq!(
+        config["options"]["threshold"],
+        json!({"type": "between",
+        "value_min": {"number": 20, "unit_of_measurement": "%"},
+        "value_max": {"number": 80, "unit_of_measurement": "%"}})
+    );
+    let Trigger::Ha { config, .. } = &triggers[1] else { panic!() };
+    assert_eq!(config["options"]["event_type"], json!(["double_press", "long_press"]));
+}

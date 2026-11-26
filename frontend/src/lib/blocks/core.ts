@@ -20,6 +20,9 @@ const time = (name: string, value = '') => ({ type: 'field_time', name, text: va
 /** Colours are "#rrggbb" text, so they also fit text sockets. */
 const COLOUR = ['Colour', 'String'];
 const dummy = { type: 'input_dummy' };
+const END_ROW = { type: 'input_end_row' };
+/** Waits: "at most" shows the TIMEOUT socket. */
+const TIME_LIMIT = dropdown('LIMIT', [['at most', 'limit'], ['with no time limit', 'none']]);
 
 /** Short description of a trigger block for the "triggered by" dropdown. */
 function describeTrigger(b: Blockly.Block): string {
@@ -133,6 +136,19 @@ function registerShowWhen() {
       update();
     });
   }
+}
+
+function registerTimeLimit() {
+  Blockly.Extensions.register('pb_time_limit', function (this: Blockly.Block) {
+    const update = () => {
+      if (this.isDeadOrDying()) return;
+      this.getInput('TIMEOUT')?.setVisible(this.getFieldValue('LIMIT') !== 'none');
+      if (this.rendered) (this as Blockly.BlockSvg).render();
+    };
+    // Runs before the new value is stored, so look again afterwards.
+    this.getField('LIMIT')?.setValidator((v) => (setTimeout(update), v));
+    update();
+  });
 }
 
 export const CORE_BLOCKS: Json[] = [
@@ -296,13 +312,16 @@ export const CORE_BLOCKS: Json[] = [
     'Calls a Home Assistant action that sends back an answer (weather forecasts, calendar events…) and keeps it in a variable. Only for actions that have a response.',
   ),
   action('ha_wait','wait %1', [value('SECONDS', 'Number')], 'Pauses this run for a while (a number on its own means seconds).', 'flow_blocks'),
-  action(
-    'ha_wait_for_trigger',
-    'wait for %1 %2 at most %3',
-    [{ type: 'input_dummy' }, statements('TRIGGERS', 'Trigger'), value('TIMEOUT', 'Number')],
-    'Waits until one of the triggers fires, or the time runs out. Afterwards, "the wait timed out" and "what ended the wait" tell you which.',
-    'flow_blocks',
-  ),
+  {
+    ...inline(
+      'ha_wait_for_trigger',
+      'wait for %1 %2 %3 %4 %5',
+      [{ type: 'input_dummy' }, statements('TRIGGERS', 'Trigger'), TIME_LIMIT, dummy, value('TIMEOUT', 'Number')],
+      'Waits until one of the triggers fires, or the time runs out (a time of 0 gives up straight away). Afterwards, "the wait timed out" and "what ended the wait" tell you which.',
+      'flow_blocks',
+    ),
+    extensions: ['pb_time_limit'],
+  },
   action(
     'ha_log',
     'log %1 %2',
@@ -346,13 +365,16 @@ export const CORE_BLOCKS: Json[] = [
   ),
   action('timer_cancel', 'cancel timer %1', [text('NAME', 'lights off')], 'Stops a running timer before it fires.', 'flow_blocks'),
   expr('timer_running', 'timer %1 is running', [text('NAME', 'lights off')], 'Boolean', 'flow_blocks', 'True while the timer is counting down.'),
-  action(
-    'wait_until',
-    'wait until %1 stays true for %2 at most %3',
-    [value('COND', 'Boolean'), value('HOLD', 'Number'), value('TIMEOUT', 'Number')],
-    'Waits until the condition is true (and has stayed true for a while, if set), or the time runs out. A template is checked again as soon as something it uses changes, like in Home Assistant. Afterwards, "the wait timed out" tells you which.',
-    'flow_blocks',
-  ),
+  {
+    ...inline(
+      'wait_until',
+      'wait until %1 %2 stays true for %3 %4 %5 %6 %7',
+      [value('COND', 'Boolean'), END_ROW, value('HOLD', 'Number'), END_ROW, TIME_LIMIT, dummy, value('TIMEOUT', 'Number')],
+      'Waits until the condition is true (and has stayed true for a while, if set), or the time runs out (a time of 0 only checks once). A template is checked again as soon as something it uses changes, like in Home Assistant. Afterwards, "the wait timed out" tells you which.',
+      'flow_blocks',
+    ),
+    extensions: ['pb_time_limit'],
+  },
   expr(
     'throttle',
     'at most once every %1',
@@ -622,6 +644,16 @@ export const CORE_BLOCKS: Json[] = [
     style: 'flow_blocks',
     tooltip: 'If anything inside "try" fails, runs "on error" with the message in the variable.',
   },
+  {
+    type: 'control_carry_on',
+    message0: 'carry on if this fails %1 %2',
+    args0: [dummy, statements('DO')],
+    previousStatement: null,
+    nextStatement: null,
+    style: 'flow_blocks',
+    tooltip:
+      'If a Home Assistant action inside fails (a device that doesn\'t answer, a value it turns down…), skips the rest of the blocks inside and carries on below, like "continue_on_error" in Home Assistant. Unknown actions, invalid data, a lost connection and mistakes in the program still stop the run.',
+  },
   action('control_throw', 'fail with %1', [value('MESSAGE')], 'Stops with an error (catchable by try).', 'flow_blocks'),
   { ...action('control_stop', 'stop this run', [], 'Ends this run successfully.', 'flow_blocks'), nextStatement: undefined },
   {
@@ -723,6 +755,7 @@ export function registerCoreBlocks(): void {
   Blockly.fieldRegistry.register('field_trigger_ref', FieldTriggerRef);
   registerConditionOptions();
   registerShowWhen();
+  registerTimeLimit();
   for (const b of CORE_BLOCKS) {
     if ((b as { nextStatement?: unknown }).nextStatement === undefined) delete (b as Json).nextStatement;
   }

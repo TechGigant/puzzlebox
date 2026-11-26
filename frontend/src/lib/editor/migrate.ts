@@ -61,6 +61,64 @@ const duration = (n: unknown) => ({
   fields: { UNIT: 'seconds' },
 });
 
+/** Waits where a time limit of 0 (or less) meant no limit, before that became a choice. */
+const TIME_LIMIT = new Set(['ha_wait_for_trigger', 'wait_until']);
+
+type Slot = { block?: State; shadow?: State };
+
+/** The seconds a socket holds when they are written in (a number or a duration of one). */
+function writtenSeconds(slot: Slot | undefined): number | undefined {
+  const b = slot?.block ?? slot?.shadow;
+  if (b?.type === 'math_number') return Number(b.fields?.NUM);
+  if (b?.type === 'duration') return writtenSeconds(b.inputs?.N);
+  return undefined;
+}
+
+/** A copy of a block that gets new ids when it is loaded. */
+function copyOf(b: State): State {
+  const { id: _, inputs, next, ...rest } = b;
+  const out: State = { ...structuredClone(rest) };
+  if (inputs) {
+    out.inputs = Object.fromEntries(
+      Object.entries(inputs).map(([k, v]) => [k, { ...(v.block && { block: copyOf(v.block) }), ...(v.shadow && { shadow: copyOf(v.shadow) }) }]),
+    );
+  }
+  if (next?.block) out.next = { block: copyOf(next.block) };
+  return out;
+}
+
+function migrateTimeLimit(b: State) {
+  if (!TIME_LIMIT.has(b.type) || (b.fields && 'LIMIT' in b.fields)) return;
+  b.fields ??= {};
+  const slot = b.inputs?.TIMEOUT;
+  if (!slot?.block && !slot?.shadow) {
+    b.fields.LIMIT = 'none';
+    return;
+  }
+  const n = writtenSeconds(slot);
+  if (n !== undefined) {
+    b.fields.LIMIT = Number.isFinite(n) && n > 0 ? 'limit' : 'none';
+    return;
+  }
+  // Worked out while running: "if it is above 0 then it, else nothing" (no limit).
+  b.fields.LIMIT = 'limit';
+  const e = (slot.block ?? slot.shadow)!;
+  slot.block = {
+    type: 'logic_ternary',
+    inputs: {
+      IF: {
+        block: {
+          type: 'logic_compare',
+          fields: { OP: 'GT' },
+          inputs: { A: { block: copyOf(e) }, B: num(0) },
+        },
+      },
+      THEN: { block: e },
+      ELSE: { block: { type: 'logic_null' } },
+    },
+  };
+}
+
 const num = (n: number) => ({ shadow: { type: 'math_number', fields: { NUM: n } } as State });
 const divide = (a: { block?: State; shadow?: State }, b: { block?: State; shadow?: State }): State => ({
   type: 'math_arithmetic',
@@ -89,6 +147,7 @@ function migrateBlock(b: State) {
       slot.shadow = duration(slot.shadow.fields?.NUM) as State;
     }
   }
+  migrateTimeLimit(b);
   // Blocks that returned different kinds of value were split.
   if (b.type === 'ha_state_check' && b.fields?.MODE === 'count') {
     b.type = 'ha_state_count';

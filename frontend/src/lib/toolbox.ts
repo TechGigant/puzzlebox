@@ -309,6 +309,7 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('json_stringify'),
         label('Errors & parallel runs'),
         block('control_try'),
+        block('control_carry_on'),
         block('control_throw', { MESSAGE: txt('Something went wrong') }),
         block('control_parallel', {
           BRANCHES: { block: { type: 'control_branch', next: { block: { type: 'control_branch' } } } },

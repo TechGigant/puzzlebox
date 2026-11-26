@@ -238,6 +238,7 @@ impl Compiler<'_> {
                     triggers: vec![json!({"trigger": "time", "at": at})],
                     timeout: None,
                     result_var: None,
+                    zero_is_no_limit: false,
                 }
             }
             "http_send" => {

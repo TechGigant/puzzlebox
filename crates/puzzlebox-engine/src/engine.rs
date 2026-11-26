@@ -611,6 +611,7 @@ impl DispatchCtx {
                 r = ctx.run_body(&handler.body) => r,
                 _ = token.cancelled() => Err(crate::interp::RunError {
                     block_id: None, message: "cancelled".into(), kind: ErrorKind::Cancelled,
+                    on_error: Default::default(),
                 }),
             };
             inner.debugger.run_finished(&run_id);

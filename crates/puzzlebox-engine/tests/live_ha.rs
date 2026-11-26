@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use puzzlebox_engine::{ConditionError, HaApi, LiveHa};
+use puzzlebox_engine::{ConditionError, HaApi, LiveHa, OnError};
 use puzzlebox_ha_client::{ClientConfig, HaClient};
 use serde_json::{Value, json};
 use tokio::time::timeout;
@@ -75,4 +75,105 @@ async fn script_features_work_against_home_assistant() {
     assert_eq!(timeout(Duration::from_secs(5), tpl.next()).await.unwrap().unwrap().unwrap(), json!(true));
 
     light(&ha, false).await;
+}
+
+/// Each action, whether HA's own `continue_on_error` skips its error, and how the engine sorts
+/// the error the WebSocket API gives for it.
+#[tokio::test]
+async fn action_errors_are_sorted_like_continue_on_error() {
+    let Some(ha) = live().await else {
+        eprintln!("skipping: HA_WS_URL/HA_TOKEN not set");
+        return;
+    };
+    let cases = [
+        // ServiceValidationError
+        (
+            json!({"action": "climate.set_temperature", "data": {"temperature": 1000}, "target": {"entity_id": "climate.hvac"}}),
+            true,
+        ),
+        // ServiceNotSupported
+        (
+            json!({"action": "climate.set_humidity", "data": {"humidity": 50}, "target": {"entity_id": "climate.ecobee"}}),
+            true,
+        ),
+        // HomeAssistantError
+        (
+            json!({"action": "homeassistant.reload_config_entry", "data": {"entry_id": "puzzlebox_none"}}),
+            true,
+        ),
+        // ServiceNotFound
+        (json!({"action": "light.puzzlebox_none", "target": {"entity_id": LIGHT}}), false),
+        // vol.Invalid
+        (
+            json!({"action": "light.turn_on", "data": {"brightness": "abc"}, "target": {"entity_id": LIGHT}}),
+            false,
+        ),
+    ];
+    for (action, skipped) in cases {
+        let mut flagged = action.clone();
+        flagged["continue_on_error"] = json!(true);
+        let native = ha.execute_script(json!([flagged]), json!({})).await;
+        assert_eq!(native.is_ok(), skipped, "HA itself: {action} {native:?}");
+
+        let service = action["action"].as_str().unwrap();
+        let called = ha
+            .call_service_checked(service, action.get("data").cloned(), action.get("target").cloned(), false)
+            .await;
+        let want = if skipped { OnError::Skip } else { OnError::Stop };
+        assert_eq!(called.unwrap_err().on_error, want, "call_service: {action}");
+        let script = ha.execute_script_checked(json!([action]), json!({})).await;
+        assert_eq!(script.unwrap_err().on_error, want, "execute_script: {action}");
+    }
+
+    // A response asked for wrongly: the script refuses it as invalid.
+    let native = ha
+        .execute_script(json!([{"action": "light.turn_on", "target": {"entity_id": LIGHT}, "response_variable": "r", "continue_on_error": true}]), json!({}))
+        .await;
+    assert!(native.is_err());
+    let called =
+        ha.call_service_checked("light.turn_on", None, Some(json!({"entity_id": LIGHT})), true).await;
+    assert_eq!(called.unwrap_err().on_error, OnError::Stop);
+    let called = ha
+        .call_service_checked(
+            "weather.get_forecasts",
+            Some(json!({"type": "daily"})),
+            Some(json!({"entity_id": "weather.demo_weather_south"})),
+            false,
+        )
+        .await;
+    assert_eq!(called.unwrap_err().on_error, OnError::Stop);
+
+    // A data template that fails is a HomeAssistantError to the script, skipped too.
+    let native = ha
+        .execute_script(
+            json!([{"action": "light.turn_on", "data": {"brightness": "{{ x.y }}"}, "target": {"entity_id": LIGHT}, "continue_on_error": true}]),
+            json!({}),
+        )
+        .await;
+    assert!(native.is_ok(), "{native:?}");
+    light(&ha, false).await;
+}
+
+/// What HA's waits set `wait` to with a timeout of 0.
+#[tokio::test]
+async fn waits_with_a_timeout_of_zero() {
+    let Some(ha) = live().await else {
+        eprintln!("skipping: HA_WS_URL/HA_TOKEN not set");
+        return;
+    };
+    let wait = |step: Value| {
+        let ha = ha.clone();
+        async move {
+            let res = ha
+                .execute_script(json!([step, {"stop": "done", "response_variable": "wait"}]), json!({}))
+                .await;
+            res.unwrap()["response"].clone()
+        }
+    };
+    let trig = json!({"wait_for_trigger": [{"trigger": "event", "event_type": "puzzlebox_never_fired"}], "timeout": 0});
+    assert_eq!(wait(trig).await, json!({"remaining": 0.0, "completed": false, "trigger": null}));
+    let yes = json!({"wait_template": "{{ true }}", "timeout": 0});
+    assert_eq!(wait(yes).await, json!({"remaining": 0.0, "completed": true}));
+    let no = json!({"wait_template": "{{ false }}", "timeout": 0});
+    assert_eq!(wait(no).await, json!({"remaining": 0.0, "completed": false}));
 }

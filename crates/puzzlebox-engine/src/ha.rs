@@ -39,6 +39,26 @@ pub trait HaApi: Send + Sync + 'static {
         self.test_condition(condition, variables).await.map_err(ConditionError::Failed)
     }
     async fn execute_script(&self, sequence: Value, variables: Value) -> Result<Value, String>;
+    /// `call_service` (or, with `response`, `call_service_response`), telling apart the errors
+    /// HA's `continue_on_error` skips.
+    async fn call_service_checked(
+        &self,
+        service: &str,
+        data: Option<Value>,
+        target: Option<Value>,
+        response: bool,
+    ) -> Result<Value, ActionError> {
+        let res = if response {
+            self.call_service_response(service, data, target).await
+        } else {
+            self.call_service(service, data, target).await
+        };
+        res.map_err(ActionError::stops)
+    }
+    /// Like `execute_script`, telling apart the errors HA's `continue_on_error` skips.
+    async fn execute_script_checked(&self, sequence: Value, variables: Value) -> Result<Value, ActionError> {
+        self.execute_script(sequence, variables).await.map_err(ActionError::stops)
+    }
     async fn render_template(&self, template: &str, variables: Value) -> Result<Value, String>;
     async fn fire_event(&self, event_type: &str, data: Option<Value>) -> Result<(), String>;
     /// Each item is the trigger payload (HA's `trigger` variable).
@@ -73,6 +93,76 @@ pub trait HaApi: Send + Sync + 'static {
     }
 }
 
+/// What HA's scripts do with an action's error when the action has `continue_on_error`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OnError {
+    /// Stop anyway: configuration errors (an unknown action, invalid data, a template or
+    /// condition that fails) and everything that isn't HA's answer (a lost connection…).
+    #[default]
+    Stop,
+    /// A `HomeAssistantError` (the device didn't answer, a value it refused…): skipped.
+    Skip,
+    /// Any other exception an action call raised: skipped only when the flag is on that very
+    /// call, which HA then turns it into a `HomeAssistantError` for.
+    SkipIfCall,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ActionError {
+    pub message: String,
+    pub on_error: OnError,
+}
+
+impl ActionError {
+    pub fn stops(message: String) -> Self {
+        Self { message, on_error: OnError::Stop }
+    }
+
+    /// Sorts an error from `call_service` (`call`) or `execute_script` the way HA's
+    /// `_ScriptRun._handle_exception` sorts the exception behind it.
+    fn from_client(e: puzzlebox_ha_client::Error, call: bool) -> Self {
+        let on_error = match &e {
+            puzzlebox_ha_client::Error::Ha { code, message, translation_key } => {
+                match (code.as_str(), translation_key.as_deref()) {
+                    // ServiceNotFound: websocket_api sends not_found when it is the called
+                    // action itself, execute_script the validation error it is.
+                    ("not_found", _)
+                    | ("service_validation_error", Some("service_not_found"))
+                    | ("home_assistant_error", Some("child_service_not_found")) => OnError::Stop,
+                    // A script checks these itself before the call, raising vol.Invalid.
+                    (
+                        "service_validation_error",
+                        Some("service_does_not_support_response" | "service_lacks_response_request"),
+                    ) => OnError::Stop,
+                    ("service_validation_error", _) => OnError::Skip,
+                    ("home_assistant_error", _) if configuration_error(message) => OnError::Stop,
+                    ("home_assistant_error", _) => OnError::Skip,
+                    ("unknown_error", _) if call => OnError::SkipIfCall,
+                    // invalid_format (vol.Invalid), timeout, unauthorized (for the command)…
+                    _ => OnError::Stop,
+                }
+            }
+            _ => OnError::Stop,
+        };
+        Self { message: e.to_string(), on_error }
+    }
+}
+
+/// `HomeAssistantError`s that HA's scripts count as configuration errors, told by their text
+/// (they come without a translation key).
+fn configuration_error(message: &str) -> bool {
+    // ConditionError
+    message.starts_with("In '")
+        || message.starts_with("Invalid entity id encountered: ")
+        || message.starts_with("No entity id specified for entity ")
+        // TemplateError wrapping an exception: "UndefinedError: 'x' is undefined".
+        || message.split_once(": ").is_some_and(|(class, _)| {
+            class.starts_with(|c: char| c.is_ascii_uppercase())
+                && class.chars().all(|c| c.is_ascii_alphanumeric())
+                && ((class.ends_with("Error") && class != "Error") || class.ends_with("Exception"))
+        })
+}
+
 /// Why HA gave no answer to a condition test.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConditionError {
@@ -88,7 +178,7 @@ impl ConditionError {
         match e {
             // test_condition sends HA's ConditionError as a home_assistant_error, and its text
             // always starts with "In '<condition>'"; errors from setting the condition up don't.
-            puzzlebox_ha_client::Error::Ha { code, message }
+            puzzlebox_ha_client::Error::Ha { code, message, .. }
                 if code == "home_assistant_error" && message.starts_with("In '") =>
             {
                 Self::Raised(message)
@@ -238,6 +328,33 @@ impl HaApi for LiveHa {
         self.client.execute_script(sequence, Some(variables)).await.map_err(|e| e.to_string())
     }
 
+    async fn call_service_checked(
+        &self,
+        service: &str,
+        data: Option<Value>,
+        target: Option<Value>,
+        response: bool,
+    ) -> Result<Value, ActionError> {
+        let (domain, svc) = split_service(service).map_err(ActionError::stops)?;
+        let mut payload = json!({"type": "call_service", "domain": domain, "service": svc});
+        if let Some(d) = data {
+            payload["service_data"] = d;
+        }
+        if let Some(t) = target {
+            payload["target"] = t;
+        }
+        if response {
+            payload["return_response"] = json!(true);
+        }
+        let res = self.client.request(payload).await.map_err(|e| ActionError::from_client(e, true))?;
+        Ok(if response { res.get("response").cloned().unwrap_or(Value::Null) } else { res })
+    }
+
+    async fn execute_script_checked(&self, sequence: Value, variables: Value) -> Result<Value, ActionError> {
+        let res = self.client.execute_script(sequence, Some(variables)).await;
+        res.map_err(|e| ActionError::from_client(e, false))
+    }
+
     async fn render_template(&self, template: &str, variables: Value) -> Result<Value, String> {
         self.client.render_template(template, Some(variables)).await.map_err(|e| e.to_string())
     }
@@ -312,12 +429,64 @@ impl HaApi for LiveHa {
 mod tests {
     use puzzlebox_ha_client::Error;
 
-    use super::ConditionError;
+    use super::{ActionError, ConditionError, OnError};
+
+    #[test]
+    fn sorts_action_errors_like_continue_on_error() {
+        let sort = |code: &str, message: &str, key: Option<&str>, call: bool| {
+            let e = Error::Ha {
+                code: code.into(),
+                message: message.into(),
+                translation_key: key.map(Into::into),
+            };
+            ActionError::from_client(e, call).on_error
+        };
+        let skip = [
+            ("home_assistant_error", "Failed to connect to the device", None),
+            ("home_assistant_error", "Error: something", None),
+            ("service_validation_error", "Validation error: out of range", None),
+            ("service_validation_error", "Validation error: no support", Some("service_not_supported")),
+        ];
+        for (code, message, key) in skip {
+            assert_eq!(sort(code, message, key, true), OnError::Skip, "{message}");
+            assert_eq!(sort(code, message, key, false), OnError::Skip, "{message}");
+        }
+        let stop = [
+            ("not_found", "Service light.nope not found.", Some("service_not_found")),
+            ("service_validation_error", "Action light.nope not found.", Some("service_not_found")),
+            (
+                "home_assistant_error",
+                "Service script.x called service a.b which was not found.",
+                Some("child_service_not_found"),
+            ),
+            ("service_validation_error", "Validation error: x", Some("service_does_not_support_response")),
+            ("invalid_format", "extra keys not allowed", None),
+            ("home_assistant_error", "In 'state' condition: unknown entity", None),
+            ("home_assistant_error", "UndefinedError: 'x' is undefined", None),
+            (
+                "home_assistant_error",
+                "Invalid entity id encountered: x. Format should be <domain>.<object_id>",
+                None,
+            ),
+            ("unauthorized", "Unauthorized", None),
+            ("timeout", "Timeout", None),
+        ];
+        for (code, message, key) in stop {
+            assert_eq!(sort(code, message, key, true), OnError::Stop, "{message}");
+        }
+        assert_eq!(sort("unknown_error", "division by zero", None, true), OnError::SkipIfCall);
+        assert_eq!(sort("unknown_error", "division by zero", None, false), OnError::Stop);
+        assert_eq!(ActionError::from_client(Error::Disconnected, true).on_error, OnError::Stop);
+    }
 
     #[test]
     fn only_errors_raised_by_the_check_count_as_false() {
         let ha = |code: &str, message: &str| {
-            ConditionError::from_client(Error::Ha { code: code.into(), message: message.into() })
+            ConditionError::from_client(Error::Ha {
+                code: code.into(),
+                message: message.into(),
+                translation_key: None,
+            })
         };
         assert_eq!(
             ha("home_assistant_error", "In 'state' condition: unknown entity light.x"),

@@ -172,10 +172,14 @@ pub enum StmtKind {
     Wait {
         seconds: Expr,
     },
+    /// `timeout`: none (or a null value) waits as long as it takes, 0 gives up at once.
     WaitForTrigger {
         triggers: Vec<Value>,
         timeout: Option<Expr>,
         result_var: Option<String>,
+        /// Blocks saved before "no time limit" existed: a timeout of 0 or less means none.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        zero_is_no_limit: bool,
     },
     Log {
         level: LogLevel,
@@ -215,11 +219,18 @@ pub enum StmtKind {
         name: String,
     },
     /// Waits until `cond` is true (and stays true for `hold` seconds), or `timeout` passes.
-    /// Sets the local variable `wait` to `{"completed": bool}`.
+    /// Sets the local variable `wait` to `{"completed": bool}`. `timeout` as for `WaitForTrigger`.
     WaitUntil {
         cond: Expr,
         hold: Option<Expr>,
         timeout: Option<Expr>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        zero_is_no_limit: bool,
+    },
+    /// HA's `continue_on_error`: an error HA would skip ends `body` and the run carries on
+    /// after it; any other error goes on as usual.
+    ContinueOnError {
+        body: Vec<Stmt>,
     },
 }
 

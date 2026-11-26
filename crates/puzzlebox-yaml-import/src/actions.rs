@@ -440,12 +440,15 @@ impl Builder {
             blocks.iter_mut().for_each(disable);
             return (blocks, Lost::default());
         }
-        match m2.remove("continue_on_error") {
-            None | Some(Value::Bool(false)) => {}
+        let carry_on = match m2.remove("continue_on_error") {
+            None | Some(Value::Bool(false)) => false,
             // Errors these raise stop the script even with continue_on_error.
-            Some(Value::Bool(true)) if matches!(k, "stop" | "variables" | "delay" | "condition") => {}
+            Some(Value::Bool(true)) if matches!(k, "stop" | "variables" | "delay" | "condition") => false,
+            // HA skips other exceptions only for an action call; the scene block is one.
+            Some(Value::Bool(true)) if k == "scene" => return self.raw_one(a),
+            Some(Value::Bool(true)) => true,
             Some(_) => return self.raw_one(a),
-        }
+        };
         let snap = self.snapshot();
         let res = match k {
             "delay" => self.delay(&m2),
@@ -473,6 +476,15 @@ impl Builder {
             }
             // set_conversation_response, templated action names and the rest have no block.
             _ => None,
+        };
+        let res = match res {
+            // ...and a lone block inside counts as that call; a sequence of one isn't.
+            Some((blocks, _)) if carry_on && k == "sequence" && blocks.len() < 2 => None,
+            Some((blocks, lost)) if carry_on => {
+                let b = self.block("control_carry_on", json!({}), vec![("DO", chain(blocks))], None);
+                Some((vec![b], lost))
+            }
+            res => res,
         };
         match res {
             Some((mut blocks, lost)) => {
@@ -780,9 +792,8 @@ impl Builder {
 
     /// The timeout of a wait (seconds) and whether the script stops when it passes.
     fn wait_options(m: &Map<String, Value>) -> Option<(Option<f64>, bool)> {
-        // A zero timeout means "time out at once" in HA but "no timeout" for the blocks.
         let timeout = match m.get("timeout") {
-            Some(t) => Some(period(t).filter(|s| *s > 0.0)?),
+            Some(t) => Some(period(t)?),
             None => None,
         };
         let stop_on_timeout = match m.get("continue_on_timeout") {
@@ -795,8 +806,12 @@ impl Builder {
 
     /// The wait block, then (for `continue_on_timeout: false`) "if the wait timed out, stop".
     fn wait_block(&mut self, mut wait: Value, timeout: Option<f64>, stop_on_timeout: bool) -> Vec<Value> {
-        if let Some(s) = timeout {
-            wait["inputs"]["TIMEOUT"] = json!({"block": self.duration(s)});
+        match timeout {
+            Some(s) => {
+                wait["fields"]["LIMIT"] = json!("limit");
+                wait["inputs"]["TIMEOUT"] = json!({"block": self.duration(s)});
+            }
+            None => wait["fields"]["LIMIT"] = json!("none"),
         }
         let mut out = vec![wait];
         if stop_on_timeout {

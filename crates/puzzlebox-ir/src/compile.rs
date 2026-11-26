@@ -311,6 +311,7 @@ fn stmt_exprs(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
         }
         StmtKind::Throw { message } | StmtKind::Log { message, .. } => e(message, f),
         StmtKind::Parallel { branches } => branches.iter().for_each(|b| body(b, f)),
+        StmtKind::ContinueOnError { body: b } => body(b, f),
         StmtKind::CallService { target, data, .. } => {
             target.iter().chain(data.iter()).for_each(|x| e(x, f));
         }
@@ -331,7 +332,7 @@ fn stmt_exprs(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
             e(seconds, f);
             data.iter().chain(key.iter()).for_each(|x| e(x, f));
         }
-        StmtKind::WaitUntil { cond, hold, timeout } => {
+        StmtKind::WaitUntil { cond, hold, timeout, .. } => {
             e(cond, f);
             hold.iter().chain(timeout.iter()).for_each(|x| e(x, f));
         }
@@ -466,6 +467,16 @@ impl<'a> Compiler<'a> {
 
     pub fn value_opt(&mut self, b: &Block<'_>, input: &str) -> Option<Expr> {
         b.input(input).map(|inner| self.expr(inner))
+    }
+
+    /// A wait's `(timeout, zero_is_no_limit)`. Blocks saved before the "no time limit" choice
+    /// have no LIMIT, and a time of 0 meant no limit then.
+    fn wait_limit(&mut self, b: &Block<'_>) -> (Option<Expr>, bool) {
+        match b.field_str("LIMIT") {
+            Some("none") => (None, false),
+            Some(_) => (self.value_opt(b, "TIMEOUT"), false),
+            None => (self.value_opt(b, "TIMEOUT"), true),
+        }
     }
 
     pub fn stmt_chain(&mut self, first: Option<Block<'_>>) -> Vec<Stmt> {
@@ -881,6 +892,18 @@ impl<'a> Compiler<'a> {
                 handler: self.stmt_chain(b.input("CATCH")),
             },
             "control_throw" => StmtKind::Throw { message: self.value(&b, "MESSAGE") },
+            "control_carry_on" => {
+                let mut body = self.stmt_chain(b.input("DO"));
+                // A lone native action: HA itself knows best which of its errors to skip.
+                if let [Stmt { kind: StmtKind::HaScript { sequence, .. }, .. }] = body.as_mut_slice() {
+                    *sequence = continue_on_error(sequence.take());
+                    return Some(StmtKind::If {
+                        branches: vec![(Expr::lit(b.id(), json!(true)), body)],
+                        otherwise: None,
+                    });
+                }
+                StmtKind::ContinueOnError { body }
+            }
             "control_parallel" => {
                 let mut branches = Vec::new();
                 let mut cur = b.input("BRANCHES");
@@ -925,11 +948,15 @@ impl<'a> Compiler<'a> {
                 StmtKind::HaScript { sequence: json!([config]), args }
             }
             "timer_cancel" => StmtKind::TimerCancel { name: self.required_str(&b, "NAME") },
-            "wait_until" => StmtKind::WaitUntil {
-                cond: self.value(&b, "COND"),
-                hold: self.value_opt(&b, "HOLD"),
-                timeout: self.value_opt(&b, "TIMEOUT"),
-            },
+            "wait_until" => {
+                let (timeout, zero_is_no_limit) = self.wait_limit(&b);
+                StmtKind::WaitUntil {
+                    cond: self.value(&b, "COND"),
+                    hold: self.value_opt(&b, "HOLD"),
+                    timeout,
+                    zero_is_no_limit,
+                }
+            }
             "ha_scene_next" => {
                 let scenes = self.value(&b, "SCENES");
                 let dir = Expr::lit(b.id(), json!(b.field_str("DIRECTION").unwrap_or("next")));
@@ -986,11 +1013,8 @@ impl<'a> Compiler<'a> {
                 if triggers.is_empty() {
                     self.err(&b, "add at least one trigger");
                 }
-                StmtKind::WaitForTrigger {
-                    triggers,
-                    timeout: self.value_opt(&b, "TIMEOUT"),
-                    result_var: None,
-                }
+                let (timeout, zero_is_no_limit) = self.wait_limit(&b);
+                StmtKind::WaitForTrigger { triggers, timeout, result_var: None, zero_is_no_limit }
             }
             "ha_log" => StmtKind::Log {
                 level: match b.field_str("LEVEL") {
@@ -1635,5 +1659,19 @@ impl<'a> Compiler<'a> {
 
     fn binary(&mut self, b: &Block<'_>, bin: BinOp, l: &str, r: &str) -> ExprKind {
         ExprKind::Binary { bin, left: Box::new(self.value(b, l)), right: Box::new(self.value(b, r)) }
+    }
+}
+
+/// A native action sequence with HA's `continue_on_error` on it as a whole.
+fn continue_on_error(sequence: Value) -> Value {
+    match sequence {
+        Value::Array(mut steps) if steps.len() == 1 && steps[0].get("continue_on_error").is_none() => {
+            if let Some(step) = steps[0].as_object_mut() {
+                step.insert("continue_on_error".into(), json!(true));
+                return Value::Array(steps);
+            }
+            json!([{"sequence": steps, "continue_on_error": true}])
+        }
+        other => json!([{"sequence": other, "continue_on_error": true}]),
     }
 }

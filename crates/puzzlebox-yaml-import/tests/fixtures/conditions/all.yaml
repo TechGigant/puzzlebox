@@ -1,0 +1,213 @@
+# Every condition form Home Assistant accepts (2026.11), in one automation.
+alias: Every condition
+triggers:
+  - trigger: state
+    entity_id: binary_sensor.door
+    to: "on"
+    id: door
+  - trigger: time
+    at: "07:00:00"
+    id: morning
+conditions:
+  # state
+  - condition: state
+    entity_id: light.kitchen
+    state: "on"
+  - condition: state
+    entity_id: [light.kitchen, light.hall]
+    state: "off"
+  - condition: state
+    entity_id: "light.kitchen, light.hall"
+    state: "off"
+    match: ALL
+  - condition: state
+    entity_id: alarm_control_panel.home
+    state: [armed_away, armed_home]
+  - condition: state
+    entity_id: binary_sensor.window
+    state: "off"
+    for: "00:10"
+  - condition: state
+    entity_id: binary_sensor.window
+    state: "off"
+    for: {hours: 1, minutes: 30}
+  - condition: state
+    entity_id: binary_sensor.window
+    state: ["off", "unavailable"]
+    for: 45
+  - condition: state
+    entity_id: input_select.mode
+    state: input_select.wanted_mode
+  - condition: state
+    entity_id: [light.a, light.b]
+    state: "on"
+    match: any
+  - condition: state
+    entity_id: light.a
+    state: "on"
+    match: any
+  - condition: state
+    entity_id: light.a
+    attribute: brightness
+    state: 255
+  - condition: state
+    entity_id: [light.a, light.b]
+    state: ["on", "off"]
+  - condition: state
+    entity_id: light.a
+    state: "on"
+    for: "{{ wait_minutes }}"
+  - condition: state
+    entity_id: sun.sun
+    state: below_horizon
+  - condition: state
+    entity_id: person.anna
+    state: not_home
+  # numeric_state
+  - condition: numeric_state
+    entity_id: sensor.temperature
+    above: 17
+    below: 25
+  - condition: numeric_state
+    entity_id: [sensor.a, sensor.b]
+    above: input_number.min
+  - condition: numeric_state
+    entity_id: climate.living
+    attribute: current_temperature
+    below: 20
+  - condition: numeric_state
+    entity_id: sensor.temperature
+    value_template: "{{ float(state.state) + 2 }}"
+    below: 25
+  # template
+  - condition: template
+    value_template: "{{ is_state('device_tracker.iphone', 'away') }}"
+  - "{{ now().hour >= 18 }}"
+  # time
+  - condition: time
+    after: "15:00:00"
+    before: "2:00"
+  - condition: time
+    after: input_datetime.wake_up
+    before: sensor.next_alarm
+    weekday: [mon, tue, wed, thu, fri]
+  - condition: time
+    weekday: sat
+  - condition: time
+    weekday: [sat, sun]
+  - condition: time
+    weekday: [mon, wed]
+  - condition: time
+    before: "07:30:00.5"
+  # sun
+  - condition: sun
+    after: sunset
+    after_offset: "-01:00:00"
+  - condition: sun
+    before: sunrise
+    after: sunset
+  - condition: sun.is_up
+  # zone
+  - condition: zone
+    entity_id: person.anna
+    zone: zone.home
+  - condition: zone.in_zone
+    target: {entity_id: person.anna}
+    options: {zone: zone.work}
+  # trigger
+  - condition: trigger
+    id: door
+  - condition: trigger
+    id: [door, morning]
+  - condition: trigger
+    id: 0
+  # device
+  - condition: device
+    device_id: 0123456789abcdef0123456789abcdef
+    domain: light
+    entity_id: 3456789abcdef0123456789abcdef012
+    type: is_on
+    metadata: {secondary: false}
+  # integration conditions
+  - condition: light.is_on
+    target: {area_id: kitchen}
+    options: {behavior: any}
+  - condition: light.brightness
+    target: {entity_id: light.kitchen}
+    options: {threshold: {type: above, value: {number: 50}}}
+  # combinators
+  - condition: and
+    conditions:
+      - condition: state
+        entity_id: light.a
+        state: "on"
+      - condition: template
+        value_template: "{{ states('sensor.x') | int > 3 }}"
+  - condition: or
+    alias: Anyone moving
+    conditions:
+      - condition: state
+        entity_id: binary_sensor.motion_a
+        state: "on"
+      - condition: state
+        entity_id: binary_sensor.motion_b
+        state: "on"
+  - condition: not
+    conditions:
+      - condition: state
+        entity_id: alarm_control_panel.home
+        state: disarmed
+      - condition: state
+        entity_id: input_boolean.guest
+        state: "on"
+  - and:
+      - condition: state
+        entity_id: light.a
+        state: "on"
+      - "{{ true }}"
+  - or:
+      - condition: numeric_state
+        entity_id: sensor.a
+        above: 1
+      - condition: numeric_state
+        entity_id: sensor.b
+        above: 1
+  - not:
+      - condition: state
+        entity_id: lock.front
+        state: unlocked
+  - condition:
+      - condition: state
+        entity_id: light.a
+        state: "on"
+      - condition: state
+        entity_id: light.b
+        state: "on"
+  - condition: or
+    conditions: []
+  # enabled / alias
+  - condition: state
+    entity_id: light.disabled
+    state: "on"
+    enabled: false
+  - condition: state
+    entity_id: light.templated
+    state: "on"
+    enabled: "{{ use_light }}"
+  - condition: or
+    conditions:
+      - condition: state
+        entity_id: light.a
+        state: "on"
+        enabled: "off"
+      - condition: state
+        entity_id: light.b
+        state: "on"
+        enabled: "{{ use_b }}"
+  - condition: state
+    alias: Kitchen light is on
+    entity_id: light.kitchen
+    state: "on"
+actions:
+  - action: light.turn_on
+    target: {entity_id: light.hall}

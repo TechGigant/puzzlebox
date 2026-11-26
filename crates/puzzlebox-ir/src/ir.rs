@@ -365,3 +365,63 @@ pub fn substitute_args(template: &Value, args: &BTreeMap<String, Value>) -> Valu
 pub fn arg_placeholder(name: &str) -> Value {
     serde_json::json!({ "$arg": name })
 }
+
+/// Turns an entity id, a comma-separated list, a list, or a target dictionary (or a list
+/// mixing them, e.g. `[light.x, {area_id: kitchen}]`) into an HA target `{entity_id, area_id, ...}`.
+pub fn normalize_target(v: &Value) -> Result<Value, String> {
+    fn add(out: &mut serde_json::Map<String, Value>, key: &str, v: &Value) {
+        let list = out.entry(key.to_owned()).or_insert_with(|| Value::Array(vec![]));
+        let Value::Array(list) = list else { return };
+        let items: Vec<Value> = match v {
+            Value::Array(a) => a.clone(),
+            Value::String(s) => s
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| Value::String(s.into()))
+                .collect(),
+            Value::Null => vec![],
+            other => vec![other.clone()],
+        };
+        for i in items {
+            if !list.contains(&i) {
+                list.push(i);
+            }
+        }
+    }
+    fn walk(out: &mut serde_json::Map<String, Value>, v: &Value) -> Result<(), String> {
+        match v {
+            Value::String(_) => add(out, "entity_id", v),
+            Value::Array(items) => {
+                for i in items {
+                    walk(out, i)?;
+                }
+            }
+            Value::Object(m) => {
+                for (k, x) in m {
+                    add(out, k, x);
+                }
+            }
+            Value::Null => {}
+            other => return Err(format!("invalid target {other}")),
+        }
+        Ok(())
+    }
+    let mut out = serde_json::Map::new();
+    walk(&mut out, v)?;
+    Ok(Value::Object(out))
+}
+
+#[cfg(test)]
+mod target_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mixes_entities_and_areas() {
+        let t = normalize_target(&json!(["light.a, light.b", {"area_id": "kitchen"}, {"area_id": ["hall"]}]))
+            .unwrap();
+        assert_eq!(t, json!({"entity_id": ["light.a", "light.b"], "area_id": ["kitchen", "hall"]}));
+        assert_eq!(normalize_target(&json!(null)).unwrap(), json!({}));
+    }
+}

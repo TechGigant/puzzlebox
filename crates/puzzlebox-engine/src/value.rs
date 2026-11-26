@@ -570,19 +570,7 @@ pub fn history_stat(points: &[(f64, String)], start: f64, end: f64, op: &str, st
 
 /// Accepts an entity id, comma-separated ids, a list of ids, or a full target dict.
 pub fn to_target(v: Value) -> VResult {
-    Ok(match v {
-        Value::String(s) => {
-            let ids: Vec<&str> = s.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-            json!({"entity_id": ids})
-        }
-        Value::Array(items) => {
-            let ids: Vec<String> = items.iter().map(to_text).collect();
-            json!({"entity_id": ids})
-        }
-        v @ Value::Object(_) => v,
-        Value::Null => json!({}),
-        other => return Err(format!("invalid target {other}")),
-    })
+    puzzlebox_ir::normalize_target(&v)
 }
 
 #[cfg(test)]

@@ -397,6 +397,15 @@ impl<'a> Compiler<'a> {
                 ha(cfg)
             }
             "ha_trigger_ha_start" => ha(json!({"trigger": "homeassistant", "event": "start"})),
+            "ha_trigger_every" => {
+                let n = b.field_f64("N").unwrap_or(5.0).max(1.0) as u64;
+                let unit = match b.field_str("UNIT") {
+                    Some("seconds") => "seconds",
+                    Some("hours") => "hours",
+                    _ => "minutes",
+                };
+                ha(json!({"trigger": "time_pattern", unit: format!("/{n}")}))
+            }
             "ha_trigger_raw" => match parse_config(b.field_str("CONFIG").unwrap_or("")) {
                 Ok(v) => ha(v),
                 Err(e) => {
@@ -1004,6 +1013,20 @@ impl<'a> Compiler<'a> {
                     cfg["weekday"] = json!(days);
                 }
                 ExprKind::Condition { config: cfg, args: BTreeMap::new() }
+            }
+            "ha_area" | "ha_device" | "ha_floor" | "ha_label" => {
+                let key = format!("{}_id", b.ty().trim_start_matches("ha_"));
+                let ids: Vec<&str> = b
+                    .field_str("ID")
+                    .unwrap_or("")
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if ids.is_empty() {
+                    self.err(b, format!("choose a {}", b.ty().trim_start_matches("ha_")));
+                }
+                lit(json!({ key: ids }))
             }
             "ha_has_value" | "ha_friendly_name" => {
                 let e = self.entity_expr(b);

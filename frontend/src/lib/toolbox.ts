@@ -50,6 +50,7 @@ export function buildToolbox(extra: ExtraCategory[] = []): Def {
         block('ha_trigger_sun'),
         block('ha_trigger_event'),
         block('ha_trigger_ha_start'),
+        block('ha_trigger_every'),
         block('engine_trigger_cron'),
         block('engine_trigger_webhook'),
         block('engine_trigger_mqtt'),
@@ -60,6 +61,10 @@ export function buildToolbox(extra: ExtraCategory[] = []): Def {
       ]),
       cat('State', 'condition', [
         block('ha_entity'),
+        block('ha_area'),
+        block('ha_floor'),
+        block('ha_label'),
+        block('ha_device'),
         block('ha_state'),
         block('ha_attribute'),
         block('ha_is_state'),

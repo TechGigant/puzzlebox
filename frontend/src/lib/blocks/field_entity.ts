@@ -357,6 +357,10 @@ export class FieldRegistry extends FieldSuggest {
     super(value);
   }
 
+  static fromJson(options: Blockly.FieldTextInputFromJsonConfig & { kind?: string }) {
+    return new FieldRegistry(options.text ?? '', options.kind ?? 'area');
+  }
+
   protected override load() {
     return loadRegistry().then(() => undefined);
   }
@@ -386,4 +390,5 @@ export function registerFieldEntity() {
   if (registered) return;
   registered = true;
   Blockly.fieldRegistry.register('field_entity', FieldEntity);
+  Blockly.fieldRegistry.register('field_registry', FieldRegistry);
 }

@@ -123,3 +123,22 @@ fn numeric_trigger_accepts_numbers_and_entities() {
         "type": "ha_trigger_numeric", "id": "n", "fields": {"ENTITY": "sensor.t", "ABOVE": "warm"}}}}}]}});
     assert!(compile(&bad, &NoExternals).is_err());
 }
+
+#[test]
+fn every_trigger_and_area_targets() {
+    let ws = json!({"blocks": {"languageVersion": 0, "blocks": [{
+        "type": "ha_when", "id": "w",
+        "inputs": {
+            "TRIGGERS": {"block": {"type": "ha_trigger_every", "id": "e", "fields": {"N": 10, "UNIT": "minutes"}}},
+            "DO": {"block": {"type": "ha_call_service", "id": "c", "fields": {"SERVICE": "light.turn_off"},
+                "inputs": {"TARGET": {"block": {"type": "ha_area", "id": "a", "fields": {"ID": "kitchen, hall"}}}}}}
+        }
+    }]}});
+    let p = compile(&ws, &NoExternals).unwrap();
+    let HandlerKind::Triggers { triggers } = &p.handlers[0].kind else { panic!() };
+    let Trigger::Ha { config, .. } = &triggers[0] else { panic!() };
+    assert_eq!(config["minutes"], "/10");
+    assert_eq!(config["trigger"], "time_pattern");
+    let StmtKind::CallService { target: Some(t), .. } = &p.handlers[0].body[0].kind else { panic!() };
+    assert_eq!(t.kind, ExprKind::Lit { value: json!({"area_id": ["kitchen", "hall"]}) });
+}

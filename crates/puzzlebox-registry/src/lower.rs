@@ -46,14 +46,7 @@ fn split_list(s: &str) -> Value {
 
 /// Normalizes a constant target expression (entity id, list, or target dict) to an HA target.
 fn const_target(v: &Value) -> Value {
-    match v {
-        Value::String(s) => {
-            let ids: Vec<&str> = s.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
-            json!({ "entity_id": ids })
-        }
-        Value::Array(items) => json!({ "entity_id": items }),
-        other => other.clone(),
-    }
+    puzzlebox_ir::normalize_target(v).unwrap_or_else(|_| v.clone())
 }
 
 /// Turns a dictionary of literals into one literal, so fixed thresholds work in triggers.
@@ -68,6 +61,7 @@ fn const_fold(e: Expr) -> Expr {
                 }
                 Some(Value::Object(m))
             }
+            ExprKind::List { items } => items.iter().map(lit).collect::<Option<Vec<_>>>().map(Value::Array),
             _ => None,
         }
     }
@@ -168,15 +162,19 @@ impl RegistryLowerer {
     ) -> (Map<String, Value>, Option<Value>) {
         let mut out = Map::new();
         for (k, e) in &args.exprs {
-            match &e.kind {
+            // Lists and dictionaries built from fixed values count as fixed.
+            match const_fold(e.clone()).kind {
                 ExprKind::Lit { value } => {
-                    out.insert(k.clone(), value.clone());
+                    out.insert(k.clone(), value);
                 }
-                _ => c.err(&b, format!("'{k}' must be a fixed value for triggers")),
+                _ => c.err(
+                    &b,
+                    format!("'{k}' must be a fixed value for triggers (use a value block, not a variable)"),
+                ),
             }
         }
-        let target = match &args.target {
-            Some(Expr { kind: ExprKind::Lit { value }, .. }) => Some(const_target(value)),
+        let target = match args.target.clone().map(const_fold) {
+            Some(Expr { kind: ExprKind::Lit { value }, .. }) => Some(const_target(&value)),
             Some(_) => {
                 c.err(&b, "the trigger target must be a fixed entity or list");
                 None

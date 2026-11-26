@@ -132,6 +132,12 @@ export const CORE_BLOCKS: Json[] = [
   trigger('ha_trigger_sun', '%1 with offset %2 s', [dropdown('EVENT', [['sunset', 'sunset'], ['sunrise', 'sunrise']]), number('OFFSET', 0)], 'Fires at sunrise or sunset.'),
   trigger('ha_trigger_event', 'event %1 fires', [text('EVENT_TYPE', 'my_event')], 'Fires when a Home Assistant event is fired.'),
   trigger('ha_trigger_ha_start', 'Home Assistant starts', [], 'Fires when Home Assistant has started.'),
+  trigger(
+    'ha_trigger_every',
+    'every %1 %2',
+    [number('N', 5, { min: 1, precision: 1 }), dropdown('UNIT', [['minutes', 'minutes'], ['hours', 'hours'], ['seconds', 'seconds']])],
+    'Fires repeatedly, e.g. every 5 minutes (at :00, :05, :10…).',
+  ),
   trigger('engine_trigger_cron', 'schedule (cron) %1', [text('CRON', '0 */5 * * * *')], 'Cron schedule in local time. 5 or 6 fields; the optional first field is seconds.'),
   trigger(
     'engine_trigger_webhook',
@@ -167,6 +173,10 @@ export const CORE_BLOCKS: Json[] = [
 
   // --- state & conditions ---------------------------------------------------
   expr('ha_entity', 'entity %1', [entity('ENTITY', 'light.kitchen')], 'String', 'condition_blocks', 'An entity id.'),
+  expr('ha_area', 'area %1', [{ type: 'field_registry', name: 'ID', text: '', kind: 'area' }], null, 'condition_blocks', 'An area, usable as an action target ("turn off the lights in the kitchen"). Several can be separated with commas.'),
+  expr('ha_floor', 'floor %1', [{ type: 'field_registry', name: 'ID', text: '', kind: 'floor' }], null, 'condition_blocks', 'A floor, usable as an action target.'),
+  expr('ha_label', 'label %1', [{ type: 'field_registry', name: 'ID', text: '', kind: 'label' }], null, 'condition_blocks', 'A label, usable as an action target.'),
+  expr('ha_device', 'device %1', [{ type: 'field_registry', name: 'ID', text: '', kind: 'device' }], null, 'condition_blocks', 'A device, usable as an action target.'),
   expr('ha_state', 'state of %1', [entity('ENTITY', 'sensor.temperature')], null, 'condition_blocks', 'Current state of an entity.'),
   expr('ha_attribute', '%1 of %2', [text('ATTRIBUTE', 'brightness'), entity('ENTITY', 'light.kitchen')], null, 'condition_blocks', 'An attribute of an entity.'),
   expr('ha_is_state', '%1 is %2', [entity('ENTITY', 'light.kitchen'), text('STATE', 'on')], 'Boolean', 'condition_blocks', 'True if the entity is in the given state.'),

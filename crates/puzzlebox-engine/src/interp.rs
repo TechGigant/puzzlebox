@@ -529,6 +529,33 @@ impl RunCtx {
                     value::binary(*bin, &l, &r).at(id)?
                 }
                 ExprKind::Not { expr } => json!(!truthy(&self.eval(frame, expr).await?)),
+                ExprKind::Each { list, var, expr, map } => {
+                    let items = match self.eval(frame, list).await? {
+                        Value::Array(a) => a,
+                        Value::Null => vec![],
+                        other => value::entity_list(&other).into_iter().map(Value::String).collect(),
+                    };
+                    let saved = lock(&self.locals).get(var).cloned();
+                    let mut out = Vec::new();
+                    for item in items {
+                        lock(&self.locals).insert(var.clone(), item.clone());
+                        let v = self.eval(frame, expr).await;
+                        let v = match v {
+                            Ok(v) => v,
+                            Err(e) => {
+                                restore(&self.locals, var, saved);
+                                return Err(e);
+                            }
+                        };
+                        if *map {
+                            out.push(v);
+                        } else if truthy(&v) {
+                            out.push(item);
+                        }
+                    }
+                    restore(&self.locals, var, saved);
+                    Value::Array(out)
+                }
                 ExprKind::Ternary { cond, then, otherwise } => {
                     if truthy(&self.eval(frame, cond).await?) {
                         self.eval(frame, then).await?
@@ -711,4 +738,13 @@ impl RunCtx {
 
 fn is_random_index(args: &[Expr]) -> bool {
     matches!(args.get(1), Some(Expr { kind: ExprKind::Builtin { name, .. }, .. }) if name == "random_index")
+}
+
+/// Puts back a local variable that a filter/map block borrowed for its items.
+fn restore(locals: &Mutex<Map<String, Value>>, var: &str, saved: Option<Value>) {
+    let mut l = lock(locals);
+    match saved {
+        Some(v) => l.insert(var.to_owned(), v),
+        None => l.remove(var),
+    };
 }

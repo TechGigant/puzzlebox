@@ -21,3 +21,4 @@ tracing.workspace = true
 chrono = "0.4.45"
 tokio-util = "0.7.20"
 croner = "5.0.0"
+regex = "1.13.2"

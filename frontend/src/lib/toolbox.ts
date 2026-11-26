@@ -100,6 +100,18 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
       cat('Flow', 'flow', [
         block('controls_if'),
         block('controls_if', undefined, { extraState: { hasElse: true } }),
+        block('control_switch', {
+          CASES: {
+            block: {
+              type: 'control_case',
+              inputs: { VALUE: txt('day') },
+              next: { block: { type: 'control_case', inputs: { VALUE: txt('night') }, next: { block: { type: 'control_case_default' } } } },
+            },
+          },
+        }),
+        block('control_case', { VALUE: txt('value') }),
+        block('control_case_default'),
+        block('control_section'),
         block('timer_start', { SECONDS: num(300) }),
         block('timer_cancel'),
         block('timer_running'),
@@ -120,6 +132,7 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('logic_boolean'),
         block('logic_null'),
         block('logic_ternary'),
+        block('logic_or_default', { B: txt('default') }),
       ]),
       cat('Loops', 'loop', [
         block('controls_repeat_ext', { TIMES: num(3) }),
@@ -135,6 +148,7 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('math_round', { NUM: num(3.1) }),
         block('math_modulo', { DIVIDEND: num(64), DIVISOR: num(10) }),
         block('math_constrain', { VALUE: num(50), LOW: num(1), HIGH: num(100) }),
+        block('math_between', { VALUE: num(21), LOW: num(18), HIGH: num(24) }),
         block('math_random_int', { FROM: num(1), TO: num(100) }),
         block('math_on_list'),
         block('math_number_property', { NUMBER_TO_CHECK: num(0) }),
@@ -148,6 +162,8 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('text_changeCase', { TEXT: txt('abc') }),
         block('text_trim', { TEXT: txt(' abc ') }),
         block('text_to_number', { TEXT: txt('42') }),
+        block('text_split_at', { SEP: txt(':'), TEXT: txt('mode: night') }),
+        block('text_regex', { TEXT: txt('battery 42%') }),
         block('to_text'),
         block('text_append', { TEXT: txt('') }),
       ]),
@@ -162,6 +178,9 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('lists_split', { DELIM: txt(',') }),
         block('lists_reverse'),
         block('lists_repeat', { NUM: num(5) }),
+        block('lists_filter'),
+        block('lists_map'),
+        block('lists_item'),
       ]),
       cat('Dictionaries', 'dict', [
         block('dict_create', { ITEMS: { block: { type: 'dict_pair' } } }),

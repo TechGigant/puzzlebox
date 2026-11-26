@@ -40,8 +40,25 @@ function update(b: Blockly.BlockSvg) {
   if (field && field.getValue() !== text) field.setValue(text);
 }
 
+let patched = false;
+/** Blockly builds a collapsed block's text with `toString(COLLAPSE_CHARS)`; answer with ours. */
+function patchCollapsedText() {
+  if (patched) return;
+  patched = true;
+  const proto = Blockly.BlockSvg.prototype;
+  const original = proto.toString;
+  proto.toString = function (this: Blockly.BlockSvg, maxLength?: number, emptyToken?: string) {
+    if (maxLength === Blockly.COLLAPSE_CHARS && this.isCollapsed()) {
+      // `summary` calls toString with other lengths, so this doesn't recurse.
+      return summary(this);
+    }
+    return original.call(this, maxLength, emptyToken);
+  };
+}
+
 /** Keeps collapsed blocks' text up to date; returns a cleanup function. */
 export function installSummaries(ws: Blockly.WorkspaceSvg): () => void {
+  patchCollapsedText();
   let queued = false;
   const refresh = () => {
     if (queued) return;

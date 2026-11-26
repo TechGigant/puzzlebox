@@ -17,6 +17,21 @@
 - **Backpack** (top right): drop blocks in to reuse them in other programs.
 - Nested blocks of the same colour alternate between two shades, and there's
   a compact block size for big programs (Settings → Editor).
+- **Program folders**: group programs into folders (also nested) by dragging
+  them or with "Move"; search covers names, folders and descriptions.
+- **Favourites** at the top of the toolbox: pinned blocks (right-click → Add
+  to favourites) and your recently used ones.
+- **History**: every save that changes the blocks is kept (the last 30) and
+  can be restored from the editor.
+- **New blocks**: switch / case / otherwise, section labels to organise long
+  stacks, "items of a list where …" and "each item as …" with an "item"
+  block, regular expressions, text before/after, "is between", and "or if
+  empty" for unavailable values.
+- Alt+drag leaves a copy behind, Ctrl+drag pulls out a single block, and
+  Ctrl+V pastes at the pointer.
+- Collapsed blocks show a summary ("when motion turns on → 6 blocks").
+- Long dropdowns get a filter box; stacks outside any "when" block are
+  drawn faded; the editor shows the program's block count.
 
 ## 0.3.0
 

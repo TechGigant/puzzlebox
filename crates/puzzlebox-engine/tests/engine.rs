@@ -560,3 +560,91 @@ async fn loose_stacks_run_on_request_only() {
     next_finished(&mut events).await;
     assert_eq!(ha.calls(), ["light.turn_on", "light.turn_off"]);
 }
+
+fn set(id: &str, var: &str, value: Value) -> Value {
+    b("variables_set", id, json!({"VAR": {"id": var}}), json!({"VALUE": blk(value)}))
+}
+
+#[tokio::test]
+async fn switch_filter_map_and_text_helpers() {
+    let (engine, ha) = setup().await;
+    let mut events = engine.subscribe();
+    let mut list = b(
+        "lists_create_with",
+        "l",
+        json!({}),
+        json!({"ADD0": blk(num("a", 3.0)), "ADD1": blk(num("b", 12.0)), "ADD2": blk(num("c", 7.0))}),
+    );
+    list["extraState"] = json!({"itemCount": 3});
+    let item = |id: &str| b("lists_item", id, json!({}), json!({}));
+    let over5 = b(
+        "logic_compare",
+        "cmp",
+        json!({"OP": "GT"}),
+        json!({"A": blk(item("i1")), "B": blk(num("five", 5.0))}),
+    );
+    let filtered = b("lists_filter", "f", json!({}), json!({"LIST": blk(list), "COND": blk(over5)}));
+    let doubled = b(
+        "lists_map",
+        "m",
+        json!({}),
+        json!({"LIST": blk(filtered), "EXPR": blk(b("math_arithmetic", "mul", json!({"OP": "MULTIPLY"}),
+            json!({"A": blk(item("i2")), "B": blk(num("two", 2.0))})))}),
+    );
+    let case = |id: &str, value: &str, service: &str| {
+        b(
+            "control_case",
+            id,
+            json!({}),
+            json!({"VALUE": blk(text(&format!("{id}v"), value)),
+            "DO": blk(call(&format!("{id}c"), service, "light.a"))}),
+        )
+    };
+    let otherwise = b(
+        "control_case_default",
+        "dflt",
+        json!({}),
+        json!({"DO": blk(call("dc", "light.toggle", "light.a"))}),
+    );
+    let switch = b(
+        "control_switch",
+        "sw",
+        json!({}),
+        json!({"VALUE": blk(b("text_split_at", "sa", json!({"WHERE": "after"}),
+                json!({"TEXT": blk(text("tt", "mode: night")), "SEP": blk(text("sep", ": "))}))),
+            "CASES": blk(chain(vec![case("c1", "day", "light.turn_on"), case("c2", "night", "light.turn_off"), otherwise]))}),
+    );
+    let regex = b(
+        "text_regex",
+        "re",
+        json!({"OP": "match", "PATTERN": "(\\d+)%"}),
+        json!({"TEXT": blk(text("rt", "battery 42%"))}),
+    );
+    let fallback = b(
+        "logic_or_default",
+        "od",
+        json!({}),
+        json!({"A": blk(text("u", "unavailable")), "B": blk(num("z", 0.0))}),
+    );
+    let body = chain(vec![
+        b("control_section", "sec", json!({"TEXT": "lights"}), json!({})),
+        switch,
+        set("s1", "out", doubled),
+        set("s2", "pct", regex),
+        set("s3", "fb", fallback),
+    ]);
+    let vars =
+        json!([{"name": "out", "id": "out"}, {"name": "pct", "id": "pct"}, {"name": "fb", "id": "fb"}]);
+    let (_, errors) =
+        engine.save(program("sw", workspace(vec![on_run(body)], vars), "single")).await.unwrap();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert!(engine.run_now("sw", None, None));
+    let (status, error) = next_finished(&mut events).await;
+    assert_eq!(status, "ok", "{error:?}");
+    assert_eq!(ha.calls(), ["light.turn_off"], "only the matching case runs");
+    let run = engine.store().list_runs("sw", 1).await.unwrap().remove(0);
+    let vars = engine.store().get_run(&run.id).await.unwrap().unwrap().trace.unwrap()["variables"].clone();
+    assert_eq!(vars["out"], json!([24, 14]));
+    assert_eq!(vars["pct"], json!("42"));
+    assert_eq!(vars["fb"], json!(0));
+}

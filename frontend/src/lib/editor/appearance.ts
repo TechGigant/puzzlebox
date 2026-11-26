@@ -66,3 +66,12 @@ export function applyZebra(ws: Blockly.WorkspaceSvg, on: boolean) {
     if (b.getStyleName() !== want && ws.getTheme().blockStyles[want]) b.setStyle(want);
   }
 }
+
+const ENTRY = /^(ha_when|ha_on_run|ha_on_start|procedures_def)/;
+
+/** Stacks outside any entry block never run on their own; they're drawn faded. */
+export function markLoose(ws: Blockly.WorkspaceSvg) {
+  for (const b of ws.getTopBlocks(false) as Blockly.BlockSvg[]) {
+    b.getSvgRoot().classList.toggle('pb-loose', !ENTRY.test(b.type));
+  }
+}

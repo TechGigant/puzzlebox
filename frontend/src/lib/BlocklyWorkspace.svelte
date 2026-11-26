@@ -9,6 +9,7 @@
   import { registerSwitchMenu } from './editor/switching';
   import { registerUsageMenu } from './editor/usages';
   import { noteUsed, registerFavourites, registerFavouritesMenu } from './editor/favourites';
+  import { installDropdownSearch } from './editor/dropdown_search';
 
   Blockly.setLocale(En as unknown as Record<string, string>);
   registerCoreBlocks();
@@ -16,6 +17,7 @@
   registerSwitchMenu();
   registerUsageMenu();
   registerFavouritesMenu();
+  installDropdownSearch();
 
   /** Per-workspace callbacks for the editor that owns it (menus are registered globally). */
   const runStackHandlers = new Map<string, (topBlockId: string) => void>();
@@ -103,7 +105,7 @@
   import { api, type CompileError } from './api';
   import QuickAdd from './editor/QuickAdd.svelte';
   import { insert, toolboxEntries, workspaceEntries, type Entry } from './editor/quickadd';
-  import { applyZebra, loadPrefs, rendererName } from './editor/appearance';
+  import { applyZebra, loadPrefs, markLoose, rendererName } from './editor/appearance';
   import { installDragTricks } from './editor/drag';
   import { installSummaries } from './editor/summaries';
 
@@ -142,7 +144,7 @@
   }
 
   function pick(e: Entry) {
-    if (workspace && quick) insert(workspace, e.state, quick.at);
+    if (workspace && quick) noteUsed(insert(workspace, e.state, quick.at));
     quick = null;
     host.querySelector<HTMLElement>('.blocklySvg')?.focus();
   }
@@ -338,7 +340,10 @@
       zebraQueued = true;
       requestAnimationFrame(() => {
         zebraQueued = false;
-        if (workspace) applyZebra(workspace, prefs.zebra);
+        if (workspace) {
+          applyZebra(workspace, prefs.zebra);
+          markLoose(workspace);
+        }
       });
     };
 
@@ -357,7 +362,8 @@
         api.setEditorData('backpack', backpack.getContents()).catch(() => {});
       }
       if (!e.isUiEvent || e.type === Blockly.Events.THEME_CHANGE) zebra();
-      if (e.type === Blockly.Events.BLOCK_CREATE && !loading && workspace) {
+      // A block created while a drag is under way came out of the toolbox.
+      if (e.type === Blockly.Events.BLOCK_CREATE && !loading && workspace?.isDragging()) {
         const created = workspace.getBlockById((e as Blockly.Events.BlockCreate).blockId ?? '');
         if (created && !created.getParent()) noteUsed(created);
       }
@@ -448,6 +454,26 @@
     stroke: #e53935;
     stroke-width: 4px;
     filter: drop-shadow(0 0 8px #e53935);
+  }
+  .workspace :global(.pb-loose) {
+    opacity: 0.6;
+  }
+  .workspace :global(.pb-loose:hover),
+  .workspace :global(.pb-loose.blocklySelected) {
+    opacity: 0.9;
+  }
+  :global(.pb-dropdown-search) {
+    display: block;
+    box-sizing: border-box;
+    width: calc(100% - 12px);
+    margin: 6px;
+    padding: 6px 8px;
+    border: 1px solid var(--pb-divider);
+    border-radius: 6px;
+    font: inherit;
+    font-size: 13px;
+    color: var(--pb-text);
+    background: var(--pb-card);
   }
   .workspace :global(.pb-usage > .blocklyPath) {
     stroke: var(--pb-primary);

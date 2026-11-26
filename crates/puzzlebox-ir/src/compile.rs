@@ -81,6 +81,8 @@ pub struct Compiler<'a> {
     persistent: Vec<String>,
     /// Timer bodies, compiled into their own handlers.
     timer_handlers: Vec<Handler>,
+    /// Item variables of the enclosing "filter"/"map" blocks (innermost last).
+    item_vars: Vec<String>,
 }
 
 pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec<CompileError>> {
@@ -90,6 +92,7 @@ pub fn compile(workspace: &Value, ext: &dyn BlockLowerer) -> Result<Program, Vec
         ext,
         persistent: Vec::new(),
         timer_handlers: Vec::new(),
+        item_vars: Vec::new(),
     };
     for v in workspace.get("variables").and_then(Value::as_array).into_iter().flatten() {
         let (Some(id), Some(name)) =
@@ -324,6 +327,18 @@ impl<'a> Compiler<'a> {
         out
     }
 
+    fn case_chain<'b>(&self, first: Option<Block<'b>>) -> Vec<Block<'b>> {
+        let mut out = Vec::new();
+        let mut cur = first;
+        while let Some(b) = cur {
+            if b.enabled() {
+                out.push(b);
+            }
+            cur = b.next();
+        }
+        out
+    }
+
     pub fn trigger_chain(&mut self, first: Option<Block<'_>>) -> Vec<Trigger> {
         let mut out = Vec::new();
         let mut cur = first;
@@ -490,6 +505,55 @@ impl<'a> Compiler<'a> {
                 let otherwise = (b.extra("hasElse").and_then(Value::as_bool) == Some(true))
                     .then(|| self.stmt_chain(b.input("ELSE")));
                 StmtKind::If { branches, otherwise }
+            }
+            // A label for organising a stack; does nothing.
+            "control_section" => return None,
+            "control_switch" => {
+                // The value is computed once, then compared with each case in order.
+                let var = format!("__switch_{}", b.id());
+                let value = self.value(&b, "VALUE");
+                let mut branches = Vec::new();
+                let mut otherwise = None;
+                for case in self.case_chain(b.input("CASES")) {
+                    if case.ty() == "control_case_default" {
+                        if otherwise.is_some() {
+                            self.err(&case, "only one \"otherwise\" per switch");
+                        }
+                        otherwise = Some(self.stmt_chain(case.input("DO")));
+                        continue;
+                    }
+                    if case.ty() != "control_case" {
+                        self.err(&case, "only case blocks fit in a switch");
+                        continue;
+                    }
+                    let target = Expr {
+                        id: b.id().into(),
+                        kind: ExprKind::Var { name: var.clone(), scope: VarScope::Local },
+                    };
+                    let case_value = self.value(&case, "VALUE");
+                    let cond = Expr {
+                        id: case.id().into(),
+                        kind: self.builtin("case_matches", vec![target, case_value]),
+                    };
+                    branches.push((cond, self.stmt_chain(case.input("DO"))));
+                }
+                if branches.is_empty() && otherwise.is_none() {
+                    self.err(&b, "add a case");
+                }
+                let set = Stmt {
+                    id: b.id().into(),
+                    kind: StmtKind::Set { name: var, scope: VarScope::Local, value },
+                };
+                let check = Stmt { id: b.id().into(), kind: StmtKind::If { branches, otherwise } };
+                // Two statements under one block id: wrap them in a single-branch "if true".
+                return Some(StmtKind::If {
+                    branches: vec![(Expr::lit(b.id(), json!(true)), vec![set, check])],
+                    otherwise: None,
+                });
+            }
+            "control_case" | "control_case_default" => {
+                self.err(&b, "put this inside a switch block");
+                return None;
             }
             "controls_repeat_ext" => {
                 StmtKind::Repeat { times: self.value(&b, "TIMES"), body: self.stmt_chain(b.input("DO")) }
@@ -1100,6 +1164,51 @@ impl<'a> Compiler<'a> {
                 };
                 ExprKind::Template { template: format!("{{{{ {func}('{name}'){filter} | list }}}}") }
             }
+            "logic_or_default" => {
+                let args = vec![self.value(b, "A"), self.value(b, "B")];
+                self.builtin("or_default", args)
+            }
+            "math_between" => {
+                let args = vec![self.value(b, "VALUE"), self.value(b, "LOW"), self.value(b, "HIGH")];
+                self.builtin("between", args)
+            }
+            "text_regex" => {
+                let op = match b.field_str("OP") {
+                    Some("match") => "regex_match",
+                    Some("replace") => "regex_replace",
+                    Some("all") => "regex_all",
+                    _ => "regex_test",
+                };
+                let mut args = vec![
+                    self.value(b, "TEXT"),
+                    Expr::lit(b.id(), json!(b.field_str("PATTERN").unwrap_or(""))),
+                ];
+                if op == "regex_replace" {
+                    args.push(self.value_opt(b, "WITH").unwrap_or_else(|| Expr::lit(b.id(), json!(""))));
+                }
+                self.builtin(op, args)
+            }
+            "text_split_at" => {
+                let name = if b.field_str("WHERE") == Some("after") { "text_after" } else { "text_before" };
+                let args = vec![self.value(b, "TEXT"), self.value(b, "SEP")];
+                self.builtin(name, args)
+            }
+            "lists_filter" | "lists_map" => {
+                let var = format!("__item_{}", b.id());
+                let list = self.value(b, "LIST");
+                self.item_vars.push(var.clone());
+                let slot = if b.ty() == "lists_filter" { "COND" } else { "EXPR" };
+                let expr = self.value(b, slot);
+                self.item_vars.pop();
+                ExprKind::Each { list: Box::new(list), var, expr: Box::new(expr), map: b.ty() == "lists_map" }
+            }
+            "lists_item" => match self.item_vars.last() {
+                Some(var) => ExprKind::Var { name: var.clone(), scope: VarScope::Local },
+                None => {
+                    self.err(b, "\"item\" only works inside a filter or transform block");
+                    lit(Value::Null)
+                }
+            },
             "time_today_at" => {
                 let t = Expr::lit(b.id(), json!(b.field_str("TIME").unwrap_or("00:00")));
                 self.builtin("today_at", vec![t])

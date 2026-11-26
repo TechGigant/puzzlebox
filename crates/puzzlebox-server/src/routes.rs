@@ -89,6 +89,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/programs/{id}/cancel", post(programs::cancel))
         .route("/api/programs/{id}/enabled", post(programs::set_enabled))
         .route("/api/programs/{id}/runs", get(programs::runs))
+        .route("/api/programs/{id}/versions", get(programs::versions))
+        .route("/api/programs/{id}/versions/{version}", get(programs::version))
         .route("/api/runs/{id}", get(programs::run_detail))
         .route("/api/registry", get(registry_blocks))
         .route("/api/import", post(import_yaml))

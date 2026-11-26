@@ -309,6 +309,68 @@ export const CORE_BLOCKS: Json[] = [
   // --- values ----------------------------------------------------------------------
   expr('yaml_value', 'YAML %1', [multiline('CONFIG', '')], null, 'dict_blocks', 'A list, dictionary or other value written as YAML or JSON. Empty means "not set".'),
 
+
+  // --- switch / organising ------------------------------------------------------
+  {
+    type: 'control_switch',
+    message0: 'switch on %1 %2 %3',
+    args0: [value('VALUE'), dummy, statements('CASES', 'Case')],
+    previousStatement: null,
+    nextStatement: null,
+    style: 'flow_blocks',
+    tooltip: 'Runs the first case whose value matches (a list matches any of its values), or "otherwise" if none does.',
+  },
+  {
+    type: 'control_case',
+    message0: 'case %1 %2 %3',
+    args0: [value('VALUE'), dummy, statements('DO')],
+    previousStatement: 'Case',
+    nextStatement: 'Case',
+    style: 'flow_blocks',
+    tooltip: 'Runs when the switch value equals this (or is in this list).',
+  },
+  {
+    type: 'control_case_default',
+    message0: 'otherwise %1 %2',
+    args0: [dummy, statements('DO')],
+    previousStatement: 'Case',
+    nextStatement: 'Case',
+    style: 'flow_blocks',
+    tooltip: 'Runs when no case matched.',
+  },
+  action('control_section', '— %1 —', [text('TEXT', 'section')], 'A label to organise long stacks. It does nothing when the program runs.', 'section_blocks'),
+
+  // --- more logic, numbers, text and lists -------------------------------------
+  expr('logic_or_default', '%1 or if empty %2', [value('A'), value('B')], null, 'logic_blocks', 'The first value, or the second one if the first is empty, unknown or unavailable.'),
+  expr('math_between', '%1 is between %2 and %3', [value('VALUE', 'Number'), value('LOW', 'Number'), value('HIGH', 'Number')], 'Boolean', 'math_blocks', 'True if the number is between the two (inclusive).'),
+  expr(
+    'text_split_at',
+    'text %1 %2 %3',
+    [dropdown('WHERE', [['before', 'before'], ['after', 'after']]), value('SEP', 'String'), value('TEXT')],
+    'String',
+    'text_blocks',
+    'The part of the text before or after the first occurrence of the separator.',
+  ),
+  {
+    ...expr(
+      'text_regex',
+      '%1 regex %2 in %3 %4',
+      [
+        dropdown('OP', [['matches', 'test'], ['first match of', 'match'], ['all matches of', 'all'], ['replace', 'replace']]),
+        text('PATTERN', '(\\d+)'),
+        value('TEXT'),
+        value('WITH'),
+      ],
+      null,
+      'text_blocks',
+      'Regular expressions. "first match" returns the first group if there is one. "replace" puts the last input in place of every match ($1 for groups).',
+    ),
+    inputsInline: true,
+  },
+  expr('lists_filter', 'items of %1 where %2', [value('LIST'), value('COND', 'Boolean')], 'Array', 'list_blocks', 'Keeps the items for which the condition is true. Use the "item" block inside the condition.'),
+  expr('lists_map', 'each item of %1 as %2', [value('LIST'), value('EXPR')], 'Array', 'list_blocks', 'Turns every item into a new value. Use the "item" block inside.'),
+  expr('lists_item', 'item', [], null, 'list_blocks', 'The current item inside "items of … where" or "each item of … as".'),
+
   // --- flow -----------------------------------------------------------------
   {
     type: 'control_try',

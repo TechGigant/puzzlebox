@@ -3,7 +3,7 @@
   import BlocklyWorkspace from './BlocklyWorkspace.svelte';
   import StatusChip from './StatusChip.svelte';
   import SidePanel from './SidePanel.svelte';
-  import { api, events, type CompileError, type Program, type RunMode } from './api';
+  import { api, events, type CompileError, type Program, type ProgramVersion, type RunMode } from './api';
   import { registry } from './registry.svelte';
 
   let { id, onclose }: { id: string; onclose: () => void } = $props();
@@ -24,6 +24,40 @@
   let meta = '';
   const metaKey = () => JSON.stringify([name, mode, enabled]);
   let compileTimer: ReturnType<typeof setTimeout> | undefined;
+  let blockCount = $state(0);
+  let history = $state<ProgramVersion[] | null>(null);
+
+  /** Blocks in a saved workspace, not counting shadows (the default values in sockets). */
+  function countBlocks(node: unknown): number {
+    if (!node || typeof node !== 'object') return 0;
+    if (Array.isArray(node)) return node.reduce((n, x) => n + countBlocks(x), 0);
+    let n = 0;
+    for (const [k, v] of Object.entries(node as Record<string, unknown>)) {
+      if (k === 'shadow') continue;
+      if (k === 'block') n += 1;
+      n += countBlocks(v);
+    }
+    return n;
+  }
+
+  async function openHistory() {
+    try {
+      history = await api.versions(id);
+    } catch (e) {
+      flash(String(e));
+    }
+  }
+
+  async function restore(v: ProgramVersion) {
+    const full = await api.version(id, v.id);
+    if (!full.workspace) return;
+    if (dirty && !confirm('Replace your unsaved changes with this version?')) return;
+    ws?.load(full.workspace);
+    history = null;
+    // Loading doesn't count as an edit; mark the restored blocks as unsaved changes.
+    setTimeout(() => ws && onchange(ws.save()), 10);
+    flash(`Restored the version from ${new Date(v.saved_at).toLocaleString()}. Save to keep it.`);
+  }
 
   async function load() {
     const p = await api.program(id);
@@ -41,6 +75,7 @@
 
   function onchange(state: object) {
     current = state;
+    blockCount = countBlocks((state as { blocks?: unknown }).blocks ?? null) + ((state as { blocks?: { blocks?: unknown[] } }).blocks?.blocks?.length ?? 0);
     if (!baseline) return;
     refreshDirty();
     clearTimeout(compileTimer);
@@ -137,6 +172,7 @@
       setTimeout(() => {
         ws?.setErrors(errors);
         current = ws?.save() ?? current;
+        onchange(current);
         baseline = JSON.stringify(current);
         refreshDirty();
       }, 50);
@@ -202,6 +238,8 @@
     <StatusChip status={program?.status} />
     <span class="spacer"></span>
     {#if message}<span class="message">{message}</span>{/if}
+    <span class="count" title="Blocks in this program">{blockCount} blocks</span>
+    <button class="btn" onclick={openHistory} title="Earlier saved versions of this program">History</button>
     <button class="btn" onclick={run} title="Run the program's first entry block now">Run</button>
     <button class="btn" onclick={() => api.cancel(id)} title="Cancel active runs">Stop</button>
     <button class="btn primary" onclick={save} disabled={saving}>{dirty ? 'Save*' : 'Save'}</button>
@@ -240,6 +278,31 @@
   </div>
 </div>
 
+{#if history}
+  <div class="backdrop" role="presentation" onclick={() => (history = null)}></div>
+  <div class="history" role="dialog" aria-label="Program history">
+    <h3>History</h3>
+    <p class="hint">Every save that changed the blocks is kept (the last 30). Restoring loads it into the editor; save to keep it.</p>
+    {#if history.length}
+      <ul>
+        {#each history as v, i (v.id)}
+          <li>
+            <span>
+              {new Date(v.saved_at).toLocaleString()}
+              {#if i === 0}<span class="hint"> · current</span>{/if}
+              {#if v.name !== name}<span class="hint"> · named “{v.name}”</span>{/if}
+            </span>
+            <button class="btn" disabled={i === 0} onclick={() => restore(v)}>Restore</button>
+          </li>
+        {/each}
+      </ul>
+    {:else}
+      <p class="hint">No saved versions yet.</p>
+    {/if}
+    <div class="actions"><button class="btn" onclick={() => (history = null)}>Close</button></div>
+  </div>
+{/if}
+
 <style>
   .editor {
     display: flex;
@@ -267,6 +330,56 @@
   .message {
     font-size: 13px;
     color: var(--pb-text-2);
+  }
+  .count {
+    font-size: 13px;
+    color: var(--pb-text-2);
+    white-space: nowrap;
+  }
+  .backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgb(0 0 0 / 30%);
+    z-index: 80;
+  }
+  .history {
+    position: fixed;
+    z-index: 81;
+    left: 50%;
+    top: 12%;
+    transform: translateX(-50%);
+    width: min(480px, calc(100% - 32px));
+    max-height: 70vh;
+    overflow: auto;
+    padding: 16px 20px;
+    background: var(--pb-card);
+    border-radius: 12px;
+    box-shadow: 0 8px 28px rgb(0 0 0 / 25%);
+  }
+  .history h3 {
+    margin: 0 0 4px;
+    font-weight: 500;
+  }
+  .history ul {
+    list-style: none;
+    padding: 0;
+    margin: 12px 0;
+  }
+  .history li {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--pb-divider);
+  }
+  .hint {
+    color: var(--pb-text-2);
+    font-size: 13px;
+  }
+  .actions {
+    display: flex;
+    justify-content: flex-end;
   }
   .body {
     flex: 1;

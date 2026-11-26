@@ -298,6 +298,14 @@ pub enum ExprKind {
         function: String,
         args: Vec<Expr>,
     },
+    /// Keeps (`map: false`) the items for which `expr` is true, or (`map: true`) replaces each
+    /// item by `expr`; `var` holds the current item while `expr` is evaluated.
+    Each {
+        list: Box<Expr>,
+        var: String,
+        expr: Box<Expr>,
+        map: bool,
+    },
     /// Entity state string, or an attribute when `attribute` is set.
     State {
         entity: Box<Expr>,

@@ -62,6 +62,13 @@ export interface Program {
   errors?: CompileError[];
 }
 
+export interface ProgramVersion {
+  id: number;
+  saved_at: number;
+  name: string;
+  workspace?: object;
+}
+
 export interface RunRecord {
   id: string;
   program_id: string;
@@ -119,6 +126,8 @@ export const api = {
   update: (id: string, p: Partial<Program>) => request<Program>('PUT', `api/programs/${id}`, p),
   remove: (id: string) => request<{ ok: boolean }>('DELETE', `api/programs/${id}`),
   run: (id: string, handler?: number) => request<{ ok: boolean }>('POST', `api/programs/${id}/run`, { handler }),
+  versions: (id: string) => request<ProgramVersion[]>('GET', `api/programs/${id}/versions`),
+  version: (id: string, version: number) => request<ProgramVersion>('GET', `api/programs/${id}/versions/${version}`),
   runStack: (id: string, block: string) => request<{ ok: boolean }>('POST', `api/programs/${id}/run`, { block }),
   editorData: <T = unknown>(key: 'backpack' | 'favourites' | 'recent') => request<T[]>('GET', `api/editor/${key}`),
   setEditorData: (key: 'backpack' | 'favourites' | 'recent', contents: unknown[]) =>

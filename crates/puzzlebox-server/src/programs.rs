@@ -192,3 +192,13 @@ pub async fn compile(State(st): State<AppState>, Json(input): Json<CompileInput>
     let errors = st.engine.compile(&input.workspace).err().unwrap_or_default();
     Ok(Json(json!({"errors": errors})))
 }
+
+pub async fn versions(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let v = st.engine.store().list_versions(&id).await?;
+    Ok(Json(serde_json::to_value(v).unwrap_or_default()))
+}
+
+pub async fn version(State(st): State<AppState>, Path((id, version)): Path<(String, i64)>) -> ApiResult {
+    let v = st.engine.store().get_version(&id, version).await?.ok_or_else(not_found)?;
+    Ok(Json(serde_json::to_value(v).unwrap_or_default()))
+}

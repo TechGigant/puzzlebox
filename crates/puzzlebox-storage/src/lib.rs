@@ -43,7 +43,20 @@ CREATE INDEX runs_by_program ON runs(program_id, started_at DESC);
     r#"
 ALTER TABLE programs ADD COLUMN folder TEXT NOT NULL DEFAULT '';
 "#,
+    r#"
+CREATE TABLE program_versions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    program_id  TEXT NOT NULL,
+    saved_at    INTEGER NOT NULL,
+    name        TEXT NOT NULL,
+    workspace   TEXT NOT NULL
+);
+CREATE INDEX versions_by_program ON program_versions(program_id, id DESC);
+"#,
 ];
+
+/// Saved versions kept per program (restore points).
+const VERSIONS_KEPT: i64 = 30;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ProgramRecord {
@@ -62,6 +75,16 @@ pub struct ProgramRecord {
     pub created_at: i64,
     #[serde(default)]
     pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ProgramVersion {
+    pub id: i64,
+    pub saved_at: i64,
+    pub name: String,
+    /// Only filled when one version is fetched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -181,7 +204,63 @@ impl Store {
                     p.folder
                 ],
             )?;
+            // A restore point for every save that changed the blocks.
+            let ws = p.workspace.to_string();
+            let last: Option<String> = c
+                .query_row(
+                    "SELECT workspace FROM program_versions WHERE program_id = ?1 ORDER BY id DESC LIMIT 1",
+                    [&p.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if last.as_deref() != Some(ws.as_str()) {
+                c.execute(
+                    "INSERT INTO program_versions (program_id, saved_at, name, workspace) VALUES (?1, ?2, ?3, ?4)",
+                    params![p.id, p.updated_at, p.name, ws],
+                )?;
+                c.execute(
+                    "DELETE FROM program_versions WHERE program_id = ?1 AND id NOT IN
+                       (SELECT id FROM program_versions WHERE program_id = ?1 ORDER BY id DESC LIMIT ?2)",
+                    params![p.id, VERSIONS_KEPT],
+                )?;
+            }
             Ok(p)
+        })
+        .await
+    }
+
+    /// Restore points, newest first (without their blocks).
+    pub async fn list_versions(&self, program_id: &str) -> Result<Vec<ProgramVersion>> {
+        let id = program_id.to_owned();
+        self.with(move |c| {
+            let mut st = c.prepare(
+                "SELECT id, saved_at, name FROM program_versions WHERE program_id = ?1 ORDER BY id DESC",
+            )?;
+            let rows = st.query_map([id], |r| {
+                Ok(ProgramVersion { id: r.get(0)?, saved_at: r.get(1)?, name: r.get(2)?, workspace: None })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    pub async fn get_version(&self, program_id: &str, version: i64) -> Result<Option<ProgramVersion>> {
+        let id = program_id.to_owned();
+        self.with(move |c| {
+            Ok(c.query_row(
+                "SELECT id, saved_at, name, workspace FROM program_versions WHERE program_id = ?1 AND id = ?2",
+                params![id, version],
+                |r| {
+                    let ws: String = r.get(3)?;
+                    Ok(ProgramVersion {
+                        id: r.get(0)?,
+                        saved_at: r.get(1)?,
+                        name: r.get(2)?,
+                        workspace: serde_json::from_str(&ws).ok(),
+                    })
+                },
+            )
+            .optional()?)
         })
         .await
     }
@@ -192,6 +271,7 @@ impl Store {
             let tx = c.transaction()?;
             let n = tx.execute("DELETE FROM programs WHERE id = ?1", [&id])?;
             tx.execute("DELETE FROM runs WHERE program_id = ?1", [&id])?;
+            tx.execute("DELETE FROM program_versions WHERE program_id = ?1", [&id])?;
             tx.execute("DELETE FROM kv WHERE scope = ?1", [format!("program:{id}")])?;
             tx.commit()?;
             Ok(n > 0)
@@ -398,5 +478,23 @@ mod tests {
         p.folder = "Lights/Outside".into();
         s.save_program(p).await.unwrap();
         assert_eq!(s.get_program("f1").await.unwrap().unwrap().folder, "Lights/Outside");
+    }
+
+    #[tokio::test]
+    async fn versions_are_kept_per_change() {
+        let s = Store::open_in_memory().unwrap();
+        let mut p = program("v1");
+        for n in 0..3 {
+            p.workspace = serde_json::json!({"n": n});
+            s.save_program(p.clone()).await.unwrap();
+        }
+        // Saving without changes adds no restore point.
+        s.save_program(p.clone()).await.unwrap();
+        let versions = s.list_versions("v1").await.unwrap();
+        assert_eq!(versions.len(), 3);
+        let first = s.get_version("v1", versions[2].id).await.unwrap().unwrap();
+        assert_eq!(first.workspace, Some(serde_json::json!({"n": 0})));
+        s.delete_program("v1").await.unwrap();
+        assert!(s.list_versions("v1").await.unwrap().is_empty());
     }
 }

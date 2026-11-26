@@ -351,6 +351,47 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
             num((y - x).num_milliseconds() as f64 / 1000.0)
         }
         "format_duration" => json!(format_duration(n(0)?, &to_text(a(1)))),
+        "case_matches" => match a(1) {
+            // A list case matches any of its values.
+            Value::Array(options) => json!(options.iter().any(|o| loose_eq(a(0), o))),
+            other => json!(loose_eq(a(0), other)),
+        },
+        "or_default" => {
+            let v = a(0).clone();
+            let empty = match &v {
+                Value::Null => true,
+                Value::String(s) => matches!(s.trim(), "" | "unknown" | "unavailable" | "none"),
+                _ => false,
+            };
+            if empty { a(1).clone() } else { v }
+        }
+        "between" => {
+            let (x, lo, hi) = (n(0)?, n(1)?, n(2)?);
+            json!(x >= lo.min(hi) && x <= lo.max(hi))
+        }
+        "text_before" | "text_after" => {
+            let (text, sep) = (to_text(a(0)), to_text(a(1)));
+            match text.find(&sep) {
+                Some(i) if !sep.is_empty() => {
+                    json!(if name == "text_before" { &text[..i] } else { &text[i + sep.len()..] })
+                }
+                _ => json!(if name == "text_before" { text.as_str() } else { "" }),
+            }
+        }
+        "regex_test" | "regex_match" | "regex_all" | "regex_replace" => {
+            let re = regex::Regex::new(&to_text(a(1))).map_err(|e| format!("invalid pattern: {e}"))?;
+            let text = to_text(a(0));
+            match name {
+                "regex_test" => json!(re.is_match(&text)),
+                // The first group if the pattern has one, else the whole match.
+                "regex_match" => re
+                    .captures(&text)
+                    .and_then(|c| c.get(1).or_else(|| c.get(0)).map(|m| m.as_str().to_owned()))
+                    .map_or(Value::Null, |m| json!(m)),
+                "regex_all" => json!(re.find_iter(&text).map(|m| m.as_str()).collect::<Vec<_>>()),
+                _ => json!(re.replace_all(&text, to_text(a(2)).as_str())),
+            }
+        }
         "duration_dict" => {
             let total = n(0)?.max(0.0) as u64;
             json!({"hours": total / 3600, "minutes": (total / 60) % 60, "seconds": total % 60})

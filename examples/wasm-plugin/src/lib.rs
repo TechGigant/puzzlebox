@@ -14,11 +14,13 @@ pub fn dew_point(input: Json<puzzlebox_pdk::Call>) -> FnResult<Json<Value>> {
 /// Counts how often it ran (persisted) and turns on a light once it is dark.
 #[plugin_fn]
 pub fn light_when_dark(input: Json<puzzlebox_pdk::Call>) -> FnResult<Json<Value>> {
+    let Some(light) = input.0.arg_str("light").filter(|l| !l.is_empty()) else {
+        return Ok(Json(Value::Null));
+    };
     let count = kv_get("runs")?.as_u64().unwrap_or(0) + 1;
     kv_set("runs", json!(count))?;
     let sun = get_state("sun.sun")?;
     if sun["state"] == "below_horizon" {
-        let light = input.0.arg_str("light").unwrap_or("light.porch");
         call_service("light.turn_on", None, Some(json!({"entity_id": light})))?;
         log(&format!("turned on {light} (run {count})"))?;
     }

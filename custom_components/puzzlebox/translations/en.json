@@ -21,11 +21,11 @@
   "services": {
     "run_program": {
       "name": "Run program",
-      "description": "Runs a Puzzlebox program now.",
+      "description": "Runs a Puzzlebox program now. Choose the program's switch or run button, or give its name.",
       "fields": {
         "program": {
           "name": "Program",
-          "description": "Program name or id."
+          "description": "Program name or id (instead of choosing its entity)."
         },
         "variables": {
           "name": "Variables",
@@ -68,6 +68,29 @@
     "update_integration_required": {
       "title": "The Puzzlebox integration needs an update",
       "description": "The Puzzlebox integration ({integration_version}) is too old for this app ({app_version}), so programs don't appear in Home Assistant. Update the integration in HACS and restart Home Assistant."
+    },
+    "program_invalid": {
+      "title": "Puzzlebox program “{name}” can't run as built",
+      "description": "Part or all of the program **{name}** can't run: {problems}\n\nThis often happens when an entity it uses was renamed or removed. Open the program in Puzzlebox, fix the blocks marked with a warning and save. This message goes away by itself once the program is fixed or turned off."
+    },
+    "program_failing": {
+      "title": "Puzzlebox program “{name}” keeps failing",
+      "description": "The last {count} runs of **{name}** failed. The latest error was: {error}\n\nOpen the program in Puzzlebox and look at its runs to see where it stops. This message goes away by itself after a run succeeds or when the program is turned off."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "status": {
+        "name": "Status",
+        "state": {
+          "idle": "Idle",
+          "running": "Running",
+          "waiting": "Waiting",
+          "paused": "Paused",
+          "error": "Error",
+          "disabled": "Off"
+        }
+      }
     }
   }
 }

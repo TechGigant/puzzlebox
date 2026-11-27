@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, events, type Program } from './api';
+  import { api, events, MODE_LABELS, type DeletedProgram, type Program } from './api';
   import StatusChip from './StatusChip.svelte';
+  import { plainError } from './ha_errors';
 
   let { onopen, onimport }: { onopen: (id: string) => void; onimport?: () => void } = $props();
 
@@ -104,10 +105,49 @@
     }
   }
 
-  async function create() {
-    const p = await api.create({ name: 'New program' });
-    onopen(p.id);
+  // Created on its first save, so abandoned new programs leave nothing behind.
+  function create() {
+    onopen('new');
   }
+
+  async function duplicate(p: Program) {
+    try {
+      const copy = await api.duplicate(p.id);
+      programs = [...programs.filter((x) => x.id !== copy.id), copy];
+      message = `Made “${copy.name}”, turned off so it doesn't run alongside the original.`;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  let message = $state<string | null>(null);
+  let bin = $state<{ programs: DeletedProgram[]; days: number } | null>(null);
+  let binCount = $state(0);
+
+  async function refreshBin(open = false) {
+    try {
+      const b = await api.bin();
+      binCount = b.programs.length;
+      if (open || bin) bin = b;
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function restore(d: DeletedProgram) {
+    await api.restore(d.id);
+    await Promise.all([refresh(), refreshBin()]);
+    message = `Restored “${d.name}”.`;
+  }
+
+  async function purge(d: DeletedProgram) {
+    if (!confirm(`Delete “${d.name}” for good, with its run history? This cannot be undone.`)) return;
+    await api.purge(d.id);
+    await refreshBin();
+  }
+
+  /** The last run failed, even if a later save cleared its error. */
+  const failed = (p: Program) => p.status?.last_status === 'error' || !!p.status?.last_error;
 
   async function toggle(p: Program) {
     const updated = await api.setEnabled(p.id, !p.enabled);
@@ -127,7 +167,7 @@
     const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
     if (!words.length) return programs;
     return programs.filter((p) => {
-      const hay = `${p.name} ${p.folder ?? ''} ${p.description ?? ''}`.toLowerCase();
+      const hay = `${p.name} ${p.folder ?? ''} ${p.description ?? ''} ${p.status?.summary ?? ''}`.toLowerCase();
       return words.every((w) => hay.includes(w));
     });
   });
@@ -145,12 +185,14 @@
 
   onMount(() => {
     refresh();
+    refreshBin();
     return events.on((ev) => {
       if (ev.type === 'status' && 'program_id' in ev) {
         programs = programs.map((p) => (p.id === ev.program_id ? { ...p, status: ev.status } : p));
         if (!programs.some((p) => p.id === ev.program_id)) refresh();
       } else if (ev.type === 'removed') {
         programs = programs.filter((p) => p.id !== ev.program_id);
+        refreshBin();
       }
     });
   });
@@ -162,11 +204,15 @@
   <div class="toolbar">
     <input class="search" placeholder="Search programs and folders" bind:value={filter} />
     <span class="spacer"></span>
+    {#if binCount}
+      <button class="btn" onclick={() => refreshBin(true)} title="Deleted programs, kept for a while">Recycle bin ({binCount})</button>
+    {/if}
     {#if onimport}<button class="btn" onclick={onimport}>Import</button>{/if}
     <button class="btn primary" onclick={create}>New program</button>
   </div>
 
   {#if error}<p class="error">{error}</p>{/if}
+  {#if message}<p class="message">{message}</p>{/if}
 
   {#if programs.length === 0 && !error}
     <div class="empty">
@@ -188,13 +234,18 @@
     >
       <button class="main" onclick={() => onopen(p.id)}>
         <span class="name">{p.name}</span>
+        {#if p.status?.summary}<span class="summary">{p.status.summary}</span>{/if}
         <span class="meta">
           {#if searching && p.folder}<span class="folder-tag">{p.folder.replaceAll('/', ' › ')}</span> · {/if}
-          {p.mode} · last run {ago(p.status?.last_run)}
-          {#if p.status?.last_error}<span class="err"> · {p.status.last_error}</span>{/if}
+          {MODE_LABELS[p.mode] ?? p.mode} · last run {ago(p.status?.last_run)}
+          {#if failed(p)}<span class="err"> · failed{p.status?.last_error ? `: ${plainError(p.status.last_error) ?? p.status.last_error}` : ''}</span>{/if}
         </span>
       </button>
+      {#if p.does_nothing}
+        <span class="chip-nothing" title="No “when” block has both a trigger and blocks to run, so this program never does anything">does nothing</span>
+      {/if}
       <StatusChip status={p.status} />
+      <button class="icon" title="Duplicate" onclick={() => duplicate(p)} aria-label="Duplicate">⧉</button>
       <button class="icon" title="Move to folder" onclick={() => startMove(p)} aria-label="Move to folder">⇄</button>
       <button class="icon" title="Run now" disabled={!p.enabled} onclick={() => run(p)} aria-label="Run now">▶</button>
       <label class="switch" title={p.enabled ? 'Disable' : 'Enable'}>
@@ -280,6 +331,28 @@
       </div>
     </form>
   {/if}
+
+  {#if bin}
+    <div class="dialog-backdrop" role="presentation" onclick={() => (bin = null)}></div>
+    <div class="dialog" role="dialog" aria-label="Recycle bin">
+      <h3>Recycle bin</h3>
+      <p class="muted">Deleted programs stay here, with their run history, for {bin.days} days.</p>
+      {#if bin.programs.length}
+        <ul class="bin">
+          {#each bin.programs as d (d.id)}
+            <li>
+              <span class="bin-name">{d.name}<span class="muted">{` · deleted ${ago(d.deleted_at)}`}</span></span>
+              <button class="btn" onclick={() => restore(d)}>Restore</button>
+              <button class="btn" onclick={() => purge(d)} title="Delete for good">Delete</button>
+            </li>
+          {/each}
+        </ul>
+      {:else}
+        <p class="muted">Empty.</p>
+      {/if}
+      <div class="actions"><button class="btn" onclick={() => (bin = null)}>Close</button></div>
+    </div>
+  {/if}
 </div>
 
 <style>
@@ -352,6 +425,41 @@
   }
   .err {
     color: #e53935;
+  }
+  .summary {
+    font-size: 13px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .chip-nothing {
+    padding: 4px 10px;
+    border-radius: 14px;
+    font-size: 12px;
+    white-space: nowrap;
+    color: #b26a00;
+    background: color-mix(in srgb, #ffa600 18%, transparent);
+  }
+  .message {
+    color: var(--pb-text-2);
+  }
+  .bin {
+    list-style: none;
+    padding: 0;
+    margin: 8px 0 12px;
+    max-height: 50vh;
+    overflow: auto;
+  }
+  .bin li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--pb-divider);
+  }
+  .bin-name {
+    flex: 1;
+    min-width: 0;
   }
   @media (max-width: 560px) {
     .page {

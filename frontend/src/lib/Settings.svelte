@@ -77,10 +77,22 @@
       {#if settings.bridge.connected && settings.bridge.missing?.length}
         <p class="muted">Not available until the integration is updated: {settings.bridge.missing.join(', ')}.</p>
       {/if}
-      {#if settings.supervised}
-        <p class="muted">Install the <b>Puzzlebox</b> integration (HACS) and restart Home Assistant; it finds this app and sets itself up.</p>
-      {:else}
-        <p class="muted">Install the <b>Puzzlebox</b> integration in Home Assistant and enter this app's URL and the token below.</p>
+      {#if !settings.bridge_connected}
+        <div class="warn">
+          <p>Programs run without it, but until the integration connects these don't work:</p>
+          <ul>
+            <li>a switch and a “run” button for each program in Home Assistant, and its status sensor</li>
+            <li>the <code>puzzlebox.run_program</code> and <code>puzzlebox.set_variable</code> actions, and the <code>puzzlebox_program_started</code>/<code>_finished</code> events</li>
+            <li>webhook triggers (their URLs are served by Home Assistant)</li>
+            <li>blocks added by other integrations</li>
+          </ul>
+          <p>
+            To fix it: install the <b>Puzzlebox</b> integration (HACS → search “Puzzlebox”), restart Home Assistant, then check
+            Settings → Devices &amp; services. {settings.supervised
+              ? 'It finds this app by itself; if it shows an error there, open it and reconfigure.'
+              : "Add it there with this app's URL and the token below."}
+          </p>
+        </div>
       {/if}
       <div class="row">
         <code class="token">{showToken ? settings.bridge_token : '•'.repeat(24)}</code>
@@ -267,6 +279,17 @@
   }
   .bad {
     color: #e53935;
+  }
+  .warn {
+    padding: 4px 14px;
+    margin: 8px 0;
+    border-radius: 8px;
+    font-size: 14px;
+    background: color-mix(in srgb, #ffa600 14%, transparent);
+  }
+  .warn ul {
+    margin: 4px 0;
+    padding-left: 20px;
   }
   .message {
     color: var(--pb-primary);

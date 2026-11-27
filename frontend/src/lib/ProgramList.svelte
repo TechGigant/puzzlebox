@@ -341,7 +341,7 @@
         <ul class="bin">
           {#each bin.programs as d (d.id)}
             <li>
-              <span class="bin-name">{d.name}<span class="muted"> · deleted {ago(d.deleted_at)}</span></span>
+              <span class="bin-name">{d.name}<span class="muted">{` · deleted ${ago(d.deleted_at)}`}</span></span>
               <button class="btn" onclick={() => restore(d)}>Restore</button>
               <button class="btn" onclick={() => purge(d)} title="Delete for good">Delete</button>
             </li>

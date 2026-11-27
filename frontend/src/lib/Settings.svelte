@@ -94,11 +94,6 @@
           </p>
         </div>
       {/if}
-      {#if settings.supervised}
-        <p class="muted">Install the <b>Puzzlebox</b> integration (HACS) and restart Home Assistant; it finds this app and sets itself up.</p>
-      {:else}
-        <p class="muted">Install the <b>Puzzlebox</b> integration in Home Assistant and enter this app's URL and the token below.</p>
-      {/if}
       <div class="row">
         <code class="token">{showToken ? settings.bridge_token : '•'.repeat(24)}</code>
         <button class="btn" onclick={() => (showToken = !showToken)}>{showToken ? 'Hide' : 'Show'}</button>

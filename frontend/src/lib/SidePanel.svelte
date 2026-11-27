@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, events, type CompileError, type RunRecord } from './api';
+  import { plainError } from './ha_errors';
 
   let {
     programId,
@@ -79,7 +80,7 @@
     <section class="problems">
       <h3>Problems</h3>
       {#each errors as e, i (i)}
-        <button class="problem" onclick={() => e.block_id && onreveal(e.block_id)}>⚠ {e.message}</button>
+        <button class="problem" class:warn={e.warning} onclick={() => e.block_id && onreveal(e.block_id)}>⚠ {e.message}</button>
       {/each}
     </section>
   {/if}
@@ -95,7 +96,15 @@
         </button>
         {#if selected?.id === r.id && selected.trace}
           <div class="detail">
-            {#if selected.error}<p class="err">{selected.error}</p>{/if}
+            {#if selected.error}
+              {@const plain = plainError(selected.error)}
+              {#if plain}
+                <p class="err">{plain}</p>
+                <details class="muted"><summary>details</summary>{selected.error}</details>
+              {:else}
+                <p class="err">{selected.error}</p>
+              {/if}
+            {/if}
             <h4>Trigger</h4>
             <pre>{JSON.stringify(selected.trigger, null, 2)}</pre>
             <h4>Variables at end</h4>
@@ -103,7 +112,7 @@
             <h4>Steps ({selected.trace.steps.length}{selected.trace.truncated ? '+' : ''})</h4>
             <ol class="steps">
               {#each selected.trace.steps.slice(0, 300) as s, i (i)}
-                <li><button onclick={() => onreveal(s.block)} class:err={s.error}>{s.t} ms · {s.error ?? describe(s.block) ?? s.block}</button></li>
+                <li><button onclick={() => onreveal(s.block)} class:err={s.error} title={s.error ?? undefined}>{s.t} ms · {(s.error && plainError(s.error)) ?? s.error ?? describe(s.block) ?? s.block}</button></li>
               {/each}
             </ol>
           </div>
@@ -112,7 +121,7 @@
     {:else if tab === 'log'}
       {#if logs.length === 0}<p class="muted">Log messages from "log" blocks appear here while the editor is open.</p>{/if}
       {#each logs as l, i (i)}
-        <div class="log {l.level}"><span class="muted">{fmtTime(l.ts)}</span> {l.message}</div>
+        <div class="log {l.level}" title={plainError(l.message) ? l.message : undefined}><span class="muted">{fmtTime(l.ts)}</span> {plainError(l.message) ?? l.message}</div>
       {/each}
     {:else}
       <p class="muted">Right-click a block → <b>Add breakpoint</b>. Runs pause there while this editor is open.</p>
@@ -234,6 +243,9 @@
   .st.error,
   .err {
     color: #e53935;
+  }
+  .problem.warn {
+    opacity: 0.8;
   }
   .st.cancelled {
     color: var(--pb-text-2);

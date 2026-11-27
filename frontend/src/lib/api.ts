@@ -34,6 +34,8 @@ export function updateNotice(status: Status | null): string | null {
 export interface CompileError {
   block_id: string | null;
   message: string;
+  /** Editor-only: shown in Problems, but the program still runs. */
+  warning?: boolean;
 }
 
 export interface ProgramStatus {

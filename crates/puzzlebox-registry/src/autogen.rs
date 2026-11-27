@@ -311,7 +311,11 @@ pub fn generate(d: &HaDescriptions<'_>) -> Vec<BlockDef> {
                 .or_else(|| spec.get("description").and_then(Value::as_str))
                 .unwrap_or("")
                 .to_owned();
-            let target = spec.get("target").map(target_spec);
+            // HA's entity actions fail without a target ("at least one of entity_id, …"); the few
+            // that can be pointed at a config entry instead have an entry_id field.
+            let target_required = !params.iter().any(|p| p.name.ends_with("entry_id"));
+            let target =
+                spec.get("target").map(|tg| TargetSpec { required: target_required, ..target_spec(tg) });
             if optional_response {
                 out.push(BlockDef {
                     block_type: format!("ha_svc__{}__{}", sanitize(domain), sanitize(svc)),

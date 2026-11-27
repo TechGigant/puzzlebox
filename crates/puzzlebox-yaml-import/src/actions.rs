@@ -1320,9 +1320,14 @@ impl Builder {
                 if let Some(t) = &transition {
                     inputs.push(("TRANSITION", t.clone(), 'n'));
                 }
-                let bright = data.get("brightness_pct").map(|_| int_in("brightness_pct", 0.0, 100.0));
-                if let Some(b) = &bright {
-                    inputs.push(("BRIGHTNESS", json!((*b)?), 'n'));
+                match data.get("brightness_pct") {
+                    None => {}
+                    // The block rounds and clamps; a template that only gives whole percentages
+                    // sends the same.
+                    Some(Value::String(s)) if crate::templates::template_whole_in(s, 0, 100) => {
+                        inputs.push(("BRIGHTNESS", json!(s), 'n'));
+                    }
+                    Some(_) => inputs.push(("BRIGHTNESS", json!(int_in("brightness_pct", 0.0, 100.0)?), 'n')),
                 }
                 if within(&["transition"]) {
                     spec = power.map(|m| ("light_power", json!({"MODE": m}), inputs));
@@ -1374,9 +1379,16 @@ impl Builder {
             };
             built.push((socket, Some(b)));
         }
+        let fade = ty.starts_with("light_") && !built.iter().any(|(s, _)| *s == "TRANSITION");
         let t = self.target_from(target)?;
         built.push(("TARGET", Some(t)));
-        Some(self.block(ty, fields, built, None))
+        let mut b = self.block(ty, fields, built, None);
+        if fade {
+            // Like the toolbox's: 0 seconds sends no transition.
+            let zero = json!({"type": "math_number", "id": self.id(), "fields": {"NUM": 0}});
+            b["inputs"]["TRANSITION"] = json!({"shadow": zero});
+        }
+        Some(b)
     }
 }
 

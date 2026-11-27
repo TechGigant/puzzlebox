@@ -309,6 +309,8 @@ impl Compiler<'_> {
                 };
                 StmtKind::If { branches: vec![(is_on, vec![on])], otherwise: Some(vec![off]) }
             }
+            // An empty entity already got "choose an entity".
+            "" => StmtKind::Expr { expr: Expr::lit(b.id(), Value::Null) },
             _ => {
                 self.err(b, format!("'{entity}' isn't a helper this block can set (number, text, dropdown, toggle, date/time or counter helpers)"));
                 StmtKind::Expr { expr: Expr::lit(b.id(), Value::Null) }

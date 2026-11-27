@@ -96,6 +96,22 @@ fn literals_stay_text(e: &E) -> bool {
     }
 }
 
+/// Whether every value a template can give is a whole number literal in `lo..=hi`, like
+/// `{{ 30 if now().hour > 22 else 100 }}`.
+pub(crate) fn template_whole_in(s: &str, lo: i64, hi: i64) -> bool {
+    fn whole_in(e: &E, lo: i64, hi: i64) -> bool {
+        match e {
+            E::Int(n) => (lo..=hi).contains(n),
+            E::Cond { then, otherwise: Some(o), .. } => whole_in(then, lo, hi) && whole_in(o, lo, hi),
+            E::Call(f, args) if matches!(&**f, E::Name(n) if n == "iif") => {
+                args.kw.is_empty() && args.pos.len() == 3 && args.pos[1..].iter().all(|a| whole_in(a, lo, hi))
+            }
+            _ => false,
+        }
+    }
+    parse_template(s).is_some_and(|parts| single(&parts).is_some_and(|e| whole_in(e, lo, hi)))
+}
+
 impl Builder {
     /// A value block for a template string.
     ///

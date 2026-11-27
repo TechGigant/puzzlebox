@@ -34,7 +34,23 @@
   } = $props();
 
   type Tab = 'runs' | 'log' | 'debug';
+  const TABS: [Tab, string][] = [
+    ['runs', 'Runs'],
+    ['log', 'Log'],
+    ['debug', 'Debug'],
+  ];
   let tab = $state<Tab>('runs');
+  let tabList: HTMLElement | undefined = $state();
+
+  /** Arrow keys, Home and End move between the tabs (and show them), as in other tab lists. */
+  function tabKey(e: KeyboardEvent) {
+    const i = TABS.findIndex(([t]) => t === tab);
+    const next = { ArrowRight: i + 1, ArrowLeft: i - 1, Home: 0, End: TABS.length - 1 }[e.key];
+    if (next === undefined) return;
+    e.preventDefault();
+    tab = TABS[(next + TABS.length) % TABS.length][0];
+    tabList?.querySelector<HTMLElement>(`#pb-tab-${tab}`)?.focus();
+  }
   let runs = $state<RunRecord[]>([]);
   let active = $state<ActiveRun[]>([]);
   let selected = $state<RunRecord | null>(null);
@@ -117,22 +133,33 @@
 </script>
 
 <aside class="panel">
-  <nav class="tabs">
-    <button class:active={tab === 'runs'} onclick={() => (tab = 'runs')}>Runs</button>
-    <button class:active={tab === 'log'} onclick={() => (tab = 'log')}>Log</button>
-    <button class:active={tab === 'debug'} onclick={() => (tab = 'debug')}>Debug{#if paused}<span class="badge">●</span>{/if}</button>
-  </nav>
+  <div class="tabs" role="tablist" aria-label="Program details" bind:this={tabList}>
+    {#each TABS as [t, label] (t)}
+      <button
+        id="pb-tab-{t}"
+        role="tab"
+        aria-selected={tab === t}
+        aria-controls="pb-tabpanel"
+        tabindex={tab === t ? 0 : -1}
+        class:active={tab === t}
+        onclick={() => (tab = t)}
+        onkeydown={tabKey}
+        >{label}{#if t === 'debug' && paused}<span class="badge" aria-label="(paused)">●</span>{/if}</button
+      >
+    {/each}
+  </div>
 
-  {#if errors.length}
-    <section class="problems">
+  <!-- Always there, so screen readers hear problems as they come and go. -->
+  <section class="problems" class:none={!errors.length} aria-live="polite" aria-label="Problems">
+    {#if errors.length}
       <h3>Problems</h3>
       {#each errors as e, i (i)}
         <button class="problem" class:warn={e.warning} onclick={() => e.block_id && onreveal(e.block_id)}>⚠ {e.message}</button>
       {/each}
-    </section>
-  {/if}
+    {/if}
+  </section>
 
-  <div class="content">
+  <div class="content" id="pb-tabpanel" role="tabpanel" aria-labelledby="pb-tab-{tab}">
     {#if tab === 'runs'}
       {#if !programId}<p class="muted">Save the program to run it.</p>{/if}
       {#if active.length}
@@ -285,6 +312,10 @@
     border-bottom: 1px solid var(--pb-divider);
     max-height: 30%;
     overflow: auto;
+  }
+  .problems.none {
+    padding: 0;
+    border: 0;
   }
   h3,
   h4 {

@@ -4,6 +4,8 @@
   import StatusChip from './StatusChip.svelte';
   import SidePanel from './SidePanel.svelte';
   import { api, events, MODE_LABELS, type ActiveRun, type CompileError, type Program, type ProgramVersion, type RunMode } from './api';
+  import { formatDateTime } from './locale';
+  import WorkspacePreview from './WorkspacePreview.svelte';
   import { registry } from './registry.svelte';
   import { blockIds } from './runs';
   import { setRunAsTriggerHandler } from './editor/run_as_trigger';
@@ -36,6 +38,8 @@
   let compileTimer: ReturnType<typeof setTimeout> | undefined;
   let blockCount = $state(0);
   let history = $state<ProgramVersion[] | null>(null);
+  /** The version shown read-only in the history dialog. */
+  let preview = $state<ProgramVersion | null>(null);
   let runMenu = $state<{ block_id: string; summary: string }[] | null>(null);
   const running = $derived((program?.status?.active_runs ?? 0) > 0);
 
@@ -61,16 +65,33 @@
     }
   }
 
+  async function showVersion(v: ProgramVersion) {
+    if (!pid) return;
+    try {
+      preview = await api.version(pid, v.id);
+    } catch (e) {
+      flash(String(e));
+    }
+  }
+
+  function closeHistory() {
+    history = null;
+    preview = null;
+  }
+
   async function restore(v: ProgramVersion) {
     if (!pid) return;
-    const full = await api.version(pid, v.id);
+    const full = v.workspace ? v : await api.version(pid, v.id);
     if (!full.workspace) return;
     if (dirty && !confirm('Replace your unsaved changes with this version?')) return;
     ws?.load(full.workspace);
-    history = null;
+    name = full.name;
+    // Versions saved before run modes were kept have none.
+    if (full.mode) mode = full.mode;
+    closeHistory();
     // Loading doesn't count as an edit; mark the restored blocks as unsaved changes.
     setTimeout(() => ws && onchange(ws.save()), 10);
-    flash(`Restored the version from ${new Date(v.saved_at).toLocaleString()}. Save to keep it.`);
+    flash(`Restored the version from ${formatDateTime(v.saved_at)}. Save to keep it.`);
   }
 
   async function load() {
@@ -414,31 +435,54 @@
   </div>
 </div>
 
-{#if history}
-  <div class="backdrop" role="presentation" onclick={() => (history = null)}></div>
+{#if history && preview}
+  <div class="backdrop" role="presentation" onclick={closeHistory}></div>
+  <div class="history wide" role="dialog" aria-label="Earlier version">
+    <h3>Version from {formatDateTime(preview.saved_at)}</h3>
+    <p class="hint">
+      {[`Named “${preview.name}”`, preview.mode && (MODE_LABELS[preview.mode] ?? preview.mode), `${preview.blocks ?? 0} ${preview.blocks === 1 ? 'block' : 'blocks'}`]
+        .filter(Boolean)
+        .join(' · ')}. Only to look at: restoring loads it into the editor.
+    </p>
+    {#if preview.workspace}
+      <WorkspacePreview workspace={preview.workspace} extraStyles={registry.styles} />
+    {/if}
+    <div class="actions">
+      <button class="btn" onclick={() => (preview = null)}>Back</button>
+      <button class="btn primary" disabled={preview.id === history[0]?.id} onclick={() => restore(preview!)}>Restore this version</button>
+    </div>
+  </div>
+{:else if history}
+  <div class="backdrop" role="presentation" onclick={closeHistory}></div>
   <div class="history" role="dialog" aria-label="Program history">
     <h3>History</h3>
-    <p class="hint">Every save that changed the blocks is kept (the last 30). Restoring loads it into the editor; save to keep it.</p>
+    <p class="hint">
+      Every save that changed the blocks, name or run mode is kept (the last 30). Show one to look at it; restoring loads
+      its blocks, name and run mode into the editor, and you save to keep it.
+    </p>
     {#if history.length}
       <ul>
         {#each history as v, i (v.id)}
           <li>
             <span>
-              {new Date(v.saved_at).toLocaleString()}
+              {formatDateTime(v.saved_at)}
               {#if i === 0}<span class="hint"> · current</span>{/if}
               {#if v.name !== name}<span class="hint"> · named “{v.name}”</span>{/if}
               <span class="hint changes">
                 {`${v.blocks ?? 0} ${v.blocks === 1 ? 'block' : 'blocks'}${v.changes ? ` · ${v.changes}` : ''}`}
               </span>
             </span>
-            <button class="btn" disabled={i === 0} onclick={() => restore(v)}>Restore</button>
+            <span class="buttons">
+              <button class="btn" onclick={() => showVersion(v)}>Show</button>
+              <button class="btn" disabled={i === 0} onclick={() => restore(v)}>Restore</button>
+            </span>
           </li>
         {/each}
       </ul>
     {:else}
       <p class="hint">No saved versions yet.</p>
     {/if}
-    <div class="actions"><button class="btn" onclick={() => (history = null)}>Close</button></div>
+    <div class="actions"><button class="btn" onclick={closeHistory}>Close</button></div>
   </div>
 {/if}
 
@@ -548,6 +592,20 @@
     background: var(--pb-card);
     border-radius: 12px;
     box-shadow: 0 8px 28px rgb(0 0 0 / 25%);
+  }
+  .history.wide {
+    width: min(960px, calc(100% - 32px));
+    top: 6%;
+    max-height: 88vh;
+  }
+  .history .buttons {
+    display: flex;
+    gap: 6px;
+    flex-shrink: 0;
+  }
+  .history .actions {
+    gap: 8px;
+    margin-top: 12px;
   }
   .history h3 {
     margin: 0 0 4px;

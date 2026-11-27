@@ -112,6 +112,8 @@ export interface ProgramVersion {
   id: number;
   saved_at: number;
   name: string;
+  /** Run mode when it was saved; missing for versions from before it was kept. */
+  mode?: RunMode;
   blocks?: number;
   /** What changed since the version before. */
   changes?: string;
@@ -213,6 +215,8 @@ export const api = {
   variables: () => request<{ global: Record<string, unknown>; programs: Record<string, Record<string, unknown>> }>('GET', 'api/variables'),
   setVariable: (name: string, value: unknown, program_id?: string) =>
     request<{ ok: boolean }>('PUT', 'api/variables', { name, value, program_id }),
+  deleteVariable: (name: string, program_id?: string) =>
+    request<{ ok: boolean }>('DELETE', 'api/variables', { name, program_id }),
 };
 
 export interface ImportedProgram {

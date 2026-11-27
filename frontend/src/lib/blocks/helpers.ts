@@ -4,6 +4,7 @@
 import * as Blockly from 'blockly/core';
 import { allBlockDefs } from './dynamic';
 import { registerEverydayBlocks } from './everyday';
+import { registerMoreBlocks } from './more';
 import { FieldOptions, cachedRegistry, knownEntities } from './field_entity';
 import { haTriggerTypes, installTriggerSettings } from './trigger_settings';
 
@@ -269,4 +270,5 @@ export function registerHelperBlocks() {
   Blockly.common.defineBlocksWithJsonArray(HELPER_BLOCKS);
   installTriggerSettings(haTriggerTypes(HELPER_BLOCKS));
   registerEverydayBlocks();
+  registerMoreBlocks();
 }

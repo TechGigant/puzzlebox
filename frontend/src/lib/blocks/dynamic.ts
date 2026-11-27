@@ -347,7 +347,7 @@ function toolboxItem(def: BlockDef): Blockly.utils.toolbox.ToolboxItemInfo {
 
 /** Built-in blocks that do what a Home Assistant domain's generated blocks do, more simply. */
 const CURATED: Record<string, string[]> = {
-  light: ['light_power', 'light_set_colour', 'light_set_white', 'light_set_brightness', 'light_step'],
+  light: ['light_power', 'light_set_colour', 'light_set_white', 'light_set_brightness', 'light_step', 'light_fade'],
   switch: ['device_power', 'device_on_for'],
   homeassistant: ['device_power'],
   cover: ['cover_command', 'cover_set_position'],

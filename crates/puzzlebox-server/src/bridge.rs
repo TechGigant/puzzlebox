@@ -165,7 +165,8 @@ impl Bridge {
 
     async fn programs_snapshot(&self) -> Value {
         let programs = self.engine.store().list_programs().await.unwrap_or_default();
-        let paused: Vec<String> = self.engine.debugger().paused_runs().into_iter().map(|(run, _)| run).collect();
+        let paused: Vec<String> =
+            self.engine.debugger().paused_runs().into_iter().map(|(run, _)| run).collect();
         let mut list = Vec::with_capacity(programs.len());
         for p in &programs {
             let active = self.engine.active_runs(&p.id);
@@ -440,6 +441,10 @@ async fn session(mut socket: WebSocket, bridge: Arc<Bridge>) {
                     }
                     EngineEvent::RunStarted { .. } | EngineEvent::RunFinished { .. } if run_events => {
                         let _ = tx.send(serde_json::to_value(&ev).unwrap_or_default());
+                    }
+                    // Null = deleted: the full list drops its sensor instead of showing "unknown".
+                    EngineEvent::GlobalChanged { value: Value::Null, .. } if variables => {
+                        let _ = tx.send(json!({"type": "variables", "variables": bridge.engine.globals()}));
                     }
                     EngineEvent::GlobalChanged { name, value } if variables => {
                         let _ = tx.send(json!({"type": "variable", "name": name, "value": value}));

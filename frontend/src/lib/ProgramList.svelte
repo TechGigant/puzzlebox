@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, events, MODE_LABELS, type DeletedProgram, type Program } from './api';
+  import { formatDate } from './locale';
   import StatusChip from './StatusChip.svelte';
   import { plainError } from './ha_errors';
 
@@ -180,7 +181,7 @@
     if (s < 60) return `${s}s ago`;
     if (s < 3600) return `${Math.round(s / 60)}m ago`;
     if (s < 86400) return `${Math.round(s / 3600)}h ago`;
-    return new Date(ms).toLocaleDateString();
+    return formatDate(ms);
   }
 
   onMount(() => {

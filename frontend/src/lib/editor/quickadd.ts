@@ -324,7 +324,11 @@ export function insert(ws: Blockly.WorkspaceSvg, state: State, at: Blockly.utils
   try {
     const block = Blockly.serialization.blocks.append(state, ws) as Blockly.BlockSvg;
     const live = target && !target.isDeadOrDying() ? target : null;
-    if (!((live && attach(live, block)) || (!live && isTrigger(block) && intoEmptyWhen(ws, block)))) block.moveTo(at);
+    if (!((live && attach(live, block)) || (!live && isTrigger(block) && intoEmptyWhen(ws, block)))) {
+      const others = ws.getTopBlocks(false).filter((b) => b !== block).map((b) => b.getBoundingRectangle());
+      const { height, width } = block.getHeightWidth();
+      block.moveTo(freeSpot(others, width, height, at));
+    }
     // Through the focus manager, so the block selected before (and focused, passively, while
     // the search box had focus) is deselected, and keyboard shortcuts work on the new block.
     Blockly.getFocusManager().focusNode(block);
@@ -333,6 +337,34 @@ export function insert(ws: Blockly.WorkspaceSvg, state: State, at: Blockly.utils
   } finally {
     Blockly.Events.setGroup(false);
   }
+}
+
+/** Space kept between a dropped block and the blocks around it. */
+const GAP = 20;
+
+type Box = { top: number; bottom: number; left: number; right: number };
+
+/**
+ * Where to put the top-left corner of a `width`×`height` block near `at` so it overlaps none of
+ * `taken`: `at` itself when that is free, else the nearest free spot. The nearest spot lines up
+ * with `at` or with an edge of a taken box on each axis, so only those are tried; below the
+ * bottom-most box is always free.
+ */
+export function freeSpot(taken: Box[], width: number, height: number, at: { x: number; y: number }): Blockly.utils.Coordinate {
+  const free = (x: number, y: number) =>
+    taken.every((r) => x + width + GAP <= r.left || x >= r.right + GAP || y + height + GAP <= r.top || y >= r.bottom + GAP);
+  if (free(at.x, at.y)) return new Blockly.utils.Coordinate(at.x, at.y);
+  const xs = [at.x, ...taken.flatMap((r) => [r.right + GAP, r.left - width - GAP])];
+  const ys = [at.y, ...taken.flatMap((r) => [r.bottom + GAP, r.top - height - GAP])];
+  let best = { x: at.x, y: Math.max(...taken.map((r) => r.bottom)) + GAP };
+  let bestDist = Infinity;
+  for (const x of xs) {
+    for (const y of ys) {
+      const d = (x - at.x) ** 2 + (y - at.y) ** 2;
+      if (d < bestDist && free(x, y)) [best, bestDist] = [{ x, y }, d];
+    }
+  }
+  return new Blockly.utils.Coordinate(best.x, best.y);
 }
 
 function tryConnect(a: Blockly.Connection | null | undefined, b: Blockly.Connection | null | undefined): boolean {

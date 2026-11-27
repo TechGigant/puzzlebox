@@ -7,6 +7,7 @@
   import { registry } from './registry.svelte';
   import { blockIds } from './runs';
   import { setRunAsTriggerHandler } from './editor/run_as_trigger';
+  import { setLeaveGuard } from './leave';
 
   /** `id` is "new" for a program that is created on its first save. */
   let { id, onclose }: { id: string; onclose: () => void } = $props();
@@ -21,8 +22,11 @@
   let saving = $state(false);
   let message = $state<string | null>(null);
   let errors = $state<CompileError[]>([]);
+  let hints = $state<CompileError[]>([]);
   let paused = $state<{ run_id: string; block_id: string; variables: Record<string, unknown> } | null>(null);
-  let panelOpen = $state(true);
+  // Phones have no room for the panel next to the blocks; there it opens over them.
+  const narrow = () => window.matchMedia?.('(max-width: 700px)').matches ?? false;
+  let panelOpen = $state(!narrow());
   let ws: BlocklyWorkspace | undefined = $state();
   let current: object = {};
   let baseline = '';
@@ -99,6 +103,7 @@
 
   function onchange(state: object) {
     current = state;
+    hints = ws?.hints() ?? [];
     blockCount = countBlocks((state as { blocks?: unknown }).blocks ?? null) + ((state as { blocks?: { blocks?: unknown[] } }).blocks?.blocks?.length ?? 0);
     if (!baseline) return;
     refreshDirty();
@@ -274,10 +279,8 @@
     if (dirty) e.preventDefault();
   }
 
-  function close() {
-    if (dirty && !confirm('Discard unsaved changes?')) return;
-    onclose();
-  }
+  // The app asks this before any navigation away (header links, Back, the ← button).
+  const mayDiscard = () => !dirty || confirm('Discard unsaved changes?');
 
   onMount(() => {
     load().then(() => {
@@ -326,7 +329,9 @@
     });
     window.addEventListener('keydown', onkey);
     window.addEventListener('beforeunload', guardLeave);
+    const stopGuard = setLeaveGuard(mayDiscard);
     return () => {
+      stopGuard();
       off();
       offRunAs();
       if (pid) {
@@ -342,7 +347,7 @@
 
 <div class="editor">
   <div class="bar">
-    <button class="icon" onclick={close} aria-label="Back" title="Back to programs">←</button>
+    <button class="icon" onclick={onclose} aria-label="Back" title="Back to programs">←</button>
     <input class="name" bind:value={name} oninput={refreshDirty} aria-label="Program name" />
     <select bind:value={mode} onchange={refreshDirty} title="What happens when a trigger fires while the program is already running">
       {#each Object.entries(MODE_LABELS) as [value, label] (value)}<option {value}>{label}</option>{/each}
@@ -354,7 +359,7 @@
     <StatusChip status={program?.status} />
     <span class="spacer"></span>
     {#if message}<span class="message">{message}</span>{/if}
-    <span class="count" title="Blocks in this program">{blockCount} blocks</span>
+    <span class="count" title="Blocks in this program">{blockCount === 1 ? '1 block' : `${blockCount} blocks`}</span>
     <button class="btn" onclick={openHistory} disabled={!pid} title="Earlier saved versions of this program">History</button>
     <span class="split">
       <button class="btn" onclick={run} title="Run the program's first entry block now (trigger: run manually)">Run</button>
@@ -394,7 +399,7 @@
       <SidePanel
         programId={pid}
         onactive={showActive}
-        errors={ws?.friendlyErrors(errors) ?? errors}
+        errors={[...(ws?.friendlyErrors(errors) ?? errors), ...hints]}
         {paused}
         onresume={resume}
         onreveal={(b) => ws?.reveal(b)}
@@ -578,5 +583,41 @@
     position: relative;
     flex: 1;
     min-width: 0;
+  }
+  @media (max-width: 700px) {
+    .bar {
+      gap: 6px;
+      padding: 6px 8px;
+    }
+    .name {
+      flex: 1 1 160px;
+      min-width: 0;
+    }
+    .bar select {
+      flex: 1 1 180px;
+      min-width: 0;
+    }
+    .bar .btn {
+      padding: 6px 12px;
+    }
+    .count {
+      display: none;
+    }
+    .body {
+      position: relative;
+    }
+    .body > :global(.panel) {
+      position: absolute;
+      z-index: 70;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      width: auto;
+      height: min(60%, 420px);
+      border-left: 0;
+      border-top: 1px solid var(--pb-divider);
+      border-radius: 12px 12px 0 0;
+      box-shadow: 0 -4px 16px rgb(0 0 0 / 20%);
+    }
   }
 </style>

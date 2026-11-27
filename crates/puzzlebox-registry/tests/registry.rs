@@ -122,6 +122,24 @@ fn generated_blocks_compile_to_native_configs() {
 }
 
 #[test]
+fn actions_need_a_target() {
+    let r = registry();
+    let turn_on = r.all().into_iter().find(|d| d.block_type == "ha_svc__light__turn_on").unwrap();
+    assert!(turn_on.target.unwrap().required);
+    for target in [json!({"shadow": {"type": "ha_entity", "id": "e", "fields": {"ENTITY": ""}}}), Value::Null]
+    {
+        let mut s = json!({"type": "ha_svc__light__turn_on", "id": "s"});
+        if !target.is_null() {
+            s["inputs"] = json!({"TARGET": target});
+        }
+        let ws = json!({"blocks": {"blocks": [{"type": "ha_on_run", "id": "r", "inputs": {"DO": blk(s)}}]}});
+        let errs = compile(&ws, r.lowerer().as_ref()).unwrap_err();
+        let msgs: Vec<_> = errs.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(msgs, ["choose what to turn on"]);
+    }
+}
+
+#[test]
 fn trigger_params_must_be_constant() {
     let r = registry();
     let ws = json!({"blocks": {"blocks": [{"type": "ha_when", "id": "w", "inputs": {

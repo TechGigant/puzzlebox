@@ -3,7 +3,7 @@
 
 import * as Blockly from 'blockly/core';
 import { allBlockDefs } from './dynamic';
-import { FieldOptions } from './field_entity';
+import { FieldOptions, cachedRegistry, knownEntities } from './field_entity';
 import { haTriggerTypes, installTriggerSettings } from './trigger_settings';
 
 type Json = Record<string, unknown>;
@@ -81,10 +81,10 @@ export const HELPER_BLOCKS: Json[] = [
     'Moves a cover to a position: 0 % is closed, 100 % open.',
   ),
   val('cover_position_of', '%1 of %2', [dropdown('WHAT', [['position %', 'position'], ['tilt %', 'tilt']]), value('ENTITY')], 'Number', 'How far a cover is open (0–100 %).'),
-  act('climate_set_temperature', 'set %1 to %2 °', [value('TARGET'), value('TEMPERATURE', 'Number')], 'Sets the target temperature of a thermostat.'),
+  act('climate_set_temperature', 'set target temperature of %1 to %2 °', [value('TARGET'), value('TEMPERATURE', 'Number')], 'Sets the target temperature of a thermostat.'),
   act(
     'climate_set_mode',
-    'set %1 to %2',
+    'set mode of %1 to %2',
     [value('TARGET'), dropdown('MODE', [['heat', 'heat'], ['cool', 'cool'], ['heat/cool', 'heat_cool'], ['auto', 'auto'], ['dry', 'dry'], ['fan only', 'fan_only'], ['off', 'off']])],
     'Changes what a thermostat or air conditioner does.',
   ),
@@ -112,12 +112,15 @@ export const HELPER_BLOCKS: Json[] = [
     [dropdown('TYPE', [['music', 'music'], ['video', 'video'], ['playlist', 'playlist'], ['radio / URL', 'url'], ['channel', 'channel']]), value('MEDIA', 'String'), value('TARGET')],
     'Plays a URL, file or media ID on a media player.',
   ),
-  act(
-    'media_say',
-    'say %1 on %2 with %3',
-    [value('MESSAGE'), value('TARGET'), entity('TTS', '', ['tts'])],
-    'Speaks text on speakers using a text-to-speech service (choose the tts entity, e.g. tts.google_translate_en_com).',
-  ),
+  {
+    ...act(
+      'media_say',
+      'say %1 on %2 with %3',
+      [value('MESSAGE'), value('TARGET'), entity('TTS', '', ['tts'])],
+      'Speaks text on speakers using a text-to-speech service (choose the tts entity, e.g. tts.google_translate_en_com).',
+    ),
+    extensions: ['pb_default_tts'],
+  },
   val('media_volume_of', 'volume of %1', [value('ENTITY')], 'Number', 'The volume of a media player (0–100 %).'),
   val('media_title_of', 'what %1 is playing', [value('ENTITY')], 'String', 'The title of what is playing.'),
   act('fan_set_speed', 'set speed of %1 to %2 %', [value('TARGET'), value('SPEED', 'Number')], 'Sets a fan speed (0–100 %).'),
@@ -134,7 +137,7 @@ export const HELPER_BLOCKS: Json[] = [
   act('counter_command', '%1 %2', [dropdown('MODE', [['add 1 to', 'increment'], ['take 1 from', 'decrement'], ['reset', 'reset']]), value('TARGET')], 'Changes a counter helper.'),
   act(
     'helper_set',
-    'set %1 to %2',
+    'set helper %1 to %2',
     [entity('ENTITY', '', ['input_number', 'input_text', 'input_select', 'input_boolean', 'input_datetime', 'counter', 'number', 'select', 'text']), value('VALUE')],
     'Sets a helper (number, text, dropdown, toggle, date/time or counter) to a value.',
   ),
@@ -198,6 +201,18 @@ export const HELPER_BLOCKS: Json[] = [
   { ...val('colour_hex', 'hex code of %1', [value('COLOUR')], 'String', 'A colour as "#rrggbb" text.'), style: 'colour_blocks' },
 ];
 
+const slug = (s: string) =>
+  s.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+
+/** "mobile_app_pixel_7" → "📱 Pixel 7" (the phone's device name when it is known). */
+export function notifyLabel(service: string): string {
+  if (service === 'persistent') return 'Home Assistant sidebar';
+  const phone = service.match(/^mobile_app_(.+)$/)?.[1];
+  if (!phone) return service.replaceAll('_', ' ');
+  const device = cachedRegistry()?.devices.find((d) => d.name && slug(d.name) === phone);
+  return `📱 ${device?.name ?? phone.split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ')}`;
+}
+
 /** Notify services offered by Home Assistant (from the generated "notify" blocks). */
 class FieldNotifyTarget extends FieldOptions {
   static fromJson(options: Blockly.FieldTextInputFromJsonConfig) {
@@ -209,10 +224,39 @@ class FieldNotifyTarget extends FieldOptions {
       .map((d) => d.type.match(/^ha_svc__notify__(.+)$/)?.[1])
       .filter((s): s is string => !!s && s !== 'send_message' && s !== 'persistent_notification');
     super(value, [
-      { value: 'persistent', label: 'Home Assistant sidebar', meta: 'persistent notification' },
-      ...services.map((s) => ({ value: s, label: s.replace(/^mobile_app_/, '📱 ').replaceAll('_', ' '), meta: `notify.${s}` })),
+      { value: 'persistent', label: notifyLabel('persistent'), meta: 'persistent notification' },
+      ...services.map((s) => ({ value: s, label: notifyLabel(s), meta: `notify.${s}` })),
     ]);
   }
+
+  protected override getText_(): string | null {
+    const v = String(this.getValue() ?? '').trim();
+    return v ? v.split(',').map((s) => notifyLabel(s.trim())).join(', ') : null;
+  }
+}
+
+/** Event groups of workspace loads: their blocks are saved ones. */
+const loads = new Set<string>();
+
+/** "say … on …" from the toolbox or quick add starts with the first voice (tts entity). */
+function registerDefaultTts() {
+  Blockly.Extensions.register('pb_default_tts', function (this: Blockly.Block) {
+    this.setOnChange((e) => {
+      if (e.type === Blockly.Events.FINISHED_LOADING && e.group) loads.add(e.group);
+      // Read-only: the minimap, which mirrors the editor's blocks.
+      if (e.type !== Blockly.Events.BLOCK_CREATE || this.isInFlyout || this.workspace.options.readOnly) return;
+      if ((e as Blockly.Events.BlockCreate).blockId !== this.id || this.getFieldValue('TTS')) return;
+      // A load announces itself after its blocks are created, in the same batch of events.
+      setTimeout(() => {
+        if ((e.group && loads.has(e.group)) || this.isDeadOrDying() || this.getFieldValue('TTS')) return;
+        const tts = knownEntities().find((s) => s.entity_id.startsWith('tts.'));
+        if (!tts) return;
+        Blockly.Events.setGroup(e.group || true);
+        this.setFieldValue(tts.entity_id, 'TTS');
+        Blockly.Events.setGroup(false);
+      });
+    });
+  });
 }
 
 let registered = false;
@@ -220,6 +264,7 @@ export function registerHelperBlocks() {
   if (registered) return;
   registered = true;
   Blockly.fieldRegistry.register('field_notify_target', FieldNotifyTarget);
+  registerDefaultTts();
   Blockly.common.defineBlocksWithJsonArray(HELPER_BLOCKS);
   installTriggerSettings(haTriggerTypes(HELPER_BLOCKS));
 }

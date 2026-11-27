@@ -1055,3 +1055,24 @@ fn every_action_fixture_compiles() {
     // Nothing after the stop survives.
     assert!(!serde_json::to_string(&imp.workspace).unwrap().contains("light.never"));
 }
+
+#[test]
+fn light_blocks_fade_and_templated_brightness() {
+    let (imp, p) = script(
+        r#"  - action: light.turn_off
+    target: {area_id: living_room}
+  - action: light.turn_on
+    target: {area_id: living_room}
+    data: {brightness_pct: "{{ 30 if now().hour > 22 else 100 }}"}
+  - action: light.turn_on
+    target: {area_id: living_room}
+    data: {brightness_pct: "{{ 30 if now().hour > 22 else 150 }}"}
+"#,
+    );
+    assert_eq!(top(&imp), ["light_power", "light_set_brightness", "ha_call_service"]);
+    let first = first_block(&imp);
+    assert_eq!(first.pointer("/inputs/TRANSITION/shadow/fields/NUM"), Some(&json!(0)));
+    let StmtKind::CallService { data: Some(d), .. } = &body(&p)[0].kind else { panic!() };
+    let ExprKind::Builtin { args, .. } = &d.kind else { panic!("{d:?}") };
+    assert_eq!(lit(&args[3]), &json!(0));
+}

@@ -54,8 +54,6 @@ pub struct ProgramStatus {
     pub errors: Vec<CompileError>,
     /// What starts the program, in words ("when Movement turns on (+1)").
     pub summary: String,
-    /// No entry block has both a trigger and something to do.
-    pub does_nothing: bool,
 }
 
 /// A run in progress and what it is doing.
@@ -535,7 +533,6 @@ impl Engine {
             let mut all = lock(&self.inner.status);
             let st = all.entry(rec.id.clone()).or_default();
             st.summary = crate::describe::program(&program, self.inner.ha.as_ref());
-            st.does_nothing = compile_errors.is_empty() && crate::describe::does_nothing(&program);
         }
         let labels = Arc::new(self.inner.store.labels(&rec.id).await.unwrap_or_default());
         if !compile_errors.is_empty() && program.handlers.is_empty() {

@@ -4,6 +4,7 @@ import { registerFieldColour } from '@blockly/field-colour';
 import { registerFieldEntity } from './field_entity';
 import { registerConditionOptions } from './conditions';
 import { haTriggerTypes, installTriggerSettings } from './trigger_settings';
+import { installBlockText } from './block_text';
 
 type Json = Record<string, unknown>;
 
@@ -215,12 +216,15 @@ export const CORE_BLOCKS: Json[] = [
     ),
     extensions: ['pb_numeric_trigger_fields'],
   },
-  trigger(
-    'ha_trigger_time',
-    'it is %1 shifted by %2 %3 on Mon %4 Tue %5 Wed %6 Thu %7 Fri %8 Sat %9 Sun %10',
-    [time('AT', '07:00'), value('OFFSET', 'Number'), dummy, checkbox('MON'), checkbox('TUE'), checkbox('WED'), checkbox('THU'), checkbox('FRI'), checkbox('SAT'), checkbox('SUN')],
-    'Fires at this time (like 07:30) on the ticked days, or at the time in a date/time helper (input_datetime.…) or timestamp sensor. A shift only works with a helper or sensor: -10 minutes fires 10 minutes before it.',
-  ),
+  {
+    ...trigger(
+      'ha_trigger_time',
+      'it is %1 %2 shifted by %3 on Mon %4 Tue %5 Wed %6 Thu %7 Fri %8 Sat %9 Sun %10',
+      [time('AT', '07:00'), dummy, value('OFFSET', 'Number'), checkbox('MON'), checkbox('TUE'), checkbox('WED'), checkbox('THU'), checkbox('FRI'), checkbox('SAT'), checkbox('SUN')],
+      'Fires at this time (like 07:30) on the ticked days, or at the time in a date/time helper (input_datetime.…) or timestamp sensor. With a helper or sensor it can be shifted: -10 minutes fires 10 minutes before it.',
+    ),
+    extensions: ['pb_time_offset'],
+  },
   {
     ...trigger(
       'ha_trigger_time_pattern',
@@ -804,11 +808,36 @@ export const CORE_BLOCKS: Json[] = [
   ),
 ];
 
+/** A shift of 0 (or none), which a fixed time also accepts. */
+function noShift(b: Blockly.Block | null): boolean {
+  if (!b) return true;
+  if (b.type === 'math_number') return Number(b.getFieldValue('NUM')) === 0;
+  if (b.type === 'duration') return noShift(b.getInputTargetBlock('N'));
+  return false;
+}
+
+/** The time trigger's shift only shows for a helper or sensor time, or when one is already set. */
+function registerTimeOffset() {
+  Blockly.Extensions.register('pb_time_offset', function (this: Blockly.Block) {
+    // Starts as a fixed time; a loaded helper or shift shows it with the first change event.
+    this.getInput('OFFSET')?.setVisible(false);
+    this.setOnChange(() => {
+      const input = this.getInput('OFFSET');
+      if (!input || this.isDeadOrDying()) return;
+      const show = String(this.getFieldValue('AT') ?? '').includes('.') || !noShift(this.getInputTargetBlock('OFFSET'));
+      if (show === input.isVisible()) return;
+      input.setVisible(show);
+      if (this.rendered) (this as Blockly.BlockSvg).render();
+    });
+  });
+}
+
 let registered = false;
 
 export function registerCoreBlocks(): void {
   if (registered) return;
   registered = true;
+  installBlockText();
   registerFieldMultilineInput();
   registerFieldColour();
   registerFieldEntity();
@@ -816,6 +845,7 @@ export function registerCoreBlocks(): void {
   registerConditionOptions();
   registerShowWhen();
   registerTimeLimit();
+  registerTimeOffset();
   for (const b of CORE_BLOCKS) {
     if ((b as { nextStatement?: unknown }).nextStatement === undefined) delete (b as Json).nextStatement;
   }

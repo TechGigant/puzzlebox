@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { api, events, MODE_LABELS, type DeletedProgram, type Program } from './api';
   import StatusChip from './StatusChip.svelte';
+  import { plainError } from './ha_errors';
 
   let { onopen, onimport }: { onopen: (id: string) => void; onimport?: () => void } = $props();
 
@@ -237,10 +238,10 @@
         <span class="meta">
           {#if searching && p.folder}<span class="folder-tag">{p.folder.replaceAll('/', ' › ')}</span> · {/if}
           {MODE_LABELS[p.mode] ?? p.mode} · last run {ago(p.status?.last_run)}
-          {#if failed(p)}<span class="err"> · failed{p.status?.last_error ? `: ${p.status.last_error}` : ''}</span>{/if}
+          {#if failed(p)}<span class="err"> · failed{p.status?.last_error ? `: ${plainError(p.status.last_error) ?? p.status.last_error}` : ''}</span>{/if}
         </span>
       </button>
-      {#if p.status?.does_nothing}
+      {#if p.does_nothing}
         <span class="chip-nothing" title="No “when” block has both a trigger and blocks to run, so this program never does anything">does nothing</span>
       {/if}
       <StatusChip status={p.status} />
@@ -459,6 +460,31 @@
   .bin-name {
     flex: 1;
     min-width: 0;
+  }
+  @media (max-width: 560px) {
+    .page {
+      padding: 12px;
+    }
+    .search {
+      min-width: 0;
+      max-width: none;
+      flex-basis: 100%;
+    }
+    .list {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .card {
+      flex-wrap: wrap;
+      gap: 4px 8px;
+      padding: 4px 8px 8px 4px;
+    }
+    .main {
+      flex-basis: 100%;
+      padding: 10px 12px 4px;
+    }
+    .card > :global(.chip) {
+      margin: 0 auto 0 12px;
+    }
   }
   .folder {
     list-style: none;

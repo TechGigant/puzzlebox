@@ -204,16 +204,6 @@ pub fn program(p: &Program, ha: &dyn HaApi) -> String {
     }
 }
 
-/// Whether the program can never do anything: no entry block with both a trigger and blocks
-/// to run. Loose stacks and functions don't count, since nothing starts them.
-pub fn does_nothing(p: &Program) -> bool {
-    !p.handlers.iter().any(|h| match &h.kind {
-        HandlerKind::Triggers { triggers } => !triggers.is_empty() && !h.body.is_empty(),
-        HandlerKind::OnStart => !h.body.is_empty(),
-        _ => false,
-    })
-}
-
 fn state_text(s: Option<&Value>) -> Option<String> {
     s.and_then(|s| s.get("state")).and_then(Value::as_str).map(str::to_owned)
 }

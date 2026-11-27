@@ -483,3 +483,13 @@ fn waits_keep_their_trigger_configs_as_written() {
         &vec![json!({"trigger": "event", "event_type": "a"}), json!({"trigger": "event", "event_type": "b"})]
     );
 }
+
+#[test]
+fn helper_set_without_entity_has_one_error() {
+    let ws = json!({"blocks": {"blocks": [{"type": "ha_on_run", "id": "r",
+       "inputs": {"DO": {"block": {"type": "helper_set", "id": "h", "fields": {"ENTITY": ""},
+         "inputs": {"VALUE": {"shadow": {"type": "text", "id": "t", "fields": {"TEXT": "x"}}}}}}}}]}});
+    let errs = compile(&ws, &NoExternals).unwrap_err();
+    let msgs: Vec<_> = errs.iter().map(|e| e.message.as_str()).collect();
+    assert_eq!(msgs, ["choose an entity"]);
+}

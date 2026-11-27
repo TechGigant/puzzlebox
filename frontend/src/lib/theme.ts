@@ -30,37 +30,41 @@ const DARK: HaTokens = {
   dark: true,
 };
 
-/** Category hues, tuned to sit well on both HA light and dark backgrounds. */
-const CATEGORIES: Record<string, { light: string; dark: string }> = {
-  logic: { light: '#5c6bc0', dark: '#7986cb' },
+/**
+ * Category colours. Block labels are white, so every colour (and its darker zebra shade) keeps
+ * at least 4.5:1 contrast with white (WCAG AA), in light and dark themes alike.
+ */
+const CATEGORIES: Record<string, string> = {
+  logic: '#5c6bc0',
   // Loops live in Control, so they share its colour.
-  loop: { light: '#546e7a', dark: '#78909c' },
-  math: { light: '#1e88e5', dark: '#42a5f5' },
-  text: { light: '#8e24aa', dark: '#ab47bc' },
-  list: { light: '#f4511e', dark: '#ff7043' },
-  variable: { light: '#e53975', dark: '#ec5f91' },
-  procedure: { light: '#6d4c41', dark: '#8d6e63' },
-  trigger: { light: '#fb8c00', dark: '#ffa726' },
-  condition: { light: '#00897b', dark: '#26a69a' },
-  action: { light: '#039be5', dark: '#29b6f6' },
-  time: { light: '#7cb342', dark: '#9ccc65' },
-  flow: { light: '#546e7a', dark: '#78909c' },
-  dict: { light: '#5e35b1', dark: '#9575cd' },
-  http: { light: '#455a64', dark: '#90a4ae' },
-  stored: { light: '#c2185b', dark: '#f06292' },
-  plugin: { light: '#6a1b9a', dark: '#ba68c8' },
-  favourite: { light: '#f9a825', dark: '#fdd835' },
-  section: { light: '#9e9e9e', dark: '#616161' },
-  colour: { light: '#00acc1', dark: '#4dd0e1' },
-  home: { light: '#0288d1', dark: '#4fc3f7' },
+  loop: '#546e7a',
+  math: '#1976d2',
+  text: '#8e24aa',
+  list: '#c43e0e',
+  variable: '#d81b60',
+  procedure: '#6d4c41',
+  trigger: '#b35c00',
+  condition: '#00796b',
+  action: '#0277bd',
+  time: '#4e7d22',
+  flow: '#546e7a',
+  dict: '#5e35b1',
+  http: '#455a64',
+  stored: '#ad1457',
+  plugin: '#6a1b9a',
+  favourite: '#8f6a00',
+  section: '#757575',
+  colour: '#007c89',
+  home: '#01579b',
 };
 
-/** Stable colour for runtime-contributed categories (HA domains, plugins). */
-export function hashColour(name: string, dark: boolean): string {
-  let h = 0;
-  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-  const hue = h % 360;
-  const [s, l] = dark ? [55, 62] : [60, 45];
+/** WCAG contrast ratio of two colours (1 to 21). */
+export function contrast(a: string, b: string): number {
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
+  return (hi + 0.05) / (lo + 0.05);
+}
+
+function hsl(hue: number, s: number, l: number): string {
   const a = (s / 100) * Math.min(l / 100, 1 - l / 100);
   const f = (n: number) => {
     const k = (n + hue / 30) % 12;
@@ -68,6 +72,16 @@ export function hashColour(name: string, dark: boolean): string {
     return Math.round(c * 255).toString(16).padStart(2, '0');
   };
   return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+/** Stable colour for runtime-contributed categories (HA domains, plugins), dark enough for white text. */
+export function hashColour(name: string): string {
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const hue = h % 360;
+  let l = 45;
+  while (l > 20 && contrast(hsl(hue, 60, l), '#ffffff') < 4.6) l -= 1;
+  return hsl(hue, 60, l);
 }
 
 export function parseHex(hex: string): [number, number, number] | null {
@@ -134,8 +148,8 @@ export function buildTheme(t: HaTokens, extraStyles: string[] = []): Blockly.The
   const blockStyles: Record<string, Blockly.Theme.BlockStyle> = {};
   const categoryStyles: Record<string, Blockly.Theme.CategoryStyle> = {};
   const all: [string, string][] = [
-    ...Object.entries(CATEGORIES).map(([n, c]) => [n, t.dark ? c.dark : c.light] as [string, string]),
-    ...extraStyles.filter((n) => !(n in CATEGORIES)).map((n) => [n, hashColour(n, t.dark)] as [string, string]),
+    ...Object.entries(CATEGORIES),
+    ...extraStyles.filter((n) => !(n in CATEGORIES)).map((n) => [n, hashColour(n)] as [string, string]),
   ];
   for (const [name, colour] of all) {
     blockStyles[`${name}_blocks`] = {
@@ -144,8 +158,9 @@ export function buildTheme(t: HaTokens, extraStyles: string[] = []): Blockly.The
       colourTertiary: mix(colour, '#000000', 0.25),
       hat: '',
     };
-    // Second shade for nested blocks of the same colour (zebra striping).
-    const alt = mix(colour, t.dark ? '#ffffff' : '#000000', t.dark ? 0.18 : 0.16);
+    // Second shade for nested blocks of the same colour (zebra striping). Darker in both
+    // themes: a lighter shade would lose the label contrast.
+    const alt = mix(colour, '#000000', 0.2);
     blockStyles[`${name}_blocks_alt`] = {
       colourPrimary: alt,
       colourSecondary: mix(alt, t.card, 0.35),
@@ -192,6 +207,8 @@ export function applyCssTokens(t: HaTokens): void {
   root.setProperty('--pb-text', t.text);
   root.setProperty('--pb-text-2', t.secondaryText);
   root.setProperty('--pb-divider', t.divider);
+  // Shadow blocks are a faded block colour: light on light themes, so their labels turn dark.
+  root.setProperty('--pb-shadow-text', t.dark ? '#ffffff' : t.text);
   root.colorScheme = t.dark ? 'dark' : 'light';
 }
 

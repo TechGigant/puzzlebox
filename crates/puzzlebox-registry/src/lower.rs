@@ -77,6 +77,25 @@ struct Args {
     target: Option<Expr>,
 }
 
+/// What an action without a target asks for, in its own words where they read well: "choose
+/// what to turn on".
+fn target_prompt(def: &BlockDef) -> String {
+    const VERBS: &str = "turn toggle open close stop lock unlock press start pause reload reset restart \
+        increment decrement activate arm disarm dismiss play update mute unmute clean locate run speak";
+    let title = def.title.trim().to_lowercase();
+    // HA titles often end in the domain ("Turn on light"); the picker already says which.
+    let domain = def.category.first().map(|c| format!(" {}", c.to_lowercase())).unwrap_or_default();
+    let what = title.strip_suffix(domain.as_str()).unwrap_or(&title);
+    let words: Vec<&str> = what.split_whitespace().collect();
+    match def.kind {
+        BlockKind::Trigger | BlockKind::Condition => "choose a target".into(),
+        _ if (1..=3).contains(&words.len()) && VERBS.split_whitespace().any(|v| v == words[0]) => {
+            format!("choose what to {what}")
+        }
+        _ => "choose what to control".into(),
+    }
+}
+
 impl RegistryLowerer {
     fn collect(&self, def: &BlockDef, b: Block<'_>, c: &mut Compiler<'_>) -> Args {
         let mut exprs = BTreeMap::new();
@@ -134,9 +153,13 @@ impl RegistryLowerer {
             t.ty() == "ha_entity" && t.field_str("ENTITY").is_none_or(|e| e.trim().is_empty())
         });
         let required = def.target.as_ref().is_some_and(|t| t.required);
-        let target = if empty_picker && !required { None } else { c.value_opt(&b, "TARGET") };
+        let target = if empty_picker && (!required || def.kind != BlockKind::Trigger) {
+            None
+        } else {
+            c.value_opt(&b, "TARGET")
+        };
         if target.is_none() && required {
-            c.err(&b, "choose a target");
+            c.err(&b, target_prompt(def));
         }
         Args { exprs, target }
     }

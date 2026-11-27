@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, FromRequest, Path, Request, State};
+use axum::extract::{ConnectInfo, FromRequest, Path, Query, Request, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Json, Response};
@@ -11,6 +11,7 @@ use axum::routing::{get, post};
 use puzzlebox_engine::{Engine, LiveHa};
 use puzzlebox_ha_client::{ConnectionState, HaClient};
 use rust_embed::RustEmbed;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tower_http::trace::TraceLayer;
 
@@ -190,8 +191,20 @@ pub fn not_found() -> ApiError {
     ApiError(StatusCode::NOT_FOUND, "not found".into())
 }
 
-async fn ha_states(State(st): State<AppState>) -> Json<Value> {
-    Json(Value::Array(st.live.all_states()))
+#[derive(Deserialize)]
+struct StatesQuery {
+    since: Option<u64>,
+}
+
+/// A plain list of states, or with `?since=` only what changed after that version (or
+/// everything with `"full": true` when the cache was reloaded in between).
+async fn ha_states(State(st): State<AppState>, Query(q): Query<StatesQuery>) -> Json<Value> {
+    let Some(since) = q.since else { return Json(Value::Array(st.live.all_states())) };
+    if let Some(d) = st.live.states_since(since) {
+        return Json(json!({"version": d.version, "changed": d.changed, "removed": d.removed}));
+    }
+    let (version, all) = st.live.all_states_versioned();
+    Json(json!({"version": version, "full": true, "changed": all, "removed": []}))
 }
 
 async fn registry_blocks(State(st): State<AppState>) -> Json<Value> {

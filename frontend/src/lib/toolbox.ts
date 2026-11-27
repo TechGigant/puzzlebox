@@ -24,6 +24,9 @@ const sep = { kind: 'sep' } as Item;
 const block = (type: string, inputs?: Record<string, unknown>, extra: Record<string, unknown> = {}): Item =>
   ({ kind: 'block', type, ...(inputs ? { inputs } : {}), ...extra }) as Item;
 
+/** Where runtime categories go; replaced once the built-in ones are known. */
+const EXTRA = { kind: 'sep', id: 'pb-extra' } as Item;
+
 const cat = (name: string, style: string, contents: Item[], extra: Record<string, unknown> = {}): Item =>
   ({ kind: 'category', name, categorystyle: `${style}_category`, contents, ...extra }) as Item;
 
@@ -35,12 +38,31 @@ export interface ExtraCategory {
   subcategories?: ExtraCategory[];
   /** Flyout filled by a registered callback instead of `blocks`. */
   custom?: string;
+  /** Built-in blocks that do the same more simply; shown first. */
+  curated?: string[];
 }
 
-function extraToItem(c: ExtraCategory): Item {
+type Category = Item & { contents: Item[] };
+const isCategory = (i: Item): i is Category => i.kind === 'category';
+
+function extraToItem(c: ExtraCategory, builtIn: Map<string, Item>): Item {
   if (c.custom) return cat(c.name, c.style, [], { custom: c.custom });
-  const contents: Item[] = [...(c.subcategories ?? []).map(extraToItem), ...c.blocks];
+  const simpler = (c.curated ?? []).flatMap((t) => builtIn.get(t) ?? []);
+  const contents: Item[] = [
+    ...(simpler.length ? [label('Easier to use: the same with Puzzlebox blocks'), ...simpler] : []),
+    ...(c.subcategories ?? []).map((s) => extraToItem(s, builtIn)),
+    ...c.blocks,
+  ];
   return cat(c.name, c.style, contents);
+}
+
+/** Built-in blocks as their categories list them, so other categories can show them too. */
+function builtInBlocks(items: Item[], out = new Map<string, Item>()): Map<string, Item> {
+  for (const i of items) {
+    if (isCategory(i)) builtInBlocks(i.contents, out);
+    else if (i.kind === 'block' && 'type' in i && !out.has(i.type as string)) out.set(i.type as string, i);
+  }
+  return out;
 }
 
 /**
@@ -48,7 +70,7 @@ function extraToItem(c: ExtraCategory): Item {
  * then what Home Assistant and plugins add, with technical blocks last under "Advanced".
  */
 export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox.ToolboxInfo {
-  return {
+  const toolbox = {
     kind: 'categoryToolbox',
     contents: [
       cat('Favourites', 'favourite', [], { custom: 'PB_FAVOURITES' }),
@@ -272,7 +294,7 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('time_format', { DATETIME: { block: { type: 'time_now' } } }),
         block('time_is_between'),
       ]),
-      ...(extra.length ? [sep, ...extra.map(extraToItem)] : []),
+      EXTRA,
       sep,
       cat('Advanced', 'http', [
         label('Home Assistant, the technical way'),
@@ -327,6 +349,10 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
       ]),
     ],
   };
+  const builtIn = builtInBlocks(toolbox.contents);
+  const at = toolbox.contents.indexOf(EXTRA);
+  toolbox.contents.splice(at, 1, ...(extra.length ? [sep, ...extra.map((c) => extraToItem(c, builtIn))] : []));
+  return toolbox as Blockly.utils.toolbox.ToolboxInfo;
 }
 
 /** Flyout for persistent variables (typed 'Program' or 'Global'). */

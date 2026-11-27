@@ -990,7 +990,6 @@ async fn active_runs_show_waits_and_steps_say_how_they_went() {
     engine.save(program("p", ws, "single")).await.unwrap();
     let status = engine.status("p").unwrap();
     assert_eq!(status.summary, "when Motion turns on");
-    assert!(!status.does_nothing);
 
     ha.fire(json!({"platform": "state", "entity_id": "binary_sensor.motion",
         "from_state": {"state": "off", "attributes": {"friendly_name": "Motion"}},
@@ -1013,17 +1012,6 @@ async fn active_runs_show_waits_and_steps_say_how_they_went() {
     assert_eq!(note("if"), "true");
     assert_eq!(note("w1"), "waited 0.3 s");
 }
-
-#[tokio::test]
-async fn programs_without_actions_do_nothing() {
-    let (engine, _ha) = setup().await;
-    let empty_when = b("ha_when", "w", json!({}), json!({"TRIGGERS": blk(state_trigger("t", "x.y"))}));
-    engine.save(program("p", workspace(vec![empty_when], json!([])), "single")).await.unwrap();
-    assert!(engine.status("p").unwrap().does_nothing);
-    engine.save(program("q", workspace(vec![], json!([])), "single")).await.unwrap();
-    assert!(engine.status("q").unwrap().does_nothing);
-}
-
 #[tokio::test]
 async fn runs_as_if_a_trigger_fired() {
     let (engine, ha) = setup().await;

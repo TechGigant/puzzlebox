@@ -34,6 +34,8 @@ export function updateNotice(status: Status | null): string | null {
 export interface CompileError {
   block_id: string | null;
   message: string;
+  /** Editor-only: shown in Problems, but the program still runs. */
+  warning?: boolean;
 }
 
 export interface ProgramStatus {
@@ -46,8 +48,6 @@ export interface ProgramStatus {
   errors: CompileError[];
   /** What starts the program, in words ("when Motion turns on (+1)"). */
   summary?: string;
-  /** No "when" has both a trigger and something to do. */
-  does_nothing?: boolean;
 }
 
 export type RunMode = 'single' | 'restart' | 'queued' | 'parallel';
@@ -104,6 +104,8 @@ export interface Program {
   updated_at: number;
   status: ProgramStatus | null;
   errors?: CompileError[];
+  /** No "when" (with a trigger), start or run block has anything to do. */
+  does_nothing?: boolean;
 }
 
 export interface ProgramVersion {

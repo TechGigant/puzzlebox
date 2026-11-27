@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api, events, type ActiveRun, type CompileError, type LogEntry, type RunRecord } from './api';
   import { activity, triggerSummary } from './runs';
+  import { plainError } from './ha_errors';
 
   let {
     programId,
@@ -126,7 +127,7 @@
     <section class="problems">
       <h3>Problems</h3>
       {#each errors as e, i (i)}
-        <button class="problem" onclick={() => e.block_id && onreveal(e.block_id)}>⚠ {e.message}</button>
+        <button class="problem" class:warn={e.warning} onclick={() => e.block_id && onreveal(e.block_id)}>⚠ {e.message}</button>
       {/each}
     </section>
   {/if}
@@ -159,7 +160,15 @@
         {#if selected?.id === r.id && selected.trace}
           {@const vars = Object.entries(selected.trace.variables ?? {})}
           <div class="detail">
-            {#if selected.error}<p class="err">{selected.error}</p>{/if}
+            {#if selected.error}
+              {@const plain = plainError(selected.error)}
+              {#if plain}
+                <p class="err">{plain}</p>
+                <details class="muted"><summary>details</summary>{selected.error}</details>
+              {:else}
+                <p class="err">{selected.error}</p>
+              {/if}
+            {/if}
             <p class="started">
               Started: {triggerSummary(selected)}
               <button class="link" onclick={() => (showRaw = !showRaw)}>{showRaw ? 'hide details' : 'details'}</button>
@@ -177,10 +186,12 @@
             <ol class="steps">
               {#each selected.trace.steps.slice(0, 300) as s, i (i)}
                 <li>
-                  <button onclick={() => onreveal(s.block)} class:err={s.error}>
+                  <button onclick={() => onreveal(s.block)} class:err={s.error} title={s.error ?? undefined}>
                     <span class="t">{s.t} ms</span>
                     <span>
-                      {s.error ? `${stepLabel(selected, s.block)}: ${s.error}` : stepLabel(selected, s.block)}
+                      {s.error
+                        ? `${stepLabel(selected, s.block)}: ${plainError(s.error) ?? s.error}`
+                        : stepLabel(selected, s.block)}
                       {#if s.note}<span class="note">→ {s.note}</span>{/if}
                       {#if !describe(s.block)}<span class="muted"> (no longer in the program)</span>{/if}
                     </span>
@@ -196,7 +207,7 @@
         <p class="muted">Nothing logged yet. Messages from “log” blocks, warnings (such as conditions that failed and counted as false, or errors a block carried on after) and failed runs appear here.</p>
       {/if}
       {#each logs as l, i (i)}
-        <div class="log {l.level}"><span class="muted">{fmtTime(l.ts)}</span> {l.message}</div>
+        <div class="log {l.level}" title={plainError(l.message) ? l.message : undefined}><span class="muted">{fmtTime(l.ts)}</span> {plainError(l.message) ?? l.message}</div>
       {/each}
     {:else}
       <p class="muted">Right-click a block → <b>Add breakpoint</b>. Runs pause there while this editor is open.</p>
@@ -318,6 +329,9 @@
   .st.error,
   .err {
     color: #e53935;
+  }
+  .problem.warn {
+    opacity: 0.8;
   }
   .st.cancelled {
     color: var(--pb-text-2);

@@ -20,6 +20,7 @@ fn with_status(st: &AppState, p: &ProgramRecord, include_workspace: bool) -> Val
         o.remove("workspace");
     }
     v["status"] = serde_json::to_value(st.engine.status(&p.id)).unwrap_or_default();
+    v["does_nothing"] = json!(puzzlebox_ir::does_nothing(&p.workspace));
     v
 }
 

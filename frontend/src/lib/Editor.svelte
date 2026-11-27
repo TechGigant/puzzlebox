@@ -3,6 +3,8 @@
   import BlocklyWorkspace from './BlocklyWorkspace.svelte';
   import StatusChip from './StatusChip.svelte';
   import SidePanel from './SidePanel.svelte';
+  import ShortcutsHelp from './editor/ShortcutsHelp.svelte';
+  import { modal } from './dialog';
   import { api, events, MODE_LABELS, type ActiveRun, type CompileError, type Program, type ProgramVersion, type RunMode } from './api';
   import { formatDateTime } from './locale';
   import WorkspacePreview from './WorkspacePreview.svelte';
@@ -10,12 +12,15 @@
   import { blockIds } from './runs';
   import { setRunAsTriggerHandler } from './editor/run_as_trigger';
   import { setLeaveGuard } from './leave';
+  import { starter } from './starters';
 
-  /** `id` is "new" for a program that is created on its first save. */
+  /** `id` is "new" (or "new-<starter>") for a program that is created on its first save. */
   let { id, onclose }: { id: string; onclose: () => void } = $props();
 
   // svelte-ignore state_referenced_locally
-  let pid = $state<string | null>(id === 'new' ? null : id);
+  const template = id.startsWith('new-') ? starter(id.slice(4)) : null;
+  // svelte-ignore state_referenced_locally
+  let pid = $state<string | null>(id === 'new' || id.startsWith('new-') ? null : id);
   let program = $state<Program | null>(null);
   let name = $state('');
   let mode = $state<RunMode>('single');
@@ -41,6 +46,7 @@
   /** The version shown read-only in the history dialog. */
   let preview = $state<ProgramVersion | null>(null);
   let runMenu = $state<{ block_id: string; summary: string }[] | null>(null);
+  let showShortcuts = $state(false);
   const running = $derived((program?.status?.active_runs ?? 0) > 0);
 
   /** Blocks in a saved workspace, not counting shadows (the default values in sockets). */
@@ -99,12 +105,12 @@
       ? await api.program(pid)
       : {
           id: '',
-          name: 'New program',
+          name: template?.name ?? 'New program',
           description: '',
           enabled: true,
-          mode: 'single',
+          mode: template?.mode ?? 'single',
           max_runs: 10,
-          workspace: {},
+          workspace: template ? structuredClone(template.workspace) : {},
           folder: '',
           created_at: 0,
           updated_at: 0,
@@ -129,14 +135,16 @@
     if (!baseline) return;
     refreshDirty();
     clearTimeout(compileTimer);
-    compileTimer = setTimeout(async () => {
-      try {
-        errors = (await api.compile(current)).errors;
-        ws?.setErrors(errors);
-      } catch {
-        /* offline; save will report */
-      }
-    }, 500);
+    compileTimer = setTimeout(compile, 500);
+  }
+
+  async function compile() {
+    try {
+      errors = (await api.compile(current)).errors;
+      ws?.setErrors(errors);
+    } catch {
+      /* offline; save will report */
+    }
   }
 
   /** Each block's text as the editor shows it, kept so runs read the way the blocks did. */
@@ -284,6 +292,12 @@
     if ((e.ctrlKey || e.metaKey) && e.key === 's') {
       e.preventDefault();
       save();
+      return;
+    }
+    const typing = (e.target as HTMLElement)?.closest?.('input, textarea, select, [contenteditable]');
+    if (e.key === '?' && !typing && !e.ctrlKey && !e.metaKey && !e.altKey && !history) {
+      e.preventDefault();
+      showShortcuts = true;
     }
   }
 
@@ -314,6 +328,8 @@
         baseline = JSON.stringify(current);
         refreshDirty();
         if (pid) api.active(pid).then(showActive, () => {});
+        // A starter's devices are still to choose; list them as problems straight away.
+        else if (template) compile();
       }, 50);
     });
     if (pid) watch(pid);
@@ -373,13 +389,18 @@
     <select bind:value={mode} onchange={refreshDirty} title="What happens when a trigger fires while the program is already running">
       {#each Object.entries(MODE_LABELS) as [value, label] (value)}<option {value}>{label}</option>{/each}
     </select>
-    <label class="switch" title={pid ? (enabled ? 'On: click to turn off' : 'Off: click to turn on') : 'Starts when you save'}>
-      <input type="checkbox" bind:checked={enabled} onchange={toggleEnabled} />
+    <label class="switch" title={pid ? (enabled ? 'On: click to turn off' : 'Off: click to turn on') : enabled ? 'Turns on when you save' : 'Stays off when you save'}>
+      <input type="checkbox" bind:checked={enabled} onchange={toggleEnabled} aria-label={pid ? 'Program on' : 'Turn on when saved'} />
       <span></span>
     </label>
-    <StatusChip status={program?.status} />
+    {#if pid}
+      <StatusChip status={program?.status} />
+    {:else}
+      <!-- Not live yet: "Active" would say it already reacts to its triggers. -->
+      <span class="unsaved" title={enabled ? 'Turns on when you save it' : 'Stays off when you save it'}>Not saved yet</span>
+    {/if}
     <span class="spacer"></span>
-    {#if message}<span class="message">{message}</span>{/if}
+    <span class="message" role="status">{message ?? ''}</span>
     <span class="count" title="Blocks in this program">{blockCount === 1 ? '1 block' : `${blockCount} blocks`}</span>
     <button class="btn" onclick={openHistory} disabled={!pid} title="Earlier saved versions of this program">History</button>
     <span class="split">
@@ -398,7 +419,8 @@
     </span>
     <button class="btn" onclick={stop} disabled={!running} title={running ? 'Stop the runs in progress' : 'Nothing is running'}>Stop</button>
     <button class="btn primary" onclick={save} disabled={saving}>{dirty || !pid ? 'Save*' : 'Save'}</button>
-    <button class="icon" onclick={() => (panelOpen = !panelOpen)} title="Toggle side panel" aria-label="Toggle side panel">☰</button>
+    <button class="icon" onclick={() => (showShortcuts = true)} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+    <button class="icon" onclick={() => (panelOpen = !panelOpen)} title="Toggle side panel" aria-label="Toggle side panel" aria-expanded={panelOpen}>☰</button>
     <button class="icon danger" onclick={remove} title="Move to the recycle bin" aria-label="Delete program">🗑</button>
   </div>
   {#if runMenu}<div class="menu-backdrop" role="presentation" onclick={() => (runMenu = null)}></div>{/if}
@@ -437,8 +459,8 @@
 
 {#if history && preview}
   <div class="backdrop" role="presentation" onclick={closeHistory}></div>
-  <div class="history wide" role="dialog" aria-label="Earlier version">
-    <h3>Version from {formatDateTime(preview.saved_at)}</h3>
+  <div class="history wide" role="dialog" aria-labelledby="pb-preview-title" use:modal={() => (preview = null)}>
+    <h3 id="pb-preview-title">Version from {formatDateTime(preview.saved_at)}</h3>
     <p class="hint">
       {[`Named “${preview.name}”`, preview.mode && (MODE_LABELS[preview.mode] ?? preview.mode), `${preview.blocks ?? 0} ${preview.blocks === 1 ? 'block' : 'blocks'}`]
         .filter(Boolean)
@@ -454,8 +476,8 @@
   </div>
 {:else if history}
   <div class="backdrop" role="presentation" onclick={closeHistory}></div>
-  <div class="history" role="dialog" aria-label="Program history">
-    <h3>History</h3>
+  <div class="history" role="dialog" aria-labelledby="pb-history-title" use:modal={closeHistory}>
+    <h3 id="pb-history-title">History</h3>
     <p class="hint">
       Every save that changed the blocks, name or run mode is kept (the last 30). Show one to look at it; restoring loads
       its blocks, name and run mode into the editor, and you save to keep it.
@@ -486,6 +508,10 @@
   </div>
 {/if}
 
+{#if showShortcuts}
+  <ShortcutsHelp onclose={() => (showShortcuts = false)} />
+{/if}
+
 <style>
   .editor {
     display: flex;
@@ -513,6 +539,14 @@
   .message {
     font-size: 13px;
     color: var(--pb-text-2);
+  }
+  .unsaved {
+    padding: 4px 10px;
+    border-radius: 14px;
+    font-size: 12px;
+    white-space: nowrap;
+    color: var(--pb-text-2);
+    background: color-mix(in srgb, var(--pb-text) 8%, transparent);
   }
   .count {
     font-size: 13px;

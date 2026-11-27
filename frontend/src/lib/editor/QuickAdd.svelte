@@ -16,7 +16,8 @@
     y: number;
     want?: Want | null;
     hint?: string;
-    onpick: (e: Entry) => void;
+    /** The query too: a number in it is filled into the block. */
+    onpick: (e: Entry, query: string) => void;
     onclose: () => void;
   } = $props();
 
@@ -42,7 +43,7 @@
       list?.children[active]?.scrollIntoView({ block: 'nearest' });
     } else if (e.key === 'Enter' && results[active]) {
       e.preventDefault();
-      onpick(results[active]);
+      onpick(results[active], query);
     }
   }
 
@@ -64,7 +65,8 @@
     <ul bind:this={list} role="listbox">
       {#each results as r, i (i)}
         <li role="option" aria-selected={i === active} class:active={i === active}>
-          <button onmousedown={(e) => (e.preventDefault(), onpick(r))} onmouseenter={() => (active = i)}>
+          <!-- Only a real move: the list appearing under a resting mouse shouldn't change what Enter picks. -->
+          <button onmousedown={(e) => (e.preventDefault(), onpick(r, query))} onmousemove={(e) => (e.movementX || e.movementY) && (active = i)}>
             <span class="label">{r.label}</span>
             <span class="path">{r.path}</span>
           </button>

@@ -86,7 +86,21 @@ function blocks(list: State[]): FlyoutItem[] {
   return list.filter((s) => Blockly.Blocks[s.type]).map((s) => ({ kind: 'block', ...s }) as unknown as FlyoutItem);
 }
 
+/** With nothing in Favourites yet, the keyboard enters the toolbox at Events instead. */
+function skipEmptyFavourites(ws: Blockly.WorkspaceSvg) {
+  const toolbox = ws.getToolbox() as Blockly.Toolbox | null;
+  if (!toolbox) return;
+  const original = toolbox.getRestoredFocusableNode.bind(toolbox);
+  toolbox.getRestoredFocusableNode = (previous) => {
+    const node = original(previous);
+    if (favourites.length || recent.length || (node as Blockly.ToolboxCategory | null)?.getName?.() !== FAVOURITES_NAME) return node;
+    const items = toolbox.getToolboxItems().filter((i) => i.isSelectable());
+    return items[items.indexOf(node as Blockly.ISelectableToolboxItem) + 1] ?? node;
+  };
+}
+
 export function registerFavourites(ws: Blockly.WorkspaceSvg) {
+  skipEmptyFavourites(ws);
   loadFavourites().then(() => refresh(ws));
   ws.registerToolboxCategoryCallback(FAVOURITES_CATEGORY, () => {
     const label = (text: string) => ({ kind: 'label', text }) as FlyoutItem;

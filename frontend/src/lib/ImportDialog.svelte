@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, type ImportedProgram } from './api';
+  import { modal } from './dialog';
 
   let { onclose, ondone }: { onclose: () => void; ondone: (count: number) => void } = $props();
 
@@ -88,8 +89,8 @@
 
 <!-- Clicking outside doesn't close it: that would lose pasted YAML. -->
 <div class="backdrop" role="presentation">
-  <div class="dialog" role="dialog" aria-modal="true" aria-label="Import" tabindex="-1" onkeydown={(e) => e.key === 'Escape' && !imported && onclose()}>
-    <h2>Import automations</h2>
+  <div class="dialog" role="dialog" aria-labelledby="pb-import-title" use:modal={() => (imported ? ondone(count) : onclose())}>
+    <h2 id="pb-import-title">Import automations</h2>
     {#if imported}
       <p>Imported {count === 1 ? '1 program' : `${count} programs`}, turned off. To let a program take over, switch over: this turns the automation off in Home Assistant and the program on.</p>
       <div class="list">

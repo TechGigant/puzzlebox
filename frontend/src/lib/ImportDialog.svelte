@@ -38,31 +38,78 @@
     }
   }
 
+  /** Programs imported from HA automations, which can take over from them. */
+  let imported = $state<{ id: string; name: string; entity_id: string; switched: boolean }[] | null>(null);
+  let count = $state(0);
+
   async function create() {
     if (!preview) return;
     busy = true;
-    let n = 0;
-    for (const item of preview.filter((p) => p.selected && !p.error)) {
-      await api.create({
-        name: item.name,
-        description: item.description,
-        mode: item.mode,
-        max_runs: item.max_runs,
-        workspace: item.workspace,
-        // Disabled so the program doesn't run alongside the original automation.
-        enabled: false,
-      });
-      n++;
+    error = null;
+    const fromHa: NonNullable<typeof imported> = [];
+    count = 0;
+    try {
+      for (const item of preview.filter((p) => p.selected && !p.error)) {
+        const p = await api.create({
+          name: item.name,
+          description: item.description,
+          mode: item.mode,
+          max_runs: item.max_runs,
+          workspace: item.workspace,
+          // Disabled so the program doesn't run alongside the original automation.
+          enabled: false,
+        });
+        count++;
+        if (item.entity_id) fromHa.push({ id: p.id, name: p.name, entity_id: item.entity_id, switched: false });
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
     }
-    busy = false;
-    ondone(n);
+    if (fromHa.length) imported = fromHa;
+    else if (!error) ondone(count);
+  }
+
+  async function switchOver(item: NonNullable<typeof imported>[number]) {
+    if (!confirm(`Turn off the Home Assistant automation ${item.entity_id} and turn on “${item.name}”?\n\nYou can switch back any time: turn the automation on in Home Assistant and the program off here.`)) return;
+    busy = true;
+    error = null;
+    try {
+      await api.switchOver(item.id, item.entity_id);
+      item.switched = true;
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+    }
   }
 </script>
 
-<div class="backdrop" role="presentation" onclick={onclose}>
-  <div class="dialog" role="dialog" aria-modal="true" aria-label="Import" tabindex="-1" onclick={(e) => e.stopPropagation()} onkeydown={(e) => e.key === 'Escape' && onclose()}>
+<!-- Clicking outside doesn't close it: that would lose pasted YAML. -->
+<div class="backdrop" role="presentation">
+  <div class="dialog" role="dialog" aria-modal="true" aria-label="Import" tabindex="-1" onkeydown={(e) => e.key === 'Escape' && !imported && onclose()}>
     <h2>Import automations</h2>
-    {#if !preview}
+    {#if imported}
+      <p>Imported {count === 1 ? '1 program' : `${count} programs`}, turned off. To let a program take over, switch over: this turns the automation off in Home Assistant and the program on.</p>
+      <div class="list">
+        {#each imported as item (item.id)}
+          <div class="row">
+            <span class="name">{item.name}</span>
+            <span class="muted">{item.entity_id}</span>
+            {#if item.switched}
+              <span class="ok">switched over</span>
+            {:else}
+              <button class="btn" disabled={busy} onclick={() => switchOver(item)}>Switch over</button>
+            {/if}
+          </div>
+        {/each}
+      </div>
+      {#if error}<p class="error">{error}</p>{/if}
+      <div class="actions">
+        <button class="btn primary" onclick={() => ondone(count)}>Done</button>
+      </div>
+    {:else if !preview}
       <nav class="tabs">
         <button class:active={tab === 'ha'} onclick={() => (tab = 'ha')}>From Home Assistant</button>
         <button class:active={tab === 'yaml'} onclick={() => (tab = 'yaml')}>Paste YAML</button>
@@ -108,7 +155,8 @@
           {/if}
         {/each}
       </div>
-      <p class="muted note">Imported programs start <b>disabled</b>. Turn off the original automation before enabling its program, or both will run.</p>
+      {#if error}<p class="error">{error}</p>{/if}
+      <p class="muted note">Imported programs start <b>disabled</b>. Turn off the original automation before enabling its program, or both will run{preview.some((p) => p.entity_id) ? ': the next step offers to do that for you' : ''}.</p>
       <div class="actions">
         <button class="btn" onclick={() => (preview = null)}>Back</button>
         <button class="btn primary" disabled={busy || !preview.some((p) => p.selected)} onclick={create}>

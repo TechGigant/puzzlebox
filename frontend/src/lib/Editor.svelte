@@ -3,11 +3,16 @@
   import BlocklyWorkspace from './BlocklyWorkspace.svelte';
   import StatusChip from './StatusChip.svelte';
   import SidePanel from './SidePanel.svelte';
-  import { api, events, type CompileError, type Program, type ProgramVersion, type RunMode } from './api';
+  import { api, events, MODE_LABELS, type ActiveRun, type CompileError, type Program, type ProgramVersion, type RunMode } from './api';
   import { registry } from './registry.svelte';
+  import { blockIds } from './runs';
+  import { setRunAsTriggerHandler } from './editor/run_as_trigger';
 
+  /** `id` is "new" for a program that is created on its first save. */
   let { id, onclose }: { id: string; onclose: () => void } = $props();
 
+  // svelte-ignore state_referenced_locally
+  let pid = $state<string | null>(id === 'new' ? null : id);
   let program = $state<Program | null>(null);
   let name = $state('');
   let mode = $state<RunMode>('single');
@@ -22,10 +27,13 @@
   let current: object = {};
   let baseline = '';
   let meta = '';
-  const metaKey = () => JSON.stringify([name, mode, enabled]);
+  // The enabled switch takes effect at once, so it isn't an unsaved change.
+  const metaKey = () => JSON.stringify([name, mode]);
   let compileTimer: ReturnType<typeof setTimeout> | undefined;
   let blockCount = $state(0);
   let history = $state<ProgramVersion[] | null>(null);
+  let runMenu = $state<{ block_id: string; summary: string }[] | null>(null);
+  const running = $derived((program?.status?.active_runs ?? 0) > 0);
 
   /** Blocks in a saved workspace, not counting shadows (the default values in sockets). */
   function countBlocks(node: unknown): number {
@@ -41,15 +49,17 @@
   }
 
   async function openHistory() {
+    if (!pid) return flash('Nothing saved yet.');
     try {
-      history = await api.versions(id);
+      history = await api.versions(pid);
     } catch (e) {
       flash(String(e));
     }
   }
 
   async function restore(v: ProgramVersion) {
-    const full = await api.version(id, v.id);
+    if (!pid) return;
+    const full = await api.version(pid, v.id);
     if (!full.workspace) return;
     if (dirty && !confirm('Replace your unsaved changes with this version?')) return;
     ws?.load(full.workspace);
@@ -60,7 +70,21 @@
   }
 
   async function load() {
-    const p = await api.program(id);
+    const p: Program = pid
+      ? await api.program(pid)
+      : {
+          id: '',
+          name: 'New program',
+          description: '',
+          enabled: true,
+          mode: 'single',
+          max_runs: 10,
+          workspace: {},
+          folder: '',
+          created_at: 0,
+          updated_at: 0,
+          status: null,
+        };
     program = p;
     name = p.name;
     mode = p.mode;
@@ -89,11 +113,32 @@
     }, 500);
   }
 
-  async function save() {
-    if (!program) return;
+  /** Each block's text as the editor shows it, kept so runs read the way the blocks did. */
+  function blockLabels(state: object): Record<string, string> {
+    const out: Record<string, string> = {};
+    for (const b of blockIds((state as { blocks?: unknown }).blocks)) {
+      const text = ws?.describe(b);
+      if (text) out[b] = text;
+    }
+    return out;
+  }
+
+  async function save(): Promise<boolean> {
+    if (!program) return false;
     saving = true;
     try {
-      const saved = await api.update(program.id, { name, mode, enabled, workspace: ws?.save() ?? current });
+      const workspace = ws?.save() ?? current;
+      const body = { name, mode, enabled, workspace, labels: blockLabels(workspace) };
+      let saved: Program;
+      if (pid) {
+        saved = await api.update(pid, body);
+      } else {
+        saved = await api.create(body);
+        pid = saved.id;
+        watch(saved.id);
+        // Without a hashchange, so the editor (and its undo history) stays as it is.
+        window.history.replaceState(null, '', `#/p/${saved.id}`);
+      }
       program = saved;
       baseline = JSON.stringify(ws?.save() ?? current);
       meta = metaKey();
@@ -105,36 +150,101 @@
           ? `Saved. ${errors.length === 1 ? '1 problem' : `${errors.length} problems`}: those stacks won't run until fixed, the rest will.`
           : 'Saved',
       );
+      return true;
     } catch (e) {
       flash(`Save failed: ${e}`);
+      return false;
     } finally {
       saving = false;
     }
   }
 
+  /** Saves first if needed; the program's id, or null if it couldn't be saved. */
+  async function saved(): Promise<string | null> {
+    if ((dirty || !pid) && !(await save())) return null;
+    return pid;
+  }
+
   async function run() {
-    if (dirty) await save();
+    runMenu = null;
+    const p = await saved();
+    if (!p) return;
     try {
-      await api.run(id);
+      await api.run(p);
     } catch (e) {
       flash(String(e));
     }
   }
 
-  async function runStack(topBlockId: string) {
-    if (dirty) await save();
+  async function openRunMenu() {
+    if (runMenu) return (runMenu = null);
+    const p = await saved();
+    if (!p) return;
+    runMenu = await api.triggers(p).catch(() => []);
+  }
+
+  async function runAsTrigger(block: string) {
+    runMenu = null;
+    const p = await saved();
+    if (!p) return;
     try {
-      await api.runStack(id, topBlockId);
+      await api.runAsTrigger(p, block);
       flash('Running');
     } catch (e) {
       flash(String(e));
     }
   }
 
+  async function runStack(topBlockId: string) {
+    const p = await saved();
+    if (!p) return;
+    try {
+      await api.runStack(p, topBlockId);
+      flash('Running');
+    } catch (e) {
+      flash(String(e));
+    }
+  }
+
+  async function stop() {
+    if (!pid) return;
+    try {
+      const r = await api.cancel(pid);
+      flash(r.cancelled ? `Stopped ${r.cancelled === 1 ? 'the run' : `${r.cancelled} runs`}` : 'Nothing was running');
+    } catch (e) {
+      flash(String(e));
+    }
+  }
+
+  async function toggleEnabled() {
+    if (!pid) return;
+    try {
+      const updated = await api.setEnabled(pid, enabled);
+      if (program) program = { ...program, enabled: updated.enabled, status: updated.status };
+      flash(enabled ? 'Turned on' : 'Turned off: triggers are ignored until you turn it on');
+    } catch (e) {
+      enabled = !enabled;
+      flash(String(e));
+    }
+  }
+
   async function remove() {
-    if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
-    await api.remove(id);
+    if (!pid) return onclose();
+    if (!confirm(`Move “${name}” to the recycle bin? You can restore it from the program list for 30 days.`)) return;
+    await api.remove(pid);
+    dirty = false;
     onclose();
+  }
+
+  /** Marks the block a run is at, e.g. when the editor opens during a long wait. */
+  function showActive(runs: ActiveRun[]) {
+    const r = runs[runs.length - 1];
+    const at = r?.waiting?.block_id ?? r?.block_id;
+    if (at) ws?.setMarker('active', at);
+  }
+
+  function watch(p: string) {
+    events.send({ type: 'watch', program_id: p }, `watch:${p}`);
   }
 
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
@@ -152,7 +262,7 @@
   }
 
   function setBreakpoints(blocks: string[]) {
-    events.send({ type: 'breakpoints', program_id: id, blocks }, `bp:${id}`);
+    if (pid) events.send({ type: 'breakpoints', program_id: pid, blocks }, `bp:${pid}`);
   }
 
   function resume(step: boolean) {
@@ -179,11 +289,13 @@
         onchange(current);
         baseline = JSON.stringify(current);
         refreshDirty();
+        if (pid) api.active(pid).then(showActive, () => {});
       }, 50);
     });
-    events.send({ type: 'watch', program_id: id }, `watch:${id}`);
+    if (pid) watch(pid);
+    const offRunAs = setRunAsTriggerHandler((block) => runAsTrigger(block));
     const off = events.on((ev) => {
-      if (!('program_id' in ev) || ev.program_id !== id) return;
+      if (!('program_id' in ev) || !pid || ev.program_id !== pid) return;
       switch (ev.type) {
         case 'status':
           if (program) program = { ...program, status: ev.status };
@@ -216,9 +328,12 @@
     window.addEventListener('beforeunload', guardLeave);
     return () => {
       off();
-      events.send({ type: 'unwatch', program_id: id });
-      events.unstick(`watch:${id}`);
-      events.unstick(`bp:${id}`);
+      offRunAs();
+      if (pid) {
+        events.send({ type: 'unwatch', program_id: pid });
+        events.unstick(`watch:${pid}`);
+        events.unstick(`bp:${pid}`);
+      }
       window.removeEventListener('keydown', onkey);
       window.removeEventListener('beforeunload', guardLeave);
     };
@@ -230,26 +345,37 @@
     <button class="icon" onclick={close} aria-label="Back" title="Back to programs">←</button>
     <input class="name" bind:value={name} oninput={refreshDirty} aria-label="Program name" />
     <select bind:value={mode} onchange={refreshDirty} title="What happens when a trigger fires while the program is already running">
-      <option value="single">if already running: ignore</option>
-      <option value="restart">if already running: start over</option>
-      <option value="queued">if already running: run after</option>
-      <option value="parallel">if already running: run both</option>
+      {#each Object.entries(MODE_LABELS) as [value, label] (value)}<option {value}>{label}</option>{/each}
     </select>
-    <label class="switch" title="Enabled">
-      <input type="checkbox" bind:checked={enabled} onchange={refreshDirty} />
+    <label class="switch" title={pid ? (enabled ? 'On: click to turn off' : 'Off: click to turn on') : 'Starts when you save'}>
+      <input type="checkbox" bind:checked={enabled} onchange={toggleEnabled} />
       <span></span>
     </label>
     <StatusChip status={program?.status} />
     <span class="spacer"></span>
     {#if message}<span class="message">{message}</span>{/if}
     <span class="count" title="Blocks in this program">{blockCount} blocks</span>
-    <button class="btn" onclick={openHistory} title="Earlier saved versions of this program">History</button>
-    <button class="btn" onclick={run} title="Run the program's first entry block now">Run</button>
-    <button class="btn" onclick={() => api.cancel(id)} title="Cancel active runs">Stop</button>
-    <button class="btn primary" onclick={save} disabled={saving}>{dirty ? 'Save*' : 'Save'}</button>
+    <button class="btn" onclick={openHistory} disabled={!pid} title="Earlier saved versions of this program">History</button>
+    <span class="split">
+      <button class="btn" onclick={run} title="Run the program's first entry block now (trigger: run manually)">Run</button>
+      <button class="btn more" onclick={openRunMenu} title="Run as if a trigger fired" aria-label="More ways to run" aria-expanded={!!runMenu}>▾</button>
+      {#if runMenu}
+        <div class="menu" role="menu">
+          <button role="menuitem" onclick={run}>Run now <span class="hint">(trigger: run manually)</span></button>
+          {#each runMenu as t (t.block_id)}
+            <button role="menuitem" onclick={() => runAsTrigger(t.block_id)}>Run as if ⚡ {t.summary}</button>
+          {:else}
+            <p class="hint">No triggers to run as. Is the program turned on and free of problems?</p>
+          {/each}
+        </div>
+      {/if}
+    </span>
+    <button class="btn" onclick={stop} disabled={!running} title={running ? 'Stop the runs in progress' : 'Nothing is running'}>Stop</button>
+    <button class="btn primary" onclick={save} disabled={saving}>{dirty || !pid ? 'Save*' : 'Save'}</button>
     <button class="icon" onclick={() => (panelOpen = !panelOpen)} title="Toggle side panel" aria-label="Toggle side panel">☰</button>
-    <button class="icon danger" onclick={remove} title="Delete program" aria-label="Delete program">🗑</button>
+    <button class="icon danger" onclick={remove} title="Move to the recycle bin" aria-label="Delete program">🗑</button>
   </div>
+  {#if runMenu}<div class="menu-backdrop" role="presentation" onclick={() => (runMenu = null)}></div>{/if}
   <div class="body">
     <div class="canvas">
       {#if program && registry.loaded}
@@ -266,7 +392,8 @@
     </div>
     {#if panelOpen}
       <SidePanel
-        programId={id}
+        programId={pid}
+        onactive={showActive}
         errors={ws?.friendlyErrors(errors) ?? errors}
         {paused}
         onresume={resume}
@@ -295,6 +422,9 @@
               {new Date(v.saved_at).toLocaleString()}
               {#if i === 0}<span class="hint"> · current</span>{/if}
               {#if v.name !== name}<span class="hint"> · named “{v.name}”</span>{/if}
+              <span class="hint changes">
+                {`${v.blocks ?? 0} ${v.blocks === 1 ? 'block' : 'blocks'}${v.changes ? ` · ${v.changes}` : ''}`}
+              </span>
             </span>
             <button class="btn" disabled={i === 0} onclick={() => restore(v)}>Restore</button>
           </li>
@@ -339,6 +469,60 @@
     font-size: 13px;
     color: var(--pb-text-2);
     white-space: nowrap;
+  }
+  .split {
+    position: relative;
+    display: inline-flex;
+  }
+  .split > .btn:first-child {
+    border-top-right-radius: 0;
+    border-bottom-right-radius: 0;
+  }
+  .split > .more {
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 0;
+    border-left: 1px solid var(--pb-divider);
+    padding-left: 8px;
+    padding-right: 8px;
+  }
+  .menu {
+    position: absolute;
+    z-index: 61;
+    top: calc(100% + 4px);
+    right: 0;
+    min-width: 260px;
+    max-width: min(420px, calc(100vw - 32px));
+    padding: 4px;
+    background: var(--pb-card);
+    border: 1px solid var(--pb-divider);
+    border-radius: 8px;
+    box-shadow: 0 4px 16px rgb(0 0 0 / 20%);
+  }
+  .menu button {
+    display: block;
+    width: 100%;
+    text-align: left;
+    padding: 8px 10px;
+    background: none;
+    border: 0;
+    border-radius: 6px;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  .menu button:hover {
+    background: color-mix(in srgb, var(--pb-text) 6%, transparent);
+  }
+  .menu p {
+    margin: 8px 10px;
+  }
+  .menu-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+  }
+  .changes {
+    display: block;
   }
   .backdrop {
     position: fixed;

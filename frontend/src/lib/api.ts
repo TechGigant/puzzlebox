@@ -41,10 +41,54 @@ export interface ProgramStatus {
   active_runs: number;
   last_run: number | null;
   last_error: string | null;
+  /** How the last run ended, also after a restart. */
+  last_status?: 'ok' | 'error' | 'cancelled' | null;
   errors: CompileError[];
+  /** What starts the program, in words ("when Motion turns on (+1)"). */
+  summary?: string;
+  /** No "when" has both a trigger and something to do. */
+  does_nothing?: boolean;
 }
 
 export type RunMode = 'single' | 'restart' | 'queued' | 'parallel';
+
+/** The editor's words for each run mode. */
+export const MODE_LABELS: Record<RunMode, string> = {
+  single: 'if already running: ignore',
+  restart: 'if already running: start over',
+  queued: 'if already running: run after',
+  parallel: 'if already running: run both',
+};
+
+export interface Waiting {
+  block_id: string;
+  text: string;
+  /** When the wait ends at the latest (ms since the epoch). */
+  until: number | null;
+}
+
+export interface ActiveRun {
+  run_id: string;
+  program_id: string;
+  started_at: number;
+  summary: string;
+  block_id: string | null;
+  waiting: Waiting | null;
+}
+
+export interface LogEntry {
+  ts: number;
+  level: string;
+  message: string;
+  run_id?: string | null;
+}
+
+export interface DeletedProgram {
+  id: string;
+  name: string;
+  folder: string;
+  deleted_at: number;
+}
 
 export interface Program {
   id: string;
@@ -66,6 +110,9 @@ export interface ProgramVersion {
   id: number;
   saved_at: number;
   name: string;
+  blocks?: number;
+  /** What changed since the version before. */
+  changes?: string;
   workspace?: object;
 }
 
@@ -77,11 +124,15 @@ export interface RunRecord {
   status: 'ok' | 'error' | 'cancelled' | 'running';
   error: string | null;
   trigger: unknown;
+  /** What started it, in words. */
+  summary?: string | null;
   trace?: {
-    steps: { block: string; t: number; error?: string }[];
+    steps: { block: string; t: number; error?: string; note?: string }[];
     truncated: boolean;
     variables: Record<string, unknown>;
     error_block: string | null;
+    /** The blocks' text when the run ran. */
+    labels?: Record<string, string>;
   };
 }
 
@@ -89,7 +140,8 @@ export type EngineEvent =
   | { type: 'status'; status: Status }
   | { type: 'statuses'; statuses: Record<string, ProgramStatus> }
   | { type: 'status'; program_id: string; status: ProgramStatus }
-  | { type: 'run_started'; program_id: string; run_id: string; trigger: unknown }
+  | { type: 'run_started'; program_id: string; run_id: string; trigger: unknown; summary: string }
+  | { type: 'waiting'; program_id: string; run_id: string; waiting: Waiting | null }
   | { type: 'run_finished'; program_id: string; run_id: string; status: string; error: string | null; block_id: string | null }
   | { type: 'log'; program_id: string; run_id: string; level: string; message: string; ts: number }
   | { type: 'step'; program_id: string; run_id: string; block_id: string }
@@ -122,8 +174,9 @@ export const getJson = <T>(path: string) => request<T>('GET', path);
 export const api = {
   programs: () => request<Program[]>('GET', 'api/programs'),
   program: (id: string) => request<Program>('GET', `api/programs/${id}`),
-  create: (p: Partial<Program>) => request<Program>('POST', 'api/programs', p),
-  update: (id: string, p: Partial<Program>) => request<Program>('PUT', `api/programs/${id}`, p),
+  create: (p: Partial<Program> & { labels?: Record<string, string> }) => request<Program>('POST', 'api/programs', p),
+  update: (id: string, p: Partial<Program> & { labels?: Record<string, string> }) =>
+    request<Program>('PUT', `api/programs/${id}`, p),
   remove: (id: string) => request<{ ok: boolean }>('DELETE', `api/programs/${id}`),
   run: (id: string, handler?: number) => request<{ ok: boolean }>('POST', `api/programs/${id}/run`, { handler }),
   versions: (id: string) => request<ProgramVersion[]>('GET', `api/programs/${id}/versions`),
@@ -132,7 +185,18 @@ export const api = {
   editorData: <T = unknown>(key: 'backpack' | 'favourites' | 'recent') => request<T[]>('GET', `api/editor/${key}`),
   setEditorData: (key: 'backpack' | 'favourites' | 'recent', contents: unknown[]) =>
     request<{ ok: boolean }>('PUT', `api/editor/${key}`, contents),
-  cancel: (id: string) => request<{ ok: boolean }>('POST', `api/programs/${id}/cancel`, {}),
+  cancel: (id: string) => request<{ ok: boolean; cancelled: number }>('POST', `api/programs/${id}/cancel`, {}),
+  active: (id: string) => request<ActiveRun[]>('GET', `api/programs/${id}/active`),
+  log: (id: string) => request<LogEntry[]>('GET', `api/programs/${id}/log`),
+  triggers: (id: string) => request<{ block_id: string; summary: string }[]>('GET', `api/programs/${id}/triggers`),
+  runAsTrigger: (id: string, block: string) =>
+    request<{ ok: boolean }>('POST', `api/programs/${id}/run`, { as_trigger: block }),
+  duplicate: (id: string) => request<Program>('POST', `api/programs/${id}/duplicate`, {}),
+  bin: () => request<{ programs: DeletedProgram[]; days: number }>('GET', 'api/bin'),
+  restore: (id: string) => request<Program>('POST', `api/bin/${id}/restore`, {}),
+  purge: (id: string) => request<{ ok: boolean }>('DELETE', `api/bin/${id}`),
+  switchOver: (id: string, entity_id: string) =>
+    request<Program>('POST', `api/programs/${id}/switch_over`, { entity_id }),
   setEnabled: (id: string, enabled: boolean) => request<Program>('POST', `api/programs/${id}/enabled`, { enabled }),
   runs: (id: string) => request<RunRecord[]>('GET', `api/programs/${id}/runs`),
   runDetail: (id: string) => request<RunRecord>('GET', `api/runs/${id}`),

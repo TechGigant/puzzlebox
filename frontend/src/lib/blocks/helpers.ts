@@ -3,6 +3,7 @@
 
 import * as Blockly from 'blockly/core';
 import { allBlockDefs } from './dynamic';
+import { registerEverydayBlocks } from './everyday';
 import { FieldOptions } from './field_entity';
 import { haTriggerTypes, installTriggerSettings } from './trigger_settings';
 
@@ -222,4 +223,5 @@ export function registerHelperBlocks() {
   Blockly.fieldRegistry.register('field_notify_target', FieldNotifyTarget);
   Blockly.common.defineBlocksWithJsonArray(HELPER_BLOCKS);
   installTriggerSettings(haTriggerTypes(HELPER_BLOCKS));
+  registerEverydayBlocks();
 }

@@ -177,3 +177,105 @@ async fn waits_with_a_timeout_of_zero() {
     let no = json!({"wait_template": "{{ false }}", "timeout": 0});
     assert_eq!(wait(no).await, json!({"remaining": 0.0, "completed": false}));
 }
+
+/// The statements a block compiles to, run in `ha_on_run`.
+fn compiled(body: Value) -> Vec<puzzlebox_ir::Stmt> {
+    let ws =
+        json!({"blocks": {"blocks": [{"type": "ha_on_run", "id": "r", "inputs": {"DO": {"block": body}}}]}});
+    puzzlebox_ir::compile(&ws, &puzzlebox_ir::NoExternals).unwrap().handlers.remove(0).body
+}
+
+/// (action, data, target) of a block that compiles to one fixed action call.
+fn compiled_call(body: Value) -> (String, Option<Value>, Option<Value>) {
+    let stmts = compiled(body);
+    let puzzlebox_ir::StmtKind::CallService { service, target, data, .. } = &stmts[0].kind else { panic!() };
+    let target = target.as_ref().map(|t| puzzlebox_ir::normalize_target(&fixed(t)).unwrap());
+    (service.clone(), data.as_ref().map(fixed), target)
+}
+
+fn fixed(e: &puzzlebox_ir::Expr) -> Value {
+    use puzzlebox_ir::ExprKind;
+    match &e.kind {
+        ExprKind::Lit { value } => value.clone(),
+        ExprKind::List { items } => items.iter().map(fixed).collect(),
+        ExprKind::Dict { entries } => entries.iter().map(|(k, v)| (k.clone(), fixed(v))).collect(),
+        other => panic!("not fixed: {other:?}"),
+    }
+}
+
+async fn render(ha: &LiveHa, t: &str) -> String {
+    ha.render_template(t, json!({})).await.unwrap().as_str().map(str::to_owned).unwrap_or_default()
+}
+
+/// "remember the state of … as" and "restore" put a light back the way it was, and the
+/// alarm blocks arm and disarm the demo alarm with its code.
+#[tokio::test]
+async fn remember_restore_and_alarm_blocks() {
+    let Some(ha) = live().await else {
+        eprintln!("skipping: HA_WS_URL/HA_TOKEN not set");
+        return;
+    };
+    let entity = |e: &str| json!({"shadow": {"type": "ha_entity", "id": "e", "fields": {"ENTITY": e}}});
+    // Not the light the other tests switch.
+    let lamp = "light.office_rgbw_lights";
+    let text = |s: &str| json!({"shadow": {"type": "text", "id": "t", "fields": {"TEXT": s}}});
+
+    ha.call_service("light.turn_on", Some(json!({"brightness": 100})), Some(json!({"entity_id": lamp})))
+        .await
+        .unwrap();
+    let (svc, data, target) = compiled_call(json!({"type": "scene_remember", "id": "m",
+        "fields": {"NAME": "Puzzlebox live test"}, "inputs": {"TARGET": entity(lamp)}}));
+    ha.call_service_checked(&svc, data, target, false).await.unwrap();
+    ha.call_service("light.turn_off", None, Some(json!({"entity_id": lamp}))).await.unwrap();
+    let (svc, data, target) =
+        compiled_call(json!({"type": "scene_restore", "id": "x", "fields": {"NAME": "puzzlebox live test"}}));
+    ha.call_service_checked(&svc, data, target, false).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let now = render(
+        &ha,
+        "{{ states('light.office_rgbw_lights') }} {{ state_attr('light.office_rgbw_lights', 'brightness') }}",
+    )
+    .await;
+    assert_eq!(now, "on 100");
+
+    let alarm = |ty: &str, code: &str| {
+        compiled_call(json!({"type": ty, "id": "a", "fields": {"MODE": "away"},
+            "inputs": {"TARGET": entity("alarm_control_panel.security"), "CODE": text(code)}}))
+    };
+    let state = || render(&ha, "{{ states('alarm_control_panel.security') }}");
+    let (svc, data, target) = alarm("alarm_arm", "1234");
+    ha.call_service_checked(&svc, data, target, false).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(state().await, "arming");
+    let (svc, data, target) = alarm("alarm_disarm", "0000");
+    assert!(ha.call_service_checked(&svc, data, target, false).await.is_err(), "wrong code");
+    let (svc, data, target) = alarm("alarm_disarm", "1234");
+    ha.call_service_checked(&svc, data, target, false).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(state().await, "disarmed");
+}
+
+/// The reply wait only ends for this question's buttons, and says which one.
+#[tokio::test]
+async fn reply_wait_matches_only_its_own_action_ids() {
+    let Some(ha) = live().await else {
+        eprintln!("skipping: HA_WS_URL/HA_TOKEN not set");
+        return;
+    };
+    let stmts = compiled(json!({"type": "notify_ask", "id": "q",
+        "fields": {"TO": "mobile_app_x", "BUTTONS": "Yes, No", "LIMIT": "none"},
+        "inputs": {"MESSAGE": {"shadow": {"type": "text", "id": "m", "fields": {"TEXT": "?"}}}}}));
+    let puzzlebox_ir::StmtKind::If { branches, .. } = &stmts[0].kind else { panic!() };
+    let puzzlebox_ir::StmtKind::WaitForTrigger { triggers, .. } = &branches[0].1[2].kind else { panic!() };
+    let mut fired = ha
+        .subscribe_trigger_with(Value::Array(triggers.clone()), json!({"__reply_id": "PUZZLEBOX_00ff"}))
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let tap = |action: &str| Some(json!({"action": action}));
+    ha.fire_event("mobile_app_notification_action", tap("PUZZLEBOX_abcd_1")).await.unwrap();
+    ha.fire_event("mobile_app_notification_action", tap("PUZZLEBOX_00ff_1")).await.unwrap();
+    let got: Value = timeout(Duration::from_secs(5), fired.next()).await.unwrap().unwrap();
+    assert_eq!(got["idx"], "1", "{got}");
+    assert_eq!(got["event"]["data"]["action"], "PUZZLEBOX_00ff_1");
+}

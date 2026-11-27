@@ -66,6 +66,7 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('ha_trigger_sun', { OFFSET: dur(0, 'minutes') }),
         block('ha_trigger_calendar', { OFFSET: dur(0, 'minutes') }),
         block('ha_trigger_zone'),
+        block('ha_trigger_occupancy', { FOR: dur(0) }),
         block('ha_trigger_tag'),
         block('ha_trigger_conversation'),
         block('ha_trigger_ha_start'),
@@ -124,6 +125,7 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('sun_condition', { OFFSET: dur(0, 'minutes') }),
         block('someone_home'),
         block('person_is_home', { ENTITY: ent() }),
+        block('alarm_is', { ENTITY: ent() }),
         block('weekday_is'),
         block('time_is_between'),
         label('Read a value'),
@@ -181,8 +183,15 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('script_run', { TARGET: ent() }),
         block('helper_set', { VALUE: txt('') }),
         block('counter_command', { TARGET: ent() }),
+        label('Alarms & buttons'),
+        block('alarm_arm', { TARGET: ent(), CODE: txt('') }),
+        block('alarm_disarm', { TARGET: ent(), CODE: txt('') }),
+        block('alarm_is', { ENTITY: ent() }),
+        block('button_press', { TARGET: ent() }),
         label('Notifications'),
         block('notify_send', { MESSAGE: txt('Hello from Puzzlebox'), TITLE: txt('Puzzlebox') }),
+        block('notify_ask', { MESSAGE: txt('Close the garage door?'), TITLE: txt('Puzzlebox'), TIMEOUT: dur(10, 'minutes') }),
+        block('notify_reply'),
       ]),
       cat('Lights & colours', 'colour', [
         block('light_set_colour', { TARGET: ent(), COLOUR: colour('#ffcc66'), BRIGHTNESS: num(80), TRANSITION: num(0) }),
@@ -192,6 +201,9 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('light_power', { TARGET: ent(), TRANSITION: num(0) }),
         block('light_colour', { ENTITY: ent() }),
         block('light_brightness', { ENTITY: ent() }),
+        label('Remember and put back'),
+        block('scene_remember', { TARGET: entities(2) }),
+        block('scene_restore'),
         label('Colours'),
         block('colour_picker'),
         block('colour_rgb255', { RED: num(255), GREEN: num(160), BLUE: num(60) }),
@@ -329,6 +341,13 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
   };
 }
 
+/** One line on how long each kind of variable keeps its value, keyed by variable type. */
+export const VARIABLE_KINDS: Record<string, string> = {
+  '': 'Variables: only during this run, gone when it ends',
+  Program: 'Program variables: kept between runs of this program, survive restarts',
+  Global: 'Global variables: shared by all programs, visible in Home Assistant',
+};
+
 /** Flyout for persistent variables (typed 'Program' or 'Global'). */
 export function registerStoredVariablesCategory(ws: Blockly.WorkspaceSvg): void {
   const create = (type: 'Program' | 'Global') => (button: Blockly.FlyoutButton) =>
@@ -336,10 +355,15 @@ export function registerStoredVariablesCategory(ws: Blockly.WorkspaceSvg): void 
   ws.registerButtonCallback('CREATE_PROGRAM_VAR', create('Program'));
   ws.registerButtonCallback('CREATE_GLOBAL_VAR', create('Global'));
 
+  ws.registerToolboxCategoryCallback('VARIABLE', (workspace) => [
+    { kind: 'label', text: VARIABLE_KINDS[''] },
+    ...Blockly.Variables.flyoutCategory(workspace),
+  ]);
   ws.registerToolboxCategoryCallback('STORED_VARIABLES', (workspace) => {
     const items: Blockly.utils.toolbox.FlyoutItemInfo[] = [
-      { kind: 'label', text: 'Kept across restarts' },
+      { kind: 'label', text: VARIABLE_KINDS.Program },
       { kind: 'button', text: 'New program variable…', callbackkey: 'CREATE_PROGRAM_VAR' },
+      { kind: 'label', text: VARIABLE_KINDS.Global },
       { kind: 'button', text: 'New global variable (shared)…', callbackkey: 'CREATE_GLOBAL_VAR' },
     ];
     const vars = [

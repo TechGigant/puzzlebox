@@ -228,6 +228,7 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
             json!(rand::rng().random_range(lo..=hi))
         }
         "random_float" => num(rand::rng().random::<f64>()),
+        "unique_id" => json!(format!("{:016x}", rand::rng().random::<u64>())),
         "list_sum" => num(nums(a(0))?.iter().sum()),
         "list_min" => num(nums(a(0))?.into_iter().fold(f64::INFINITY, f64::min)),
         "list_max" => num(nums(a(0))?.into_iter().fold(f64::NEG_INFINITY, f64::max)),

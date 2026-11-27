@@ -88,6 +88,9 @@ impl Builder {
             "tag" => one(self.tag(&rest)?),
             "conversation" => one(self.conversation(&rest)?),
             "device" => one(self.device(m, &rest)?),
+            p @ ("zone.occupancy_detected" | "zone.occupancy_cleared") if self.is_occupancy(&rest) => {
+                one(self.occupancy(p, &rest))
+            }
             p if p.contains('.') => one(self.integration_trigger(p, &rest)?),
             _ => None,
         }
@@ -454,6 +457,25 @@ impl Builder {
             vec![],
             None,
         ))
+    }
+
+    /// `zone.occupancy_*` with just a fixed zone and a whole number of seconds (more than 0:
+    /// `for: 0` still sets `trigger.for`), as the "first person arrives / last person leaves" block sends it.
+    fn is_occupancy(&self, m: &Map<String, Value>) -> bool {
+        let Some(Value::Object(o)) = m.get("options") else { return false };
+        let zone = o.get("zone").and_then(Value::as_str).is_some_and(|z| plain(z) && !z.contains(','));
+        let wait = o.get("for").is_none_or(|f| period(f).is_some_and(|s| s > 0.0 && s.fract() == 0.0));
+        only_keys(m, &["options"]) && only_keys(o, &["zone", "for"]) && zone && wait
+    }
+
+    fn occupancy(&mut self, platform: &str, m: &Map<String, Value>) -> Value {
+        let o = &m["options"];
+        let event = if platform.ends_with("cleared") { "leave" } else { "enter" };
+        let mut b =
+            self.block("ha_trigger_occupancy", json!({"EVENT": event, "ZONE": o["zone"]}), vec![], None);
+        let d = self.duration(o.get("for").and_then(period).unwrap_or(0.0));
+        shadow(&mut b, "FOR", d);
+        b
     }
 
     /// The device block sends its stored config as is, so every device trigger fits; its

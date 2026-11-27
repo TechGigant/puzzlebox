@@ -1,5 +1,7 @@
 """Per-program entities, the run_program action and Repairs for broken programs."""
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -12,11 +14,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 
+# The app is as new as the integration, so no "update" Repair gets in the way.
+MANIFEST = Path(__file__).parents[2] / "custom_components" / "puzzlebox" / "manifest.json"
 HELLO = {
     "type": "hello",
     "protocol": PROTOCOL,
     "min_protocol": 1,
-    "app_version": "0.5.0",
+    "app_version": json.loads(MANIFEST.read_text())["version"],
     "features": FEATURES,
 }
 

@@ -39,6 +39,8 @@ describe('decimal comma', () => {
 
   it('applies to the number fields of Puzzlebox blocks', () => {
     const ws = new Blockly.Workspace();
+    // Without events: blocks like function definitions react to them later, after the test.
+    Blockly.Events.disable();
     const numberFields = Object.keys(Blockly.Blocks).flatMap((type) => {
       try {
         const b = ws.newBlock(type);
@@ -55,5 +57,7 @@ describe('decimal comma', () => {
       f.setValue('7,5');
       expect(f.getValue(), f.getSourceBlock()?.type).toBe(withPoint);
     }
+    ws.dispose();
+    Blockly.Events.enable();
   });
 });

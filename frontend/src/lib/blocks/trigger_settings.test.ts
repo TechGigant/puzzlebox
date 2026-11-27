@@ -138,7 +138,8 @@ describe('integration blocks', () => {
     const g = load({ type: alt.type, extraState: alt.extraState });
     applyConversion(g, c);
     expect(g.getFieldValue('P_behavior')).toBe('any');
-    expect(g.getInputTargetBlock('P_for')!.getFieldValue('NUM')).toBe(300);
+    const dur = g.getInputTargetBlock('P_for')!;
+    expect([dur.getFieldValue('UNIT'), dur.getInputTargetBlock('N')!.getFieldValue('NUM')]).toEqual(['minutes', 5]);
   });
 
   it('only offers switching when everything fits', () => {

@@ -62,7 +62,7 @@
       ><path fill="currentColor" d="M20.5 11H19V7a2 2 0 0 0-2-2h-4V3.5a2.5 2.5 0 0 0-5 0V5H4a2 2 0 0 0-2 2v3.8h1.5a2.7 2.7 0 0 1 0 5.4H2V20a2 2 0 0 0 2 2h3.8v-1.5a2.7 2.7 0 0 1 5.4 0V22H17a2 2 0 0 0 2-2v-4h1.5a2.5 2.5 0 0 0 0-5Z"
       /></svg
     >
-    <span>Puzzlebox</span>
+    <span class="brand-name">Puzzlebox</span>
   </button>
   <nav>
     <a href="#/" class:active={route.view === 'list'}>Programs</a>
@@ -70,7 +70,7 @@
   </nav>
   <span class="spacer"></span>
   <span class="chip" class:ok={status?.ha_connected} title="Connection to Home Assistant">
-    <span class="dot"></span>{label}
+    <span class="dot"></span><span class="chip-label">{label}</span>
   </span>
 </header>
 {#if notice}
@@ -179,5 +179,21 @@
     flex: 1;
     display: flex;
     min-height: 0;
+  }
+  @media (max-width: 560px) {
+    header {
+      gap: 8px;
+      padding: 0 12px;
+    }
+    nav {
+      margin-left: 0;
+    }
+    .brand-name,
+    .chip-label {
+      display: none;
+    }
+    .chip {
+      padding: 8px;
+    }
   }
 </style>

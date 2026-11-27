@@ -3,7 +3,7 @@
 //! as its settings. Only offered when every option has a place in the generated block.
 
 import type * as Blockly from 'blockly/core';
-import { blockDef, type BlockDef, type Param } from '../blocks/dynamic';
+import { blockDef, durationShadow, secondsParam, type BlockDef, type Param } from '../blocks/dynamic';
 
 type State = Blockly.serialization.blocks.State;
 
@@ -125,12 +125,12 @@ function place(p: Param, v: unknown, c: Conversion): boolean {
     }
     case 'number':
       if (typeof v !== 'number') return false;
-      c.shadows[slot] = shadow('math_number', { NUM: v });
+      c.shadows[slot] = secondsParam(p) ? durationShadow(v) : shadow('math_number', { NUM: v });
       return true;
     case 'duration': {
       const s = seconds(v);
       if (s === undefined) return false;
-      c.shadows[slot] = shadow('math_number', { NUM: s });
+      c.shadows[slot] = durationShadow(s);
       return true;
     }
     case 'text':

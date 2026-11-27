@@ -156,6 +156,36 @@ select:focus {
 .pb-entity-empty {
   padding: 8px 10px;
 }
+.blocklyShadow > .blocklyField:not(.blocklyFullBlockField, .blocklyInputField) > .blocklyText {
+  fill: var(--pb-shadow-text, #fff) !important;
+}
+.blocklyToolboxCategoryIconClosed,
+.blocklyToolboxCategoryIconOpen {
+  background-image: none !important;
+  width: 0;
+  height: 0;
+  margin: 0 4px 0 2px;
+  border-style: solid;
+  border-color: transparent;
+}
+.blocklyToolboxCategoryIconClosed {
+  border-width: 5px 0 5px 7px;
+  border-left-color: currentColor;
+}
+.blocklyToolboxCategoryIconOpen {
+  border-width: 7px 5px 0;
+  border-top-color: currentColor;
+}
+@media (max-width: 700px) {
+  /* A narrower toolbox leaves more of a phone screen for the blocks. */
+  .blocklyToolbox .blocklyToolboxCategory {
+    height: 32px !important;
+    line-height: 32px !important;
+  }
+  .blocklyToolbox .blocklyToolboxCategoryLabel {
+    font-size: 12px !important;
+  }
+}
 .blocklyFlyoutLabelText {
   fill: var(--pb-text-2) !important;
   font-weight: 500;

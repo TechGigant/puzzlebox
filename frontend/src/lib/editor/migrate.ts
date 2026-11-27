@@ -1,7 +1,7 @@
 //! Updates saved workspaces to the current block shapes when a program is opened. The engine
 //! still understands the old shapes, so programs keep running until they are opened and saved.
 
-import { blockDef } from '../blocks/dynamic';
+import { blockDef, durationShadow, secondsParam } from '../blocks/dynamic';
 
 type State = {
   type: string;
@@ -169,6 +169,11 @@ function migrateBlock(b: State) {
     if (p.input === 'color' && b.fields && typeof b.fields[slot] === 'string' && !b.inputs[slot]) {
       b.inputs[slot] = { shadow: { type: 'colour_picker', fields: { COLOUR: b.fields[slot] } } };
       delete b.fields[slot];
+    }
+    // Their seconds sockets show a duration block ("5 minutes") too.
+    const held = b.inputs[slot];
+    if (secondsParam(p) && held && !held.block && held.shadow?.type === 'math_number') {
+      held.shadow = durationShadow(Number(held.shadow.fields?.NUM ?? 0)) as State;
     }
   }
   // Zigbee2MQTT group brightness (0–254) and white (mired) became % and kelvin.

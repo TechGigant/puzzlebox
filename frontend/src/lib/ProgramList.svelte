@@ -353,6 +353,31 @@
   .err {
     color: #e53935;
   }
+  @media (max-width: 560px) {
+    .page {
+      padding: 12px;
+    }
+    .search {
+      min-width: 0;
+      max-width: none;
+      flex-basis: 100%;
+    }
+    .list {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .card {
+      flex-wrap: wrap;
+      gap: 4px 8px;
+      padding: 4px 8px 8px 4px;
+    }
+    .main {
+      flex-basis: 100%;
+      padding: 10px 12px 4px;
+    }
+    .card > :global(.chip) {
+      margin: 0 auto 0 12px;
+    }
+  }
   .folder {
     list-style: none;
   }

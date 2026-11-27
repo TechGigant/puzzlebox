@@ -73,26 +73,34 @@ const THRESHOLD_TYPES: [string, string][] = [
   ['outside', 'outside'],
 ];
 
+/** Helper blocks whose target can't be a whole area (it isn't passed on as an action target). */
+const NO_AREA_TARGET = new Set(['media_say', 'scene_activate', 'script_run', 'counter_command']);
+
 setDomainResolver((parent, inputName) => {
   const def = defs.get(parent.type);
   // Light helper blocks only take lights.
   if (!def && inputName === 'TARGET') {
-    if (parent.type.startsWith('light_')) return { domains: ['light'] };
-    if (HELPER_DOMAINS[parent.type]) return { domains: HELPER_DOMAINS[parent.type] };
+    if (parent.type.startsWith('light_')) return { domains: ['light'], areas: true };
+    if (HELPER_DOMAINS[parent.type]) return { domains: HELPER_DOMAINS[parent.type], areas: !NO_AREA_TARGET.has(parent.type) };
   }
   if (!def && inputName === 'ENTITY' && ENTITY_DOMAINS[parent.type]) return { domains: ENTITY_DOMAINS[parent.type] };
   if (!def) return { domains: [] };
-  if (inputName === 'TARGET') return { domains: def.target?.domains ?? [], deviceClasses: def.target?.device_classes };
+  if (inputName === 'TARGET') return { domains: def.target?.domains ?? [], deviceClasses: def.target?.device_classes, areas: true };
   const p = def.params.find((x) => slot(x) === inputName);
   return p?.input === 'entity' ? { domains: p.domains, deviceClasses: p.device_classes } : { domains: [] };
 });
 
+/** Durations, and numbers of seconds (transitions, delays), take a "5 minutes" block. */
+export function secondsParam(p: Param): boolean {
+  return p.input === 'duration' || (p.input === 'number' && p.unit === 'seconds');
+}
+
 function shadowFor(p: Param): Blockly.serialization.blocks.State | null {
   const d = p.default;
+  if (secondsParam(p)) return durationShadow(typeof d === 'number' ? d : 0);
   switch (p.input) {
     case 'number':
-    case 'duration':
-      return { type: 'math_number', fields: { NUM: typeof d === 'number' ? d : (p.input === 'number' ? (p.min ?? 0) : 0) } };
+      return { type: 'math_number', fields: { NUM: typeof d === 'number' ? d : (p.min ?? 0) } };
     case 'text':
     case 'time':
       return { type: 'text', fields: { TEXT: typeof d === 'string' ? d : '' } };
@@ -109,10 +117,20 @@ function shadowFor(p: Param): Blockly.serialization.blocks.State | null {
   }
 }
 
+/** A "5 minutes" block holding a number of seconds, in the largest whole unit. */
+export function durationShadow(seconds: number): Blockly.serialization.blocks.State {
+  const [unit, n] = seconds && seconds % 3600 === 0 ? ['hours', seconds / 3600] : seconds && seconds % 60 === 0 ? ['minutes', seconds / 60] : ['seconds', seconds];
+  return { type: 'duration', fields: { UNIT: unit }, inputs: { N: { shadow: { type: 'math_number', fields: { NUM: n } } } } };
+}
+
+/** HA's labels are title-like ("Trigger when"); ours read as a sentence ("trigger when"). Acronyms stay. */
+export function sentence(label: string): string {
+  return /^[A-Z][a-z]/.test(label) ? label[0].toLowerCase() + label.slice(1) : label;
+}
+
 function labelFor(p: Param): string {
-  if (p.input === 'number' && p.unit) return `${p.label} (${p.unit})`;
-  if (p.input === 'duration') return `${p.label} (seconds)`;
-  return p.label;
+  if (p.input === 'number' && p.unit && !secondsParam(p)) return `${sentence(p.label)} (${p.unit})`;
+  return sentence(p.label);
 }
 
 type DynBlock = Blockly.BlockSvg & { hab: BlockDef; optional: string[] };
@@ -125,31 +143,31 @@ function appendParam(block: DynBlock, p: Param, withShadow: boolean, removable: 
       if (p.multiple) {
         const d = Array.isArray(p.default) ? p.default.join(', ') : typeof p.default === 'string' ? p.default : '';
         const field = new FieldOptions(d, p.options.map((o) => ({ value: o.value, label: o.label })));
-        input = block.appendDummyInput(name).appendField(p.label).appendField(field, name);
+        input = block.appendDummyInput(name).appendField(labelFor(p)).appendField(field, name);
         break;
       }
       const options = p.options.map((o) => [o.label || o.value, o.value] as [string, string]);
       const field = new Blockly.FieldDropdown(options);
       if (typeof p.default === 'string' && p.options.some((o) => o.value === p.default)) field.setValue(p.default);
-      input = block.appendDummyInput(name).appendField(p.label).appendField(field, name);
+      input = block.appendDummyInput(name).appendField(labelFor(p)).appendField(field, name);
       break;
     }
     case 'boolean':
       input = block
         .appendDummyInput(name)
-        .appendField(p.label)
+        .appendField(labelFor(p))
         .appendField(new Blockly.FieldCheckbox(p.default === true ? 'TRUE' : 'FALSE'), name);
       break;
     case 'registry':
       input = block
         .appendDummyInput(name)
-        .appendField(p.label)
+        .appendField(labelFor(p))
         .appendField(new FieldRegistry(typeof p.default === 'string' ? p.default : '', p.kind), name);
       break;
     case 'state_value': {
       const field = new FieldStateValue(typeof p.default === 'string' ? p.default : '');
       field.attribute = p.attribute ?? null;
-      input = block.appendDummyInput(name).appendField(p.label).appendField(field, name);
+      input = block.appendDummyInput(name).appendField(labelFor(p)).appendField(field, name);
       break;
     }
     case 'threshold': {
@@ -164,7 +182,7 @@ function appendParam(block: DynBlock, p: Param, withShadow: boolean, removable: 
         if (v) setTimeout(() => (showInputs(v), block.rendered && block.render()));
         return v;
       });
-      input = block.appendDummyInput(name).appendField(p.label).appendField(typeField, name);
+      input = block.appendDummyInput(name).appendField(labelFor(p)).appendField(typeField, name);
       if (p.units.length) {
         const units = p.units.map((u) => [u ?? 'no unit', u ?? '__none__'] as [string, string]);
         input.appendField(new Blockly.FieldDropdown(units), `${name}__unit`);
@@ -186,6 +204,8 @@ function appendParam(block: DynBlock, p: Param, withShadow: boolean, removable: 
         if (s) input.connection?.setShadowState(s);
       }
   }
+  // Labels line up against their values when the block has a row per setting.
+  input.setAlign(Blockly.inputs.Align.RIGHT);
   if (removable) {
     input.appendField(new Blockly.FieldImage(REMOVE_ICON, 14, 14, 'remove', () => removeOptional(block, p.name)));
   }
@@ -193,6 +213,13 @@ function appendParam(block: DynBlock, p: Param, withShadow: boolean, removable: 
   if (p.description) {
     // Per-input help isn't supported by Blockly; fold it into the block tooltip instead.
   }
+}
+
+/** Short blocks read as one line, like the built-in ones; longer ones get a row per setting. */
+function relayout(block: DynBlock) {
+  const shown = block.hab.params.filter((p) => p.required || block.optional.includes(p.name));
+  const tall = shown.some((p) => p.input === 'threshold' || (p.input === 'text' && p.multiline));
+  block.setInputsInline(!tall && shown.length + (block.hab.target ? 1 : 0) <= 2);
 }
 
 /** The whole extra state, which undo restores (it also has the trigger settings). */
@@ -211,6 +238,7 @@ function addOptional(block: DynBlock, name: string) {
   const before = extraState(block);
   block.optional.push(name);
   appendParam(block, p, true, true);
+  relayout(block);
   fireMutation(block, before);
 }
 
@@ -222,6 +250,7 @@ function removeOptional(block: DynBlock, name: string) {
   for (const input of [...block.inputList]) {
     if (input.name === slot(p) || input.name.startsWith(`${slot(p)}__`)) block.removeInput(input.name, true);
   }
+  relayout(block);
   fireMutation(block, before);
 }
 
@@ -241,7 +270,7 @@ export function defineBlock(def: BlockDef) {
       this.hab = def;
       this.optional = [];
       // Lower-case like the built-in blocks ("turn on light"), but keep acronyms ("MQTT").
-      const title = /^[A-Z][a-z]/.test(def.title) ? def.title[0].toLowerCase() + def.title.slice(1) : def.title;
+      const title = sentence(def.title);
       this.appendDummyInput('TITLE').appendField(def.kind === 'trigger' ? `⚡ ${title}` : title);
       if (def.target) {
         const verb = def.kind === 'action' ? 'on' : 'for';
@@ -251,7 +280,7 @@ export function defineBlock(def: BlockDef) {
       if (optionalParams.length) {
         const menu = (): [string, string][] => [
           ['＋ more settings', '__add__'],
-          ...optionalParams.filter((p) => !this.optional.includes(p.name)).map((p) => [p.label, p.name] as [string, string]),
+          ...optionalParams.filter((p) => !this.optional.includes(p.name)).map((p) => [labelFor(p), p.name] as [string, string]),
           ...(settings ? triggerSettingItems(this) : []),
         ];
         const dd = new Blockly.FieldDropdown(menu, (value) => {
@@ -263,7 +292,7 @@ export function defineBlock(def: BlockDef) {
       this.setStyle(`${def.style}_blocks`);
       this.setTooltip(tooltip(def));
       if (def.help_url) this.setHelpUrl(def.help_url);
-      this.setInputsInline(false);
+      relayout(this);
       switch (def.kind) {
         case 'action':
           this.setPreviousStatement(true);
@@ -293,6 +322,7 @@ export function defineBlock(def: BlockDef) {
           appendParam(this, p, false, true);
         }
       }
+      relayout(this);
     },
   };
 }
@@ -311,6 +341,31 @@ function toolboxItem(def: BlockDef): Blockly.utils.toolbox.ToolboxItemInfo {
   }
   return { kind: 'block', type: def.type, inputs } as Blockly.utils.toolbox.ToolboxItemInfo;
 }
+
+/** Built-in blocks that do what a Home Assistant domain's generated blocks do, more simply. */
+const CURATED: Record<string, string[]> = {
+  light: ['light_power', 'light_set_colour', 'light_set_white', 'light_set_brightness', 'light_step'],
+  switch: ['device_power', 'device_on_for'],
+  homeassistant: ['device_power'],
+  cover: ['cover_command', 'cover_set_position'],
+  climate: ['climate_set_temperature', 'climate_set_mode', 'climate_set_preset'],
+  media_player: ['media_command', 'media_set_volume', 'media_play', 'media_say'],
+  fan: ['fan_set_speed', 'device_power'],
+  lock: ['lock_command'],
+  vacuum: ['vacuum_command'],
+  scene: ['scene_activate'],
+  script: ['script_run'],
+  counter: ['counter_command'],
+  notify: ['notify_send'],
+  input_boolean: ['helper_set'],
+  input_number: ['helper_set'],
+  input_select: ['helper_set'],
+  input_text: ['helper_set'],
+  input_datetime: ['helper_set'],
+};
+
+/** The domain of a generated block (`ha_svc__light__turn_on` → `light`). */
+const domainOf = (def: BlockDef) => def.type.split('__')[1] ?? '';
 
 const KIND_ORDER: BlockDef['kind'][] = ['trigger', 'condition', 'action', 'value'];
 const KIND_LABEL: Record<BlockDef['kind'], string> = {
@@ -364,7 +419,12 @@ export function installRegistry(blocks: BlockDef[]): { categories: ExtraCategory
       name: 'Home Assistant',
       style: 'action',
       blocks: [],
-      subcategories: group(ha).map(([name, list]) => ({ name, style: 'action', blocks: categoryContents(list) })),
+      subcategories: group(ha).map(([name, list]) => ({
+        name,
+        style: 'action',
+        blocks: categoryContents(list),
+        curated: [...new Set(list.flatMap((b) => CURATED[domainOf(b)] ?? []))],
+      })),
     });
   }
   for (const [name, list] of group(others)) categories.push(tree(name, list, 0));

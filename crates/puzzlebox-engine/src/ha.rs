@@ -191,12 +191,76 @@ impl ConditionError {
 /// [`HaApi`] backed by the live WebSocket client, with an entity state cache.
 pub struct LiveHa {
     client: HaClient,
-    states: Arc<RwLock<HashMap<String, Value>>>,
+    states: Arc<RwLock<StateCache>>,
+}
+
+/// Entity states, with a version per change so editors can fetch only what changed.
+#[derive(Default)]
+pub struct StateCache {
+    states: HashMap<String, (u64, Value)>,
+    removed: HashMap<String, u64>,
+    version: u64,
+    /// Version of the last full reload; changes before it (removals included) are unknown.
+    reset: u64,
+}
+
+/// States changed after a version, or `None` when the caller must load everything again.
+pub struct StatesSince {
+    pub version: u64,
+    pub changed: Vec<Value>,
+    pub removed: Vec<String>,
+}
+
+impl StateCache {
+    pub fn replace(&mut self, list: impl IntoIterator<Item = (String, Value)>) {
+        self.version += 1;
+        self.reset = self.version;
+        self.removed.clear();
+        let v = self.version;
+        self.states = list.into_iter().map(|(id, s)| (id, (v, s))).collect();
+    }
+
+    pub fn set(&mut self, id: &str, state: Option<Value>) {
+        self.version += 1;
+        match state {
+            Some(s) => {
+                self.removed.remove(id);
+                self.states.insert(id.to_owned(), (self.version, s));
+            }
+            None => {
+                self.states.remove(id);
+                self.removed.insert(id.to_owned(), self.version);
+            }
+        }
+    }
+
+    pub fn get(&self, id: &str) -> Option<&Value> {
+        self.states.get(id).map(|(_, s)| s)
+    }
+
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub fn all(&self) -> Vec<Value> {
+        self.states.values().map(|(_, s)| s.clone()).collect()
+    }
+
+    pub fn since(&self, since: u64) -> Option<StatesSince> {
+        if since < self.reset || since > self.version {
+            return None;
+        }
+        Some(StatesSince {
+            version: self.version,
+            changed: self.states.values().filter(|(v, _)| *v > since).map(|(_, s)| s.clone()).collect(),
+            removed: self.removed.iter().filter(|(_, v)| **v > since).map(|(id, _)| id.clone()).collect(),
+        })
+    }
 }
 
 impl LiveHa {
     pub fn new(client: HaClient) -> Arc<Self> {
-        let states = Arc::new(RwLock::new(HashMap::new()));
+        let states = Arc::new(RwLock::new(StateCache::default()));
         tokio::spawn(maintain_cache(client.clone(), states.clone()));
         Arc::new(Self { client, states })
     }
@@ -206,11 +270,21 @@ impl LiveHa {
     }
 
     pub fn all_states(&self) -> Vec<Value> {
-        self.states.read().unwrap_or_else(|p| p.into_inner()).values().cloned().collect()
+        self.states.read().unwrap_or_else(|p| p.into_inner()).all()
+    }
+
+    /// All states and the cache version they belong to.
+    pub fn all_states_versioned(&self) -> (u64, Vec<Value>) {
+        let cache = self.states.read().unwrap_or_else(|p| p.into_inner());
+        (cache.version(), cache.all())
+    }
+
+    pub fn states_since(&self, since: u64) -> Option<StatesSince> {
+        self.states.read().unwrap_or_else(|p| p.into_inner()).since(since)
     }
 }
 
-async fn maintain_cache(client: HaClient, states: Arc<RwLock<HashMap<String, Value>>>) {
+async fn maintain_cache(client: HaClient, states: Arc<RwLock<StateCache>>) {
     let mut changes = match client.subscribe_events(Some("state_changed")).await {
         Ok(s) => s,
         Err(e) => {
@@ -224,11 +298,10 @@ async fn maintain_cache(client: HaClient, states: Arc<RwLock<HashMap<String, Val
         if *conn.borrow_and_update() == ConnectionState::Connected {
             match client.get_states().await {
                 Ok(list) => {
-                    let mut map = states.write().unwrap_or_else(|p| p.into_inner());
-                    map.clear();
-                    for s in list {
-                        map.insert(s.entity_id.clone(), serde_json::to_value(s).unwrap_or_default());
-                    }
+                    states.write().unwrap_or_else(|p| p.into_inner()).replace(
+                        list.into_iter()
+                            .map(|s| (s.entity_id.clone(), serde_json::to_value(s).unwrap_or_default())),
+                    );
                 }
                 Err(e) => warn!(error = %e, "failed to load states"),
             }
@@ -239,12 +312,8 @@ async fn maintain_cache(client: HaClient, states: Arc<RwLock<HashMap<String, Val
                     let Some(ev) = ev else { return };
                     let data = &ev["data"];
                     let Some(id) = data["entity_id"].as_str() else { continue };
-                    let mut map = states.write().unwrap_or_else(|p| p.into_inner());
-                    if data["new_state"].is_null() {
-                        map.remove(id);
-                    } else {
-                        map.insert(id.to_owned(), data["new_state"].clone());
-                    }
+                    let new = Some(data["new_state"].clone()).filter(|s| !s.is_null());
+                    states.write().unwrap_or_else(|p| p.into_inner()).set(id, new);
                 }
                 changed = conn.changed() => {
                     if changed.is_err() { return }
@@ -429,7 +498,9 @@ impl HaApi for LiveHa {
 mod tests {
     use puzzlebox_ha_client::Error;
 
-    use super::{ActionError, ConditionError, OnError};
+    use serde_json::json;
+
+    use super::{ActionError, ConditionError, OnError, StateCache};
 
     #[test]
     fn sorts_action_errors_like_continue_on_error() {
@@ -506,5 +577,22 @@ mod tests {
         ));
         assert!(matches!(ConditionError::from_client(Error::Disconnected), ConditionError::Failed(_)));
         assert!(matches!(ConditionError::from_client(Error::NotConnected), ConditionError::Failed(_)));
+    }
+
+    #[test]
+    fn state_cache_reports_changes_since_a_version() {
+        let mut c = StateCache::default();
+        c.replace([("a.x".to_owned(), json!({"state": "1"})), ("a.y".to_owned(), json!({"state": "2"}))]);
+        let v = c.version();
+        assert_eq!(c.since(v).unwrap().changed.len(), 0);
+        c.set("a.x", Some(json!({"state": "3"})));
+        c.set("a.y", None);
+        let d = c.since(v).unwrap();
+        assert_eq!(d.changed, vec![json!({"state": "3"})]);
+        assert_eq!(d.removed, vec!["a.y".to_owned()]);
+        assert!(c.since(v - 1).is_none(), "versions before a reload need a full load");
+        assert!(c.since(d.version + 5).is_none(), "unknown future versions need a full load");
+        c.replace([]);
+        assert!(c.since(d.version).is_none());
     }
 }

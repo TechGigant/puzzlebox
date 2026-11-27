@@ -380,6 +380,11 @@ export function loadRegistry(force = false): Promise<HaRegistry | null> {
   return registryInflight;
 }
 
+/** The registry as last loaded, or null before the first load. */
+export function cachedRegistry(): HaRegistry | null {
+  return registryCache;
+}
+
 export function registrySuggestions(r: HaRegistry | null, kind: string): Suggestion[] {
   if (!r) return [];
   const areaName = (id: string | null | undefined) => r.areas.find((a) => a.area_id === id)?.name;

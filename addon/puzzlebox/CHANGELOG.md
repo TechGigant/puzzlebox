@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Device triggers, conditions and actions show which device they belong to
+  ("⚡ Bedroom remote · action double click"), with the name from Home
+  Assistant, so renames show up. Click the name to move the block to another
+  device with the same trigger, condition or action; its settings stay. A
+  device that was removed from Home Assistant gets a warning, and imported
+  device blocks get Home Assistant's own label.
+
 ## 0.5.0
 
 ### Triggers

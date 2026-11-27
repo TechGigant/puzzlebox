@@ -4,7 +4,7 @@
 import * as Blockly from 'blockly/core';
 import { getJson } from '../api';
 import type { ExtraCategory } from '../toolbox';
-import type { HaRegistry } from './field_entity';
+import { cachedRegistry, FieldRegistry, loadRegistry, type HaRegistry } from './field_entity';
 import { addTriggerSettings } from './trigger_settings';
 
 interface DeviceParam {
@@ -37,11 +37,47 @@ type DeviceBlock = Blockly.BlockSvg & { device: DeviceState | null };
 const PREFIX = 'DEVICES:';
 const BLOCK_TYPE = { trigger: 'device_trigger', condition: 'device_condition', action: 'device_action' } as const;
 
+/** The device a block belongs to, shown by name. Not saved itself: the block's config holds
+ * the device id. Choosing another device moves the block to that device's matching one. */
+class FieldDevice extends FieldRegistry {
+  constructor(value: string) {
+    super(value, 'device');
+  }
+
+  override isSerializable() {
+    return false;
+  }
+}
+
+const kindOf = (type: string) =>
+  (Object.entries(BLOCK_TYPE).find(([, t]) => t === type)?.[0] ?? null) as DeviceAutomation['kind'] | null;
+
+const deviceIdOf = (st: DeviceState | null) => (typeof st?.config?.device_id === 'string' ? st.config.device_id : '');
+
+/** The label without the device's name in front ("Hall motion started detecting motion" on the
+ * device "Hall motion"), since the device is shown next to it. */
+function shownLabel(st: DeviceState | null): string {
+  const label = st?.label || 'device (drag in from Devices)';
+  const name = cachedRegistry()?.devices.find((d) => d.id === deviceIdOf(st))?.name;
+  if (name && label.toLowerCase().startsWith(`${name.toLowerCase()} `)) return label.slice(name.length + 1);
+  return label;
+}
+
 function buildInputs(block: DeviceBlock) {
   for (const input of [...block.inputList]) block.removeInput(input.name, true);
   const st = block.device;
-  const kind = block.type === 'device_trigger' ? '⚡ ' : '';
-  block.appendDummyInput('TITLE').appendField(kind + (st?.label || 'device (drag in from Devices)'));
+  const title = block.appendDummyInput('TITLE');
+  if (block.type === 'device_trigger') title.appendField('⚡');
+  const deviceId = deviceIdOf(st);
+  if (deviceId) {
+    const field = new FieldDevice(deviceId);
+    field.setValidator((v) => {
+      if (v && v !== deviceIdOf(block.device)) setTimeout(() => moveToDevice(block, String(v)));
+      return v;
+    });
+    title.appendField(field, 'DEVICE');
+  }
+  title.appendField(new Blockly.FieldLabel(shownLabel(st)), 'LABEL');
   for (const p of st?.params ?? []) {
     const name = `P_${p.name}`;
     switch (p.input) {
@@ -98,6 +134,7 @@ function defineDeviceBlock(type: string, kind: DeviceAutomation['kind']) {
       this.device = state;
       buildInputs(this);
       if (state?.label) this.setTooltip(`${state.label} (a device ${kind} from Home Assistant).`);
+      if (this.workspace && !this.workspace.isFlyout) setTimeout(() => checkDevice(this));
     },
   };
 }
@@ -142,6 +179,122 @@ export function devicesCategory(reg: HaRegistry | null): ExtraCategory | null {
 }
 
 const automations = new Map<string, DeviceAutomation[]>();
+const fetching = new Map<string, Promise<DeviceAutomation[]>>();
+
+/** A device's triggers, conditions and actions (fetched once). */
+function deviceAutomations(deviceId: string): Promise<DeviceAutomation[]> {
+  const known = automations.get(deviceId);
+  if (known) return Promise.resolve(known);
+  let p = fetching.get(deviceId);
+  if (!p) {
+    p = getJson<DeviceAutomation[]>(`api/ha/devices/${encodeURIComponent(deviceId)}/automations`)
+      .then((l) => (automations.set(deviceId, l), l))
+      .catch(() => [] as DeviceAutomation[])
+      .finally(() => fetching.delete(deviceId));
+    fetching.set(deviceId, p);
+  }
+  return p;
+}
+
+/** Keys that say which device and entity an automation is for, not what it does. */
+const WHERE = new Set(['device_id', 'entity_id', 'metadata']);
+
+const sameKind = (a: Record<string, unknown>, b: Record<string, unknown>) => {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)].filter((k) => !WHERE.has(k)));
+  return [...keys].every((k) => JSON.stringify(a[k]) === JSON.stringify(b[k])) && 'entity_id' in a === 'entity_id' in b;
+};
+
+const sameConfig = (a: Record<string, unknown>, b: Record<string, unknown>) =>
+  sameKind(a, b) && a.device_id === b.device_id && JSON.stringify(a.entity_id) === JSON.stringify(b.entity_id);
+
+/** Headless blocks (tests, the server-side check) have no warnings. */
+const warn = (block: Blockly.Block, text: string | null) =>
+  (block as { setWarningText?: (text: string | null, id: string) => void }).setWarningText?.(text, 'device');
+
+const deviceName = (id: string) => cachedRegistry()?.devices.find((d) => d.id === id)?.name ?? id;
+
+/** Shows HA's current label; not an edit, so no undo step or unsaved change. */
+function setLabel(block: DeviceBlock, label: string) {
+  if (!block.device || block.isDeadOrDying()) return;
+  block.device.label = label;
+  Blockly.Events.disable();
+  try {
+    block.getField('LABEL')?.setValue(shownLabel(block.device));
+  } finally {
+    Blockly.Events.enable();
+  }
+}
+
+/** Warns about a device that is gone, and gives blocks made elsewhere (imported) HA's own label. */
+async function checkDevice(block: DeviceBlock) {
+  const deviceId = deviceIdOf(block.device);
+  const kind = kindOf(block.type);
+  if (!deviceId || !kind || block.isDeadOrDying()) return;
+  const reg = await loadRegistry();
+  if (block.isDeadOrDying()) return;
+  if (reg && !reg.devices.some((d) => d.id === deviceId)) {
+    warn(block, 'This device is no longer in Home Assistant.');
+    return;
+  }
+  warn(block, null);
+  block.getField('DEVICE')?.forceRerender();
+  if (block.device) setLabel(block, block.device.label);
+  const list = await deviceAutomations(deviceId);
+  const st = block.device;
+  const same = st && list.find((a) => a.kind === kind && sameConfig(a.config, st.config));
+  if (same && same.label !== st.label) setLabel(block, same.label);
+}
+
+/** Points the block at the same trigger/condition/action of another device. */
+async function moveToDevice(block: DeviceBlock, deviceId: string) {
+  const st = block.device;
+  const kind = kindOf(block.type);
+  const fromId = deviceIdOf(st);
+  if (!st || !kind || !fromId || fromId === deviceId) return;
+  const [from, to] = await Promise.all([deviceAutomations(fromId), deviceAutomations(deviceId)]);
+  if (block.isDeadOrDying() || block.device !== st) return;
+  // A device can have several of the same (two buttons, two lights): take the one in the same place.
+  const nth = from.filter((a) => a.kind === kind && sameKind(a.config, st.config)).findIndex((a) => sameConfig(a.config, st.config));
+  const matches = to.filter((a) => a.kind === kind && sameKind(a.config, st.config));
+  const match = matches[Math.max(nth, 0)] ?? matches[0];
+  if (!match) {
+    Blockly.Events.disable();
+    try {
+      block.getField('DEVICE')?.setValue(fromId);
+    } finally {
+      Blockly.Events.enable();
+    }
+    warn(block, `${deviceName(deviceId)} has no “${st.label}” ${kind}, so this still uses ${deviceName(fromId)}.`);
+    // Only an answer to the choice just made: the block itself is fine.
+    setTimeout(() => block.device === st && !block.isDeadOrDying() && warn(block, null), 8000);
+    return;
+  }
+  warn(block, null);
+  const before = block.saveExtraState?.() ?? null;
+  const sameParams = JSON.stringify(match.params.map((p) => p.name)) === JSON.stringify(st.params.map((p) => p.name));
+  const next = { ...(before as object), config: match.config, label: match.label, params: sameParams ? st.params : match.params };
+  // Rebuilding the inputs drops field values (settings like the trigger id): put them back.
+  const values = new Map<string, unknown>();
+  for (const input of block.inputList) {
+    for (const f of input.fieldRow) if (f.name && f.isSerializable()) values.set(f.name, f.getValue());
+  }
+  if (sameParams) {
+    // Same settings: keep the inputs (and what is plugged into them).
+    block.device = { config: match.config, label: match.label, params: st.params };
+    setLabel(block, match.label);
+  } else {
+    Blockly.Events.disable();
+    try {
+      block.loadExtraState?.(next);
+      for (const [name, v] of values) block.getField(name)?.setValue(v);
+    } finally {
+      Blockly.Events.enable();
+    }
+    (block as Partial<Blockly.BlockSvg>).render?.();
+  }
+  const Change = Blockly.Events.get(Blockly.Events.BLOCK_CHANGE);
+  Blockly.Events.fire(new Change(block, 'mutation', null, JSON.stringify(before), JSON.stringify(block.saveExtraState?.() ?? null)));
+}
 
 /** Other loaded automations of the same device and kind, as states for the same block type. */
 export function deviceAlternatives(block: Blockly.Block): { label: string; extraState: DeviceState }[] {
@@ -174,13 +327,10 @@ function flyout(ws: Blockly.WorkspaceSvg, deviceId: string): FlyoutItem[] {
   if (!list) {
     if (!pending.has(deviceId)) {
       pending.add(deviceId);
-      getJson<DeviceAutomation[]>(`api/ha/devices/${encodeURIComponent(deviceId)}/automations`)
-        .then((l) => automations.set(deviceId, l))
-        .catch(() => automations.set(deviceId, []))
-        .finally(() => {
-          pending.delete(deviceId);
-          (ws.getToolbox() as Blockly.Toolbox | null)?.refreshSelection();
-        });
+      deviceAutomations(deviceId).finally(() => {
+        pending.delete(deviceId);
+        (ws.getToolbox() as Blockly.Toolbox | null)?.refreshSelection();
+      });
     }
     return [label('Loading…')];
   }

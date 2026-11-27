@@ -1,8 +1,8 @@
 //! MQTT trigger source and publisher.
 
 use std::collections::HashSet;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use puzzlebox_engine::value::loose_eq;
 use puzzlebox_engine::{TriggerSink, TriggerSource};
@@ -55,6 +55,16 @@ pub fn topic_matches(filter: &str, topic: &str) -> bool {
     }
 }
 
+/// A trigger's wanted value matches the payload's loosely, and text in any case, so a typed
+/// "on" or "true" matches Zigbee2MQTT's "ON" or `true`.
+fn same_value(value: &Value, want: &Value) -> bool {
+    let text = |v: &Value| match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    loose_eq(value, want) || (!value.is_object() && text(value).eq_ignore_ascii_case(&text(want)))
+}
+
 struct Sub {
     program_id: String,
     filter: String,
@@ -65,6 +75,8 @@ struct Sub {
 }
 
 type Listener = std::sync::Arc<dyn Fn(&str, &str) + Send + Sync>;
+/// Known current value of a JSON key on a topic (the Zigbee2MQTT state cache).
+pub type Seed = std::sync::Arc<dyn Fn(&str, &str) -> Option<Value> + Send + Sync>;
 
 pub struct Mqtt {
     client: Option<AsyncClient>,
@@ -72,6 +84,8 @@ pub struct Mqtt {
     /// Internal subscribers (Zigbee2MQTT watcher): topic filter → callback(topic, payload).
     listeners: Mutex<Vec<(String, Listener)>>,
     subscribed: Mutex<HashSet<String>>,
+    seed: OnceLock<Seed>,
+    connected_at: Mutex<Option<Instant>>,
 }
 
 impl Mqtt {
@@ -81,7 +95,19 @@ impl Mqtt {
             subs: Mutex::new(Vec::new()),
             listeners: Mutex::new(Vec::new()),
             subscribed: Mutex::new(HashSet::new()),
+            seed: OnceLock::new(),
+            connected_at: Mutex::new(None),
         })
+    }
+
+    /// Where "changes" triggers look up the value they start from.
+    pub fn set_seed(&self, seed: Seed) {
+        let _ = self.seed.set(seed);
+    }
+
+    /// When the broker connection was (re)established, if it is up.
+    pub fn connected_at(&self) -> Option<Instant> {
+        *self.connected_at.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     pub fn connect(cfg: MqttConfig) -> std::sync::Arc<Self> {
@@ -97,6 +123,8 @@ impl Mqtt {
             subs: Mutex::new(Vec::new()),
             listeners: Mutex::new(Vec::new()),
             subscribed: Mutex::new(HashSet::new()),
+            seed: OnceLock::new(),
+            connected_at: Mutex::new(None),
         });
         let weak = std::sync::Arc::downgrade(&this);
         tokio::spawn(async move {
@@ -106,6 +134,7 @@ impl Mqtt {
                 match ev {
                     Ok(Event::Incoming(Packet::ConnAck(_))) => {
                         info!(host = %cfg.host, "MQTT connected");
+                        *this.connected_at.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now());
                         // Broker sessions are clean: re-subscribe everything.
                         this.subscribed.lock().unwrap_or_else(|p| p.into_inner()).clear();
                         this.sync_subscriptions().await;
@@ -114,6 +143,7 @@ impl Mqtt {
                     Ok(_) => {}
                     Err(e) => {
                         warn!("MQTT connection error: {e}");
+                        *this.connected_at.lock().unwrap_or_else(|p| p.into_inner()) = None;
                         tokio::time::sleep(Duration::from_secs(5)).await;
                     }
                 }
@@ -162,11 +192,14 @@ impl Mqtt {
             if retain {
                 continue;
             }
-            if f.changed && previous.as_ref() == Some(value) {
+            // Without a known value to compare with (after a restart, for a device that can't
+            // be asked), the first message only tells the current value: devices repeat their
+            // whole state in routine reports, which aren't changes.
+            if f.changed && previous.as_ref().is_none_or(|p| p == value) {
                 continue;
             }
             if let Some(want) = &f.equals
-                && !loose_eq(value, want)
+                && !same_value(value, want)
             {
                 continue;
             }
@@ -225,11 +258,17 @@ impl TriggerSource for MqttSource {
                 "MQTT is not configured (install the Mosquitto broker app or set PUZZLEBOX_MQTT_URL)".into(),
             );
         }
+        // Start from the known state, so a program saved while the door is open doesn't fire
+        // "door changes" on its next routine report.
+        let last = match (filter, self.0.seed.get()) {
+            (Some(f), Some(seed)) if f.changed => seed(topic, &f.key),
+            _ => None,
+        };
         self.0.subs.lock().unwrap_or_else(|p| p.into_inner()).push(Sub {
             program_id: program_id.to_owned(),
             filter: topic.clone(),
             payload_filter: filter.clone(),
-            last: Mutex::new(None),
+            last: Mutex::new(last),
             sink,
         });
         let this = self.0.clone();
@@ -275,6 +314,56 @@ mod tests {
         assert!(topic_matches("home/#", "home/kitchen/light/state"));
         assert!(topic_matches("a/b", "a/b"));
         assert!(!topic_matches("a/b", "a/b/c"));
+    }
+
+    type Fired = std::sync::Arc<Mutex<Vec<Value>>>;
+
+    fn watch(mqtt: &Mqtt, key: &str, equals: Option<Value>, last: Option<Value>) -> Fired {
+        let fired = Fired::default();
+        let f = fired.clone();
+        mqtt.subs.lock().unwrap().push(Sub {
+            program_id: "p".into(),
+            filter: "z2m/Door".into(),
+            payload_filter: Some(MqttFilter { key: key.into(), equals, changed: true }),
+            last: Mutex::new(last),
+            sink: Box::new(move |m| {
+                f.lock().unwrap().push(m["value"].clone());
+                true
+            }),
+        });
+        fired
+    }
+
+    #[test]
+    fn changes_need_a_known_value_to_compare_with() {
+        let mqtt = Mqtt::disabled();
+        let fired = watch(&mqtt, "contact", None, None);
+        // After a restart: the routine report only tells the current value.
+        mqtt.deliver("z2m/Door", br#"{"contact": true, "battery": 90}"#, false);
+        mqtt.deliver("z2m/Door", br#"{"contact": true, "battery": 89}"#, false);
+        assert!(fired.lock().unwrap().is_empty());
+        mqtt.deliver("z2m/Door", br#"{"contact": false, "battery": 89}"#, false);
+        assert_eq!(*fired.lock().unwrap(), [json!(false)]);
+    }
+
+    #[test]
+    fn changes_start_from_the_seeded_value() {
+        let mqtt = Mqtt::disabled();
+        let fired = watch(&mqtt, "contact", None, Some(json!(true)));
+        mqtt.deliver("z2m/Door", br#"{"contact": true}"#, false);
+        assert!(fired.lock().unwrap().is_empty());
+        mqtt.deliver("z2m/Door", br#"{"contact": false}"#, false);
+        assert_eq!(fired.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn chosen_values_match_any_case_and_type() {
+        let mqtt = Mqtt::disabled();
+        let open = watch(&mqtt, "contact", Some(json!("false")), Some(json!(true)));
+        let on = watch(&mqtt, "state", Some(json!("on")), Some(json!("OFF")));
+        mqtt.deliver("z2m/Door", br#"{"contact": false, "state": "ON"}"#, false);
+        assert_eq!(open.lock().unwrap().len(), 1);
+        assert_eq!(on.lock().unwrap().len(), 1);
     }
 
     #[test]

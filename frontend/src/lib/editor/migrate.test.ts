@@ -63,6 +63,25 @@ describe('Zigbee2MQTT group units', () => {
     expect(g.inputs.P_brightness).toBeUndefined();
   });
 
+  it('converts device white temperature to K and leaves device brightness alone', () => {
+    const out = migrateWorkspace(
+      ws({
+        type: 'z2m__zigbee2mqtt__0x000d6ffffe112233__set',
+        fields: { P_state: 'ON' },
+        extraState: { optional: ['brightness', 'color_temp'] },
+        inputs: {
+          P_brightness: { shadow: { type: 'math_number', fields: { NUM: 128 } } },
+          P_color_temp: { shadow: { type: 'math_number', fields: { NUM: 370 } } },
+        },
+      }),
+    ) as { blocks: { blocks: { extraState: { optional: string[] }; inputs: Record<string, { shadow?: { fields: { NUM: number } } }> }[] } };
+    const [d] = out.blocks.blocks;
+    expect(d.extraState.optional).toEqual(['brightness', 'color_temp_kelvin']);
+    expect(d.inputs.P_color_temp_kelvin.shadow?.fields.NUM).toBe(2703);
+    expect(d.inputs.P_brightness.shadow?.fields.NUM).toBe(128);
+    expect(d.inputs.P_color_temp).toBeUndefined();
+  });
+
   it('gives older triggers the new duration sockets, set to nothing', () => {
     const out = migrateWorkspace(
       ws(

@@ -273,7 +273,8 @@ export function defineBlock(def: BlockDef) {
       this.hab = def;
       this.optional = [];
       // Lower-case like the built-in blocks ("turn on light"), but keep acronyms ("MQTT").
-      const title = sentence(def.title);
+      // Zigbee2MQTT titles are written that way already and often start with a device name.
+      const title = def.source.startsWith('z2m:') ? def.title : sentence(def.title);
       this.appendDummyInput('TITLE').appendField(def.kind === 'trigger' ? `⚡ ${title}` : title);
       if (def.target) {
         const verb = def.kind === 'action' ? 'on' : 'for';

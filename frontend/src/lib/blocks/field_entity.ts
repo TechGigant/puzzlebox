@@ -8,14 +8,32 @@ export interface EntityState {
 }
 
 let cache: EntityState[] = [];
+let byId = new Map<string, EntityState>();
+let version: number | null = null;
 let fetchedAt = 0;
 let inflight: Promise<void> | null = null;
 
+const nameOf = (s: EntityState) => s.attributes.friendly_name || s.entity_id;
+const byName = (a: EntityState, b: EntityState) =>
+  nameOf(a).localeCompare(nameOf(b), undefined, { sensitivity: 'base', numeric: true }) || a.entity_id.localeCompare(b.entity_id);
+
+interface StatesDelta {
+  version: number;
+  full?: boolean;
+  changed: EntityState[];
+  removed: string[];
+}
+
+/** The server sends only states changed since our version, so opening pickers stays cheap. */
 export function loadEntities(force = false): Promise<void> {
-  if (!force && Date.now() - fetchedAt < 30_000) return Promise.resolve();
-  inflight ??= getJson<EntityState[]>('api/ha/states')
-    .then((list) => {
-      cache = list.sort((a, b) => a.entity_id.localeCompare(b.entity_id));
+  if (!force && Date.now() - fetchedAt < 5_000) return Promise.resolve();
+  inflight ??= getJson<StatesDelta>(`api/ha/states?since=${version ?? 0}`)
+    .then((d) => {
+      if (d.full || version === null) byId = new Map();
+      for (const id of d.removed) byId.delete(id);
+      for (const s of d.changed) byId.set(s.entity_id, s);
+      if (d.full || version === null || d.changed.length || d.removed.length) cache = [...byId.values()].sort(byName);
+      version = d.version;
       fetchedAt = Date.now();
     })
     .catch(() => {})
@@ -24,12 +42,14 @@ export function loadEntities(force = false): Promise<void> {
 }
 
 export function entityState(id: string): EntityState | undefined {
-  return cache.find((s) => s.entity_id === id);
+  return byId.get(id);
 }
 
 export interface EntityFilter {
   domains: string[];
   deviceClasses?: string[];
+  /** The slot is an action/trigger target, so a whole area can stand in for entities. */
+  areas?: boolean;
 }
 
 /** Resolves which entities the slot this field sits in accepts (set by dynamic blocks). */
@@ -43,7 +63,11 @@ export interface Suggestion {
   value: string;
   label: string;
   meta?: string;
+  /** Runs instead of setting the value. */
+  choose?: () => void;
 }
+
+const LIST_LIMIT = 80;
 
 /**
  * Text field with a searchable suggestion list. Free text always stays allowed, so values
@@ -89,7 +113,7 @@ export abstract class FieldSuggest extends Blockly.FieldTextInput {
       this.highlight();
     } else if (ev.key === 'Enter' && this.matches[this.active]) {
       ev.preventDefault();
-      this.pick(this.matches[this.active].value);
+      this.pick(this.matches[this.active]);
     }
   }
 
@@ -100,14 +124,16 @@ export abstract class FieldSuggest extends Blockly.FieldTextInput {
     });
   }
 
-  private pick(value: string) {
-    this.setValue(value);
+  private pick(s: Suggestion) {
+    if (!s.choose) this.setValue(s.value);
     Blockly.WidgetDiv.hide();
     Blockly.DropDownDiv.hideIfOwner(this);
+    if (s.choose) setTimeout(s.choose);
   }
 
   private renderList(query: string) {
-    this.matches = this.suggestions(query.trim().toLowerCase()).slice(0, 80);
+    const all = this.suggestions(query.trim().toLowerCase());
+    this.matches = all.slice(0, LIST_LIMIT);
     // With nothing typed yet, start at the current value.
     const current = query ? -1 : this.matches.findIndex((m) => m.value === this.getValue());
     this.active = Math.max(current, 0);
@@ -138,10 +164,16 @@ export abstract class FieldSuggest extends Blockly.FieldTextInput {
       // mousedown keeps focus in the text input (click would blur and close the editor first).
       item.addEventListener('mousedown', (ev) => {
         ev.preventDefault();
-        this.pick(s.value);
+        this.pick(s);
       });
       list.append(item);
     });
+    if (all.length > this.matches.length) {
+      const more = document.createElement('div');
+      more.className = 'pb-entity-empty';
+      more.textContent = `Showing ${this.matches.length} of ${all.length}: type to narrow down`;
+      list.append(more);
+    }
     content.append(list);
     this.list = list;
     Blockly.DropDownDiv.setColour('var(--pb-card)', 'var(--pb-divider)');
@@ -174,17 +206,70 @@ export class FieldEntity extends FieldSuggest {
     return { domains: this.domains };
   }
 
+  protected override load() {
+    return Promise.all([loadEntities(), loadRegistry()]).then(() => undefined);
+  }
+
   protected suggestions(q: string): Suggestion[] {
-    const { domains, deviceClasses = [] } = this.filter();
-    const all = cache
+    const { domains, deviceClasses = [], areas } = this.filter();
+    const where = entityPlaces(registryCache);
+    const matching = cache
       .filter((s) => !domains.length || domains.includes(s.entity_id.split('.')[0]))
-      .filter((s) => !deviceClasses.length || deviceClasses.includes(String(s.attributes.device_class ?? '')))
-      .map((s) => ({ value: s.entity_id, label: s.attributes.friendly_name ?? s.entity_id, meta: `${s.entity_id} · ${s.state}` }));
+      .filter((s) => !deviceClasses.length || deviceClasses.includes(String(s.attributes.device_class ?? '')));
+    const all = matching.map((s) => {
+      const place = where.get(s.entity_id);
+      return {
+        value: s.entity_id,
+        label: nameOf(s),
+        meta: [place?.area, s.entity_id, s.state].filter(Boolean).join(' · '),
+        search: [nameOf(s), s.entity_id, place?.area, place?.device].filter(Boolean).join(' ').toLowerCase(),
+      };
+    });
     // Several entities can be listed with commas.
     const raw = (this.htmlInput_ as HTMLInputElement | null)?.value ?? '';
     if (raw.includes(',')) return this.commaList(q, all);
-    return all
-      .filter((s) => !q || s.value.toLowerCase().includes(q) || s.label.toLowerCase().includes(q));
+    // Every word has to match somewhere: "kitchen ceiling" finds the ceiling light in the kitchen.
+    const words = q.split(/\s+/).filter(Boolean);
+    const hit = (text: string) => words.every((w) => text.includes(w));
+    const entities = all.filter((s) => hit(s.search)).map(({ search: _, ...s }) => s);
+    if (!areas || !domains.length || !registryCache) return entities;
+    return [...this.areaSuggestions(matching, where, domains, deviceClasses).filter((a) => hit(a.label.toLowerCase())), ...entities];
+  }
+
+  /** "All lights in Kitchen", for areas that have any of the entities this slot takes. */
+  private areaSuggestions(matching: EntityState[], where: Map<string, Place>, domains: string[], deviceClasses: string[]): Suggestion[] {
+    const counts = new Map<string, number>();
+    for (const s of matching) {
+      const id = where.get(s.entity_id)?.areaId;
+      if (id) counts.set(id, (counts.get(id) ?? 0) + 1);
+    }
+    const what = deviceClasses.length
+      ? `${deviceClasses.map((c) => c.replaceAll('_', ' ')).join(' or ')} sensors`
+      : domains.map((d) => DOMAIN_NOUNS[d] ?? `${d.replaceAll('_', ' ')} entities`).join(' and ');
+    return (registryCache?.areas ?? [])
+      .filter((a) => counts.has(a.area_id))
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map((a) => ({
+        value: a.area_id,
+        label: `All ${what} in ${a.name}`,
+        meta: `whole area: ${counts.get(a.area_id)} now, and any added later`,
+        choose: () => this.useArea(a.area_id),
+      }));
+  }
+
+  /** Swaps this entity block for an area block in the same slot. */
+  private useArea(areaId: string) {
+    const block = this.getSourceBlock() as Blockly.BlockSvg | null;
+    const conn = block?.outputConnection?.targetConnection;
+    if (!block || !conn || block.isDeadOrDying()) return;
+    Blockly.Events.setGroup(true);
+    try {
+      if (!block.isShadow()) block.dispose(false);
+      const area = Blockly.serialization.blocks.append({ type: 'ha_area', fields: { ID: areaId } }, block.workspace) as Blockly.BlockSvg;
+      if (area.outputConnection) conn.connect(area.outputConnection);
+    } finally {
+      Blockly.Events.setGroup(false);
+    }
   }
 
   protected emptyText() {
@@ -400,6 +485,50 @@ export function registrySuggestions(r: HaRegistry | null, kind: string): Suggest
         .filter((d) => d.name)
         .map((d) => ({ value: d.id, label: d.name ?? d.id, meta: [areaName(d.area_id), d.model].filter(Boolean).join(' · ') }));
   }
+}
+
+const DOMAIN_NOUNS: Record<string, string> = {
+  light: 'lights',
+  switch: 'switches',
+  cover: 'covers',
+  climate: 'thermostats',
+  media_player: 'media players',
+  fan: 'fans',
+  lock: 'locks',
+  vacuum: 'vacuums',
+  binary_sensor: 'binary sensors',
+  sensor: 'sensors',
+  valve: 'valves',
+  humidifier: 'humidifiers',
+  water_heater: 'water heaters',
+  siren: 'sirens',
+  scene: 'scenes',
+  button: 'buttons',
+};
+
+interface Place {
+  areaId?: string;
+  area?: string;
+  device?: string;
+}
+
+let placesFor: HaRegistry | null = null;
+let places = new Map<string, Place>();
+
+/** Area and device of each entity; an entity without its own area is where its device is. */
+function entityPlaces(r: HaRegistry | null): Map<string, Place> {
+  if (r === placesFor) return places;
+  placesFor = r;
+  places = new Map();
+  if (!r) return places;
+  const areas = new Map(r.areas.map((a) => [a.area_id, a.name]));
+  const devices = new Map(r.devices.map((d) => [d.id, d]));
+  for (const e of r.entities) {
+    const device = e.device_id ? devices.get(e.device_id) : undefined;
+    const areaId = e.area_id ?? device?.area_id ?? undefined;
+    places.set(e.entity_id, { areaId, area: areaId ? areas.get(areaId) : undefined, device: device?.name ?? undefined });
+  }
+  return places;
 }
 
 /** Area, floor, label or device picker (the value is the registry id). */

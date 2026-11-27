@@ -17,7 +17,9 @@
   let message = $state<string | null>(null);
   let errors = $state<CompileError[]>([]);
   let paused = $state<{ run_id: string; block_id: string; variables: Record<string, unknown> } | null>(null);
-  let panelOpen = $state(true);
+  // Phones have no room for the panel next to the blocks; there it opens over them.
+  const narrow = () => window.matchMedia?.('(max-width: 700px)').matches ?? false;
+  let panelOpen = $state(!narrow());
   let ws: BlocklyWorkspace | undefined = $state();
   let current: object = {};
   let baseline = '';
@@ -394,5 +396,41 @@
     position: relative;
     flex: 1;
     min-width: 0;
+  }
+  @media (max-width: 700px) {
+    .bar {
+      gap: 6px;
+      padding: 6px 8px;
+    }
+    .name {
+      flex: 1 1 160px;
+      min-width: 0;
+    }
+    .bar select {
+      flex: 1 1 180px;
+      min-width: 0;
+    }
+    .bar .btn {
+      padding: 6px 12px;
+    }
+    .count {
+      display: none;
+    }
+    .body {
+      position: relative;
+    }
+    .body > :global(.panel) {
+      position: absolute;
+      z-index: 70;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      width: auto;
+      height: min(60%, 420px);
+      border-left: 0;
+      border-top: 1px solid var(--pb-divider);
+      border-radius: 12px 12px 0 0;
+      box-shadow: 0 -4px 16px rgb(0 0 0 / 20%);
+    }
   }
 </style>

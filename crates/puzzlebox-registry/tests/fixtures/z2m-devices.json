@@ -1,0 +1,61 @@
+[
+  {"ieee_address": "0x00124b0022aabb01", "type": "Coordinator", "friendly_name": "Coordinator", "interview_completed": true, "definition": null},
+  {
+    "ieee_address": "0x00158d0001a2b3c4", "type": "EndDevice", "friendly_name": "Front door", "interview_completed": true,
+    "definition": {"model": "MCCGQ11LM", "vendor": "Aqara", "description": "Door and window contact sensor", "exposes": [
+      {"type": "numeric", "name": "battery", "property": "battery", "access": 1, "unit": "%", "value_min": 0, "value_max": 100, "label": "Battery"},
+      {"type": "numeric", "name": "voltage", "property": "voltage", "access": 1, "unit": "mV", "label": "Voltage"},
+      {"type": "binary", "name": "contact", "property": "contact", "access": 1, "value_on": false, "value_off": true, "label": "Contact"},
+      {"type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1, "unit": "lqi", "value_min": 0, "value_max": 255, "label": "Linkquality"}
+    ]}
+  },
+  {
+    "ieee_address": "0x0017880106f1e2d3", "type": "EndDevice", "friendly_name": "Hallway motion", "interview_completed": true,
+    "definition": {"model": "9290012607", "vendor": "Philips", "description": "Hue motion sensor", "exposes": [
+      {"type": "binary", "name": "occupancy", "property": "occupancy", "access": 1, "value_on": true, "value_off": false, "label": "Occupancy"},
+      {"type": "numeric", "name": "illuminance", "property": "illuminance", "access": 1, "unit": "lx", "label": "Illuminance"},
+      {"type": "numeric", "name": "temperature", "property": "temperature", "access": 1, "unit": "°C", "label": "Temperature"},
+      {"type": "numeric", "name": "battery", "property": "battery", "access": 5, "unit": "%", "value_min": 0, "value_max": 100, "label": "Battery"},
+      {"type": "enum", "name": "motion_sensitivity", "property": "motion_sensitivity", "access": 7, "values": ["low", "medium", "high", "very_high", "max"], "label": "Motion sensitivity"},
+      {"type": "binary", "name": "led_indication", "property": "led_indication", "access": 7, "value_on": true, "value_off": false, "label": "Led indication"},
+      {"type": "numeric", "name": "occupancy_timeout", "property": "occupancy_timeout", "access": 7, "unit": "s", "value_min": 0, "value_max": 65535, "label": "Occupancy timeout"}
+    ]}
+  },
+  {
+    "ieee_address": "0xa4c138aabbccdd01", "type": "Router", "friendly_name": "Kitchen switch", "interview_completed": true,
+    "definition": {"model": "TS0012", "vendor": "Tuya", "description": "2 gang switch module", "exposes": [
+      {"type": "switch", "endpoint": "left", "features": [
+        {"type": "binary", "name": "state", "property": "state_left", "endpoint": "left", "access": 7, "value_on": "ON", "value_off": "OFF", "value_toggle": "TOGGLE", "label": "State"}]},
+      {"type": "switch", "endpoint": "right", "features": [
+        {"type": "binary", "name": "state", "property": "state_right", "endpoint": "right", "access": 7, "value_on": "ON", "value_off": "OFF", "value_toggle": "TOGGLE", "label": "State"}]},
+      {"type": "enum", "name": "power_on_behavior", "property": "power_on_behavior", "access": 7, "values": ["off", "previous", "on"], "label": "Power-on behavior"},
+      {"type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1, "unit": "lqi", "label": "Linkquality"}
+    ]}
+  },
+  {
+    "ieee_address": "0x000d6ffffe112233", "type": "Router", "friendly_name": "Desk lamp", "interview_completed": true,
+    "definition": {"model": "LED1545G12", "vendor": "IKEA", "description": "TRADFRI bulb E26/E27, white spectrum, globe, opal, 980 lm", "exposes": [
+      {"type": "light", "features": [
+        {"type": "binary", "name": "state", "property": "state", "access": 7, "value_on": "ON", "value_off": "OFF", "value_toggle": "TOGGLE", "label": "State"},
+        {"type": "numeric", "name": "brightness", "property": "brightness", "access": 7, "value_min": 0, "value_max": 254, "label": "Brightness"},
+        {"type": "numeric", "name": "color_temp", "property": "color_temp", "access": 7, "unit": "mired", "value_min": 250, "value_max": 454, "label": "Color temp",
+         "presets": [{"name": "coolest", "value": 250}, {"name": "warmest", "value": 454}]},
+        {"type": "numeric", "name": "color_temp_startup", "property": "color_temp_startup", "access": 7, "unit": "mired", "value_min": 250, "value_max": 454, "label": "Color temp startup"}]},
+      {"type": "enum", "name": "effect", "property": "effect", "access": 2, "values": ["blink", "breathe", "okay", "channel_change", "finish_effect", "stop_effect"], "label": "Effect"},
+      {"type": "enum", "name": "power_on_behavior", "property": "power_on_behavior", "access": 7, "values": ["off", "on", "toggle", "previous"], "label": "Power-on behavior"},
+      {"type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1, "unit": "lqi", "label": "Linkquality"}
+    ]}
+  },
+  {
+    "ieee_address": "0x000b57fffe445566", "type": "EndDevice", "friendly_name": "Living room remote", "interview_completed": true,
+    "definition": {"model": "E1524/E1810", "vendor": "IKEA", "description": "TRADFRI remote control", "exposes": [
+      {"type": "numeric", "name": "battery", "property": "battery", "access": 5, "unit": "%", "value_min": 0, "value_max": 100, "label": "Battery"},
+      {"type": "enum", "name": "action", "property": "action", "access": 1, "label": "Action", "values": [
+        "arrow_left_click", "arrow_left_hold", "arrow_left_release", "arrow_right_click", "arrow_right_hold", "arrow_right_release",
+        "brightness_down_click", "brightness_down_hold", "brightness_down_release", "brightness_up_click", "brightness_up_hold",
+        "brightness_up_release", "toggle"]},
+      {"type": "numeric", "name": "linkquality", "property": "linkquality", "access": 1, "unit": "lqi", "label": "Linkquality"}
+    ]}
+  },
+  {"ieee_address": "0x0017880100deadbe", "type": "Router", "friendly_name": "Not paired yet", "interview_completed": false, "definition": null}
+]

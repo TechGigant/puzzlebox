@@ -73,7 +73,8 @@ async fn run() -> Result<()> {
 
     let plugins = plugins::PluginRouter::new();
     let _ = plugins.mqtt.set(mqtt.clone());
-    let _ = plugins.z2m.set(z2m::Z2m::start(&mqtt, registry.clone(), cfg.z2m_bases.clone()));
+    let z2m = z2m::Z2m::start(&mqtt, registry.clone(), cfg.z2m_bases.clone());
+    let _ = plugins.z2m.set(z2m.clone());
     let wasm = wasm::WasmHost::new(live.clone(), engine.store().clone());
     let _ = plugins.wasm.set(wasm.clone());
     let bridge =
@@ -104,6 +105,8 @@ async fn run() -> Result<()> {
             started.store(true, Ordering::Relaxed);
         });
     }
+    engine.spawn_housekeeping();
+    let on_exit = engine.clone();
 
     let state = routes::AppState {
         ha,
@@ -114,6 +117,7 @@ async fn run() -> Result<()> {
         webhooks,
         wasm,
         mqtt,
+        z2m,
         devices: Arc::new(devices::DeviceCache::default()),
         cfg: cfg.clone(),
         started,
@@ -121,15 +125,14 @@ async fn run() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     info!(addr = %cfg.bind, ha = %cfg.ha_ws_url, "puzzlebox listening");
-    let engine = state.engine.clone();
     axum::serve(listener, routes::router(state).into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown())
+        .with_graceful_shutdown(shutdown(on_exit.clone()))
         .await?;
-    engine.shutdown().await;
+    on_exit.flush_log().await;
     Ok(())
 }
 
-async fn shutdown() {
+async fn shutdown(engine: Engine) {
     let ctrl_c = tokio::signal::ctrl_c();
     let mut term =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
@@ -137,4 +140,8 @@ async fn shutdown() {
         _ = ctrl_c => {},
         _ = term.recv() => {},
     }
+    // Open editor connections can hold the graceful shutdown up past the Supervisor's kill
+    // timeout, so stop the runs (recording why) and save the log now.
+    engine.shutdown().await;
+    engine.flush_log().await;
 }

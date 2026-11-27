@@ -126,6 +126,8 @@ export interface ProgramVersion {
   id: number;
   saved_at: number;
   name: string;
+  /** Run mode when it was saved; missing for versions from before it was kept. */
+  mode?: RunMode;
   blocks?: number;
   /** What changed since the version before. */
   changes?: string;
@@ -228,6 +230,8 @@ export const api = {
   variables: () => request<{ global: Record<string, unknown>; programs: Record<string, Record<string, unknown>> }>('GET', 'api/variables'),
   setVariable: (name: string, value: unknown, program_id?: string) =>
     request<{ ok: boolean }>('PUT', 'api/variables', { name, value, program_id }),
+  deleteVariable: (name: string, program_id?: string) =>
+    request<{ ok: boolean }>('DELETE', 'api/variables', { name, program_id }),
 };
 
 export interface ImportedProgram {
@@ -242,11 +246,21 @@ export interface ImportedProgram {
   error?: string;
 }
 
+export interface Zigbee2MqttStatus {
+  base: string;
+  state: 'ok' | 'waiting' | 'not_found' | 'disconnected';
+  devices: number | null;
+  groups: number | null;
+}
+
 export interface Settings {
   bridge_token: string;
   bridge_connected: boolean;
   bridge: BridgeStatus;
   mqtt_enabled: boolean;
+  mqtt_connected: boolean;
+  /** One entry per Zigbee2MQTT base topic. */
+  zigbee2mqtt: Zigbee2MqttStatus[];
   supervised: boolean;
   webhooks: string[];
   /** Home Assistant's time zone (used for all local times) and the app container's. */

@@ -273,7 +273,8 @@ export function defineBlock(def: BlockDef) {
       this.hab = def;
       this.optional = [];
       // Lower-case like the built-in blocks ("turn on light"), but keep acronyms ("MQTT").
-      const title = sentence(def.title);
+      // Zigbee2MQTT titles are written that way already and often start with a device name.
+      const title = def.source.startsWith('z2m:') ? def.title : sentence(def.title);
       this.appendDummyInput('TITLE').appendField(def.kind === 'trigger' ? `⚡ ${title}` : title);
       if (def.target) {
         const verb = def.kind === 'action' ? 'on' : 'for';
@@ -347,7 +348,7 @@ function toolboxItem(def: BlockDef): Blockly.utils.toolbox.ToolboxItemInfo {
 
 /** Built-in blocks that do what a Home Assistant domain's generated blocks do, more simply. */
 const CURATED: Record<string, string[]> = {
-  light: ['light_power', 'light_set_colour', 'light_set_white', 'light_set_brightness', 'light_step'],
+  light: ['light_power', 'light_set_colour', 'light_set_white', 'light_set_brightness', 'light_step', 'light_fade'],
   switch: ['device_power', 'device_on_for'],
   homeassistant: ['device_power'],
   cover: ['cover_command', 'cover_set_position'],

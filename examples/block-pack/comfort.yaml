@@ -1,11 +1,12 @@
-# Example declarative block pack. Copy to the app's packs/ folder.
+# Example declarative block pack. Copy it to the app's packs folder
+# (addon_configs/e46cc951_puzzlebox/packs) and press Reload on the Settings page.
 pack: comfort
 name: Comfort
 version: 1.0.0
 blocks:
   - id: set_room_temperature
     kind: action
-    title: Set room temperature
+    title: set room temperature
     target: {domains: [climate], required: true}
     params:
       - {name: temperature, label: to, required: true, input: number, min: 5, max: 30, step: 0.5, unit: "°C", default: 21}
@@ -26,9 +27,10 @@ blocks:
   - id: door_left_open
     kind: trigger
     title: door left open
+    tooltip: Fires when a door has stayed open for a while.
     params:
-      - {name: door, label: door, required: true, input: entity, domains: [binary_sensor], default: binary_sensor.front_door}
-      - {name: minutes, label: for (min), required: true, input: number, default: 5}
+      - {name: door, label: door, required: true, input: entity, domains: [binary_sensor]}
+      - {name: minutes, label: for, description: How long the door must stay open., required: true, input: number, min: 1, unit: min, default: 5}
     lowering:
       type: ha_trigger
       config:
@@ -40,6 +42,8 @@ blocks:
   - id: feels_like
     kind: value
     title: feels-like temperature
+    params:
+      - {name: weather, label: of, required: true, input: entity, domains: [weather]}
     lowering:
       type: template
-      template: "{{ state_attr('weather.home', 'apparent_temperature') | float(0) }}"
+      template: "{{ state_attr(weather, 'apparent_temperature') | float(0) }}"

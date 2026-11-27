@@ -27,6 +27,10 @@ const RULES: [RegExp, (m: RegExpMatchArray) => string][] = [
     new RegExp(String.raw`expected (?:float|int|a number|Number)\w* for ${KEY}`),
     (m) => `"${m[1]}" needs a number.`,
   ],
+  [
+    /The scene scene\.(\w+) already exists/,
+    (m) => `There's already a scene called scene.${m[1]} in your configuration: choose another name to remember the state as.`,
+  ],
   [/out of range|outside (?:of )?(?:the )?(?:valid )?range/i, () => 'A value is outside what this device accepts.'],
 ];
 

@@ -1,13 +1,13 @@
 //! Program lifecycle, trigger dispatch and HA-style run modes.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use puzzlebox_ir::{BlockLowerer, CompileError, HandlerKind, LogLevel, NoExternals, Program, Trigger};
-use puzzlebox_storage::{ProgramRecord, RunRecord, Store, now_ms};
+use puzzlebox_storage::{LogRecord, ProgramRecord, RunRecord, Store, now_ms};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -141,6 +141,16 @@ pub struct LogEntry {
 /// Log lines kept per program.
 const LOG_KEPT: usize = 200;
 
+/// How long new log lines wait to be written, so a burst of them is one write.
+const LOG_FLUSH_DELAY: Duration = Duration::from_secs(2);
+
+/// How often the recycle bin is emptied of programs past `BIN_DAYS`.
+const PURGE_EVERY: Duration = Duration::from_secs(24 * 3600);
+
+/// Untouched "New program"s younger than this survive a periodic purge, since the editor may
+/// still have one open.
+const STRAY_GRACE_MS: i64 = 24 * 3600 * 1000;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EngineEvent {
@@ -229,6 +239,28 @@ struct RunningProgram {
 struct Dispatch {
     handler: usize,
     trigger: Value,
+    /// Set by "run program … and wait": told when the run starts and how it ended. Dropped
+    /// unused when the run is skipped (run mode).
+    waiter: Option<RunWaiter>,
+}
+
+struct RunWaiter {
+    started: tokio::sync::oneshot::Sender<CancellationToken>,
+    finished: tokio::sync::oneshot::Sender<(String, Option<String>)>,
+}
+
+/// How deep programs may start each other ("run program"), so a loop ends.
+const MAX_PROGRAM_DEPTH: u64 = 10;
+
+/// Cancels the run it holds when dropped, i.e. when the run waiting for it is stopped.
+struct CancelOnDrop(Option<CancellationToken>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        if let Some(t) = self.0.take() {
+            t.cancel();
+        }
+    }
 }
 
 /// Timers are kept in the store so they still go off after a restart. One worker applies the
@@ -301,6 +333,10 @@ pub(crate) struct Inner {
     /// Run id → why it was stopped, until the run has finished.
     stop_reasons: Mutex<HashMap<String, StopReason>>,
     timer_store: mpsc::UnboundedSender<TimerOp>,
+    /// Log lines not yet written to the store.
+    log_pending: Mutex<Vec<LogRecord>>,
+    log_flush_scheduled: AtomicBool,
+    log_writing: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -319,6 +355,15 @@ fn new_id() -> String {
 impl Engine {
     pub async fn new(ha: Arc<dyn HaApi>, store: Store) -> anyhow::Result<Self> {
         let globals = store.kv_all("global").await?;
+        let mut logs: HashMap<String, VecDeque<LogEntry>> = HashMap::new();
+        for r in store.all_logs().await? {
+            let Ok(level) = serde_json::from_value(Value::String(r.level)) else { continue };
+            let log = logs.entry(r.program_id).or_default();
+            if log.len() >= LOG_KEPT {
+                log.pop_front();
+            }
+            log.push_back(LogEntry { ts: r.ts, level, message: r.message, run_id: r.run_id });
+        }
         let (events, _) = broadcast::channel(1024);
         let (timer_store, timer_rx) = mpsc::unbounded_channel();
         tokio::spawn(timer_worker(store.clone(), timer_rx));
@@ -336,9 +381,12 @@ impl Engine {
                 sources: TriggerSources::default(),
                 debugger: Debugger::default(),
                 active: Mutex::new(HashMap::new()),
-                logs: Mutex::new(HashMap::new()),
                 stop_reasons: Mutex::new(HashMap::new()),
                 timer_store,
+                logs: Mutex::new(logs),
+                log_pending: Mutex::new(Vec::new()),
+                log_flush_scheduled: AtomicBool::new(false),
+                log_writing: tokio::sync::Mutex::new(()),
             }),
         })
     }
@@ -408,11 +456,7 @@ impl Engine {
     }
 
     pub async fn load_all(&self) -> anyhow::Result<()> {
-        match self.inner.store.purge_old().await {
-            Ok(0) => {}
-            Ok(n) => info!("removed {n} programs from the recycle bin or never used"),
-            Err(e) => warn!(error = %e, "failed to empty the recycle bin"),
-        }
+        self.purge_old(0).await;
         for p in self.inner.store.list_programs().await? {
             // Saved (and so started) while Puzzlebox was starting up.
             if self.status(&p.id).is_some() {
@@ -421,6 +465,52 @@ impl Engine {
             self.start(&p, StopReason::Startup).await;
         }
         Ok(())
+    }
+
+    /// Empties the recycle bin of old programs (see `Store::purge_old`), stopping and
+    /// forgetting any that were still loaded. Returns how many were removed.
+    pub async fn purge_old(&self, strays_after_ms: i64) -> usize {
+        let ids = match self.inner.store.purge_old(strays_after_ms).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(error = %e, "failed to empty the recycle bin");
+                return 0;
+            }
+        };
+        for id in &ids {
+            self.stop_program(id, StopReason::Deleted);
+            lock(&self.inner.status).remove(id);
+            lock(&self.inner.logs).remove(id);
+            let _ = self.inner.events.send(EngineEvent::Removed { program_id: id.clone() });
+        }
+        if !ids.is_empty() {
+            info!("removed {} programs from the recycle bin or never used", ids.len());
+        }
+        ids.len()
+    }
+
+    /// Runs `purge_old` once a day in the background.
+    pub fn spawn_housekeeping(&self) -> JoinHandle<()> {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(PURGE_EVERY);
+            every.tick().await;
+            loop {
+                every.tick().await;
+                engine.purge_old(STRAY_GRACE_MS).await;
+            }
+        })
+    }
+
+    /// Writes log lines still waiting to the store; call before shutting down.
+    pub async fn flush_log(&self) {
+        // One write at a time, so lines reach the store in order.
+        let _writing = self.inner.log_writing.lock().await;
+        self.inner.log_flush_scheduled.store(false, Ordering::SeqCst);
+        let lines = std::mem::take(&mut *lock(&self.inner.log_pending));
+        if let Err(e) = self.inner.store.append_log(lines, LOG_KEPT).await {
+            warn!(error = %e, "failed to save program logs");
+        }
     }
 
     /// Swaps the block lowerer and restarts programs that failed to compile, since
@@ -476,6 +566,7 @@ impl Engine {
     /// Deletes a program in the recycle bin for good.
     pub async fn purge(&self, id: &str) -> anyhow::Result<bool> {
         lock(&self.inner.logs).remove(id);
+        lock(&self.inner.log_pending).retain(|l| l.program_id != id);
         self.inner.store.purge_program(id).await
     }
 
@@ -523,6 +614,25 @@ impl Engine {
                 run_id: run_id.map(str::to_owned),
             });
         }
+        lock(&self.inner.log_pending).push(LogRecord {
+            program_id: program_id.to_owned(),
+            ts,
+            level: serde_json::to_value(level)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            message: message.to_owned(),
+            run_id: run_id.map(str::to_owned),
+        });
+        if !self.inner.log_flush_scheduled.swap(true, Ordering::SeqCst)
+            && let Ok(rt) = tokio::runtime::Handle::try_current()
+        {
+            let engine = self.clone();
+            rt.spawn(async move {
+                tokio::time::sleep(LOG_FLUSH_DELAY).await;
+                engine.flush_log().await;
+            });
+        }
         let _ = self.inner.events.send(EngineEvent::Log {
             program_id: program_id.to_owned(),
             run_id: run_id.unwrap_or_default().to_owned(),
@@ -562,7 +672,7 @@ impl Engine {
         });
         let Some((handler, t)) = found else { return false };
         let trigger = crate::describe::simulate(t, self.inner.ha.as_ref());
-        rp.tx.send(Dispatch { handler, trigger }).is_ok()
+        rp.tx.send(Dispatch { handler, trigger, waiter: None }).is_ok()
     }
 
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<Option<ProgramRecord>> {
@@ -589,6 +699,27 @@ impl Engine {
                 self.inner.store.kv_set("global", name, &value).await?;
                 lock(&self.inner.globals).insert(name.to_owned(), value.clone());
                 let _ = self.inner.events.send(EngineEvent::GlobalChanged { name: name.to_owned(), value });
+            }
+        }
+        Ok(())
+    }
+
+    /// Forgets a persistent variable; programs read it as empty until they set it again.
+    pub async fn delete_variable(&self, program_id: Option<&str>, name: &str) -> anyhow::Result<()> {
+        match program_id {
+            Some(id) => {
+                self.inner.store.kv_delete(&format!("program:{id}"), name).await?;
+                if let Some(rp) = lock(&self.inner.running).get(id) {
+                    lock(&rp.program_vars).remove(name);
+                }
+            }
+            None => {
+                self.inner.store.kv_delete("global", name).await?;
+                lock(&self.inner.globals).remove(name);
+                let _ = self
+                    .inner
+                    .events
+                    .send(EngineEvent::GlobalChanged { name: name.to_owned(), value: Value::Null });
             }
         }
         Ok(())
@@ -699,6 +830,7 @@ impl Engine {
             .send(Dispatch {
                 handler: handler.unwrap_or(0),
                 trigger: trigger.unwrap_or_else(|| json!({"platform": "manual"})),
+                waiter: None,
             })
             .is_ok()
     }
@@ -738,7 +870,7 @@ impl Engine {
             tokio::time::sleep(wait).await;
             lock(&timers_ref).remove(&key);
             let _ = store.send(TimerOp::Delete { program, name: key });
-            let _ = tx.send(Dispatch { handler: idx, trigger });
+            let _ = tx.send(Dispatch { handler: idx, trigger, waiter: None });
         });
         if let Some(old) = lock(timers).insert(name.to_owned(), TimerEntry { task, due }) {
             old.task.abort();
@@ -878,7 +1010,7 @@ impl Engine {
                             let tx = tx.clone();
                             tasks.push(tokio::spawn(async move {
                                 while let Some(t) = stream.next().await {
-                                    if tx.send(Dispatch { handler: idx, trigger: t }).is_err() {
+                                    if tx.send(Dispatch { handler: idx, trigger: t, waiter: None }).is_err() {
                                         break;
                                     }
                                 }
@@ -894,7 +1026,7 @@ impl Engine {
                             if let Some(o) = t.as_object_mut() {
                                 o.entry("id").or_insert_with(|| json!(trigger_id));
                             }
-                            tx.send(Dispatch { handler: idx, trigger: t }).is_ok()
+                            tx.send(Dispatch { handler: idx, trigger: t, waiter: None }).is_ok()
                         });
                         if let Err(e) = self.inner.sources.register(&rec.id, other, sink) {
                             errors.push(CompileError { block_id: Some(other.block_id().into()), message: e });
@@ -918,7 +1050,8 @@ impl Engine {
 
         for (idx, h) in program.handlers.iter().enumerate() {
             if matches!(h.kind, HandlerKind::OnStart) {
-                let _ = tx.send(Dispatch { handler: idx, trigger: json!({"platform": "start"}) });
+                let _ =
+                    tx.send(Dispatch { handler: idx, trigger: json!({"platform": "start"}), waiter: None });
             }
         }
 
@@ -1028,10 +1161,14 @@ impl DispatchCtx {
         );
     }
 
-    fn spawn_run(&self, d: Dispatch) -> JoinHandle<()> {
+    fn spawn_run(&self, mut d: Dispatch) -> JoinHandle<()> {
         let run_id = new_id();
         let token = CancellationToken::new();
         lock(&self.runs).insert(run_id.clone(), token.clone());
+        let finished = d.waiter.take().map(|w| {
+            let _ = w.started.send(token.clone());
+            w.finished
+        });
         let this = self.clone();
         let engine = self.engine.clone();
         engine.update_status(&self.program_id, |s| {
@@ -1145,6 +1282,9 @@ impl DispatchCtx {
                     s.last_error = Some(e.clone());
                 }
             });
+            if let Some(f) = finished {
+                let _ = f.send((status.to_owned(), error.clone()));
+            }
             let _ = inner.events.send(EngineEvent::RunFinished {
                 program_id: this.program_id.clone(),
                 run_id,
@@ -1204,6 +1344,100 @@ impl RunHooks for EngineHooks {
             Ok(())
         });
         started.unwrap_or(Err("the program is not running".into()))
+    }
+
+    async fn run_program(
+        &self,
+        ctx: &RunCtx,
+        block: &str,
+        program_id: &str,
+        wait: bool,
+    ) -> Result<(), String> {
+        let inner = &self.engine.inner;
+        let caller = &ctx.trigger;
+        let from_program = caller["platform"] == "program";
+        let depth = if from_program { caller["depth"].as_u64().unwrap_or(0) } else { 0 };
+        if depth >= MAX_PROGRAM_DEPTH {
+            return Err(format!(
+                "programs started each other more than {MAX_PROGRAM_DEPTH} deep; check for programs that start each other in a loop"
+            ));
+        }
+        let Some(rec) = inner.store.get_program(program_id).await.map_err(|e| e.to_string())? else {
+            return Err("the program to run was deleted; choose another one".into());
+        };
+        let name = &rec.name;
+        // Programs waiting for this run, so waiting in a circle fails instead of hanging.
+        let mut waiting: Vec<Value> =
+            if from_program { caller["waiting"].as_array().cloned().unwrap_or_default() } else { vec![] };
+        if wait {
+            if program_id == ctx.program_id || waiting.iter().any(|w| w == program_id) {
+                return Err(format!(
+                    "“{name}” is waiting for this run already, so it can't wait for “{name}” in turn"
+                ));
+            }
+            waiting.push(json!(ctx.program_id));
+        } else {
+            waiting.clear();
+        }
+        let trigger = json!({
+            "platform": "program",
+            "program_id": ctx.program_id,
+            "run_id": ctx.run_id,
+            "depth": depth + 1,
+            "waiting": waiting,
+        });
+        let (tx, handler) = {
+            let running = lock(&inner.running);
+            match running.get(program_id) {
+                // Its "when run" blocks, as the Run button and run_program in Home Assistant.
+                Some(rp) => {
+                    let handlers = &rp.program.handlers;
+                    let on_run = handlers.iter().position(
+                        |h| matches!(&h.kind, HandlerKind::Triggers { triggers } if triggers.is_empty()),
+                    );
+                    let first_when =
+                        handlers.iter().position(|h| matches!(h.kind, HandlerKind::Triggers { .. }));
+                    (rp.tx.clone(), on_run.or(first_when).unwrap_or(0))
+                }
+                None if !rec.enabled => return Err(format!("“{name}” is turned off")),
+                None => return Err(format!("“{name}” can't run: it has problems to fix first")),
+            }
+        };
+        if !wait {
+            return tx
+                .send(Dispatch { handler, trigger, waiter: None })
+                .map_err(|_| format!("“{name}” is restarting; try again"));
+        }
+        let (started_tx, started) = tokio::sync::oneshot::channel();
+        let (finished_tx, finished) = tokio::sync::oneshot::channel();
+        let waiter = Some(RunWaiter { started: started_tx, finished: finished_tx });
+        tx.send(Dispatch { handler, trigger, waiter })
+            .map_err(|_| format!("“{name}” is restarting; try again"))?;
+        ctx.waiting(block, format!("waiting for “{name}” to finish"), None);
+        let Ok(token) = started.await else {
+            ctx.waited(block, format!("“{name}” didn't start"));
+            return Err(format!(
+                "“{name}” didn't start: it is already running and its run mode doesn't start another run"
+            ));
+        };
+        // Stopping this run stops the one it waits for.
+        let mut guard = CancelOnDrop(Some(token));
+        let outcome = finished.await;
+        guard.0 = None;
+        match outcome {
+            Ok((status, _)) if status == "ok" => {
+                ctx.waited(block, format!("“{name}” finished"));
+                Ok(())
+            }
+            Ok((status, error)) if status == "error" => {
+                ctx.waited(block, format!("“{name}” failed"));
+                Err(format!("“{name}” failed: {}", error.unwrap_or_default()))
+            }
+            _ => {
+                ctx.waited(block, format!("“{name}” was stopped"));
+                Err(format!("“{name}” was stopped before it finished"))
+            }
+        }
     }
 
     fn timer_cancel(&self, ctx: &RunCtx, name: &str) {

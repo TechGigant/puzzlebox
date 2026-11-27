@@ -236,7 +236,10 @@ export class FieldEntity extends FieldSuggest {
     return [...this.areaSuggestions(matching, where, domains, deviceClasses).filter((a) => hit(a.label.toLowerCase())), ...entities];
   }
 
-  /** "All lights in Kitchen", for areas that have any of the entities this slot takes. */
+  /** "All lights in Kitchen", for areas that have any of the entities this slot takes. With
+   * device classes ("All motion sensors in Kitchen") it is what HA does too: checked on HA
+   * 2026.11, `motion.detected` and `motion.is_detected` with `target: {area_id}` ignore the
+   * area's other binary sensors. */
   private areaSuggestions(matching: EntityState[], where: Map<string, Place>, domains: string[], deviceClasses: string[]): Suggestion[] {
     const counts = new Map<string, number>();
     for (const s of matching) {

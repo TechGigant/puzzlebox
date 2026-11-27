@@ -10,7 +10,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import config_validation as cv, device_registry as dr, entity_registry as er
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.loader import async_get_integration
@@ -23,7 +23,18 @@ PLATFORMS = [Platform.SWITCH, Platform.BUTTON, Platform.SENSOR]
 
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
-RUN_SCHEMA = vol.Schema({vol.Required("program"): cv.string, vol.Optional("variables"): dict})
+RUN_SCHEMA = vol.All(
+    vol.Schema(
+        {
+            vol.Optional("program"): cv.string,
+            vol.Optional("variables"): dict,
+            **cv.ENTITY_SERVICE_FIELDS,
+        }
+    ),
+    cv.has_at_least_one_key("program", "entity_id", "device_id"),
+)
+# Unique id suffixes of the per-program entities (see entity.py).
+PROGRAM_ENTITY_KEYS = ("_enabled", "_run", "_status")
 SET_VAR_SCHEMA = vol.Schema(
     {vol.Required("name"): cv.string, vol.Required("value"): object, vol.Optional("program"): cv.string}
 )
@@ -43,10 +54,39 @@ def _program_id(client: BridgeClient, program: str) -> str:
     return pid
 
 
+def _target_program_ids(hass: HomeAssistant, client: BridgeClient, call: ServiceCall) -> list[str]:
+    """Programs chosen by their switch, button or status entity, or by their device."""
+    ids: list[str] = []
+    ent_reg = er.async_get(hass)
+    for entity_id in cv.ensure_list(call.data.get("entity_id")):
+        entry = ent_reg.async_get(entity_id)
+        pid = None
+        if entry and entry.platform == DOMAIN:
+            pid = next(
+                (entry.unique_id.removesuffix(k) for k in PROGRAM_ENTITY_KEYS if entry.unique_id.endswith(k)),
+                None,
+            )
+        if pid is None or pid not in client.programs:
+            raise HomeAssistantError(f"{entity_id} isn't a Puzzlebox program's switch or button")
+        ids.append(pid)
+    dev_reg = dr.async_get(hass)
+    for device_id in cv.ensure_list(call.data.get("device_id")):
+        device = dev_reg.async_get(device_id)
+        pid = next((i for d, i in device.identifiers if d == DOMAIN), None) if device else None
+        if pid is None or pid not in client.programs:
+            raise HomeAssistantError("That device isn't a Puzzlebox program")
+        ids.append(pid)
+    return ids
+
+
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     async def run_program(call: ServiceCall) -> None:
         client = _client(hass)
-        await client.async_run(_program_id(client, call.data["program"]), call.data.get("variables"))
+        ids = _target_program_ids(hass, client, call)
+        if program := call.data.get("program"):
+            ids.append(_program_id(client, program))
+        for pid in dict.fromkeys(ids):
+            await client.async_run(pid, call.data.get("variables"))
 
     async def set_variable(call: ServiceCall) -> None:
         client = _client(hass)

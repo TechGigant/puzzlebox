@@ -13,6 +13,8 @@ mod conditions;
 mod everyday;
 #[path = "compile_helpers.rs"]
 mod helpers;
+#[path = "compile_more.rs"]
+mod more;
 #[path = "compile_triggers.rs"]
 mod triggers;
 #[path = "compile_values.rs"]
@@ -342,6 +344,9 @@ fn stmt_exprs(s: &Stmt, f: &mut dyn FnMut(&Expr)) {
         StmtKind::WaitUntil { cond, hold, timeout, .. } => {
             e(cond, f);
             hold.iter().chain(timeout.iter()).for_each(|x| e(x, f));
+        }
+        StmtKind::Fade { target, from, to, seconds } => {
+            [target, from, to, seconds].into_iter().for_each(|x| e(x, f));
         }
         _ => {}
     }
@@ -1028,6 +1033,9 @@ impl<'a> Compiler<'a> {
                 if let Some(k) = self.everyday_stmt(&b) {
                     return Some(k);
                 }
+                if let Some(k) = self.more_stmt(&b) {
+                    return Some(k);
+                }
                 let ext = self.ext;
                 if let Some(k) = ext.lower_stmt(b, self) {
                     return Some(k);
@@ -1588,6 +1596,9 @@ impl<'a> Compiler<'a> {
                     return k;
                 }
                 if let Some(k) = self.everyday_expr(b) {
+                    return k;
+                }
+                if let Some(k) = self.more_expr(b) {
                     return k;
                 }
                 if let Some(k) = self.ha_value_expr(b) {

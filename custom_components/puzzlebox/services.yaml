@@ -1,7 +1,12 @@
 run_program:
+  target:
+    entity:
+      integration: puzzlebox
+      domain:
+        - switch
+        - button
   fields:
     program:
-      required: true
       example: "Motion light"
       selector:
         text:

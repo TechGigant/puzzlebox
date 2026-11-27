@@ -4,7 +4,11 @@ vi.mock('../blocks/dynamic', () => ({
   blockDef: (type: string) =>
     type === 'ha_svc__light__turn_on'
       ? { params: [{ name: 'rgb_color', input: 'color' }, { name: 'transition', input: 'duration' }] }
-      : undefined,
+      : type === 'z2m__zigbee2mqtt__0x000d6ffffe112233__set'
+        ? { params: [{ name: 'brightness_percent', input: 'number' }, { name: 'color_temp_kelvin', input: 'number' }] }
+        : type === 'z2m__zigbee2mqtt__0x01__set'
+          ? { params: [{ name: 'brightness', input: 'number' }] }
+          : undefined,
   secondsParam: (p: { input: string }) => p.input === 'duration',
   durationShadow: (n: number) => ({ type: 'duration', fields: { UNIT: 'seconds' }, inputs: { N: { shadow: { type: 'math_number', fields: { NUM: n } } } } }),
 }));
@@ -61,6 +65,37 @@ describe('Zigbee2MQTT group units', () => {
     expect(g.inputs.P_brightness_percent.shadow?.fields.NUM).toBe(100);
     expect(g.inputs.P_color_temp_kelvin.block?.type).toBe('math_arithmetic');
     expect(g.inputs.P_brightness).toBeUndefined();
+  });
+
+  it('converts device brightness to % (exactly) and white temperature to K', () => {
+    type Out = { blocks: { blocks: { extraState: { optional: string[] }; inputs: Record<string, { shadow?: { fields: { NUM: number } }; block?: { type: string } }> }[] } };
+    const out = migrateWorkspace(
+      ws(
+        {
+          type: 'z2m__zigbee2mqtt__0x000d6ffffe112233__set',
+          fields: { P_state: 'ON' },
+          extraState: { optional: ['brightness', 'color_temp'] },
+          inputs: {
+            P_brightness: { shadow: { type: 'math_number', fields: { NUM: 128 } } },
+            P_color_temp: { shadow: { type: 'math_number', fields: { NUM: 370 } } },
+          },
+        },
+        {
+          type: 'z2m__zigbee2mqtt__0x000d6ffffe112233__set',
+          inputs: { P_brightness: { block: { type: 'variables_get', fields: { VAR: { id: 'v' } } } } },
+        },
+        // A device whose brightness isn't 0–254 keeps it.
+        { type: 'z2m__zigbee2mqtt__0x01__set', inputs: { P_brightness: { shadow: { type: 'math_number', fields: { NUM: 7 } } } } },
+      ),
+    ) as Out;
+    const [d, calc, other] = out.blocks.blocks;
+    expect(d.extraState.optional).toEqual(['brightness_percent', 'color_temp_kelvin']);
+    expect(d.inputs.P_brightness_percent.shadow?.fields.NUM).toBe(50.39);
+    expect(Math.round(50.39 * 2.54)).toBe(128);
+    expect(d.inputs.P_color_temp_kelvin.shadow?.fields.NUM).toBe(2703);
+    expect(d.inputs.P_brightness).toBeUndefined();
+    expect(calc.inputs.P_brightness_percent.block?.type).toBe('math_arithmetic');
+    expect(other.inputs.P_brightness.shadow?.fields.NUM).toBe(7);
   });
 
   it('gives older triggers the new duration sockets, set to nothing', () => {

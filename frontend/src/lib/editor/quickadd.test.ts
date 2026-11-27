@@ -2,7 +2,7 @@
 import * as Blockly from 'blockly/core';
 import 'blockly/blocks';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { attach, intoEmptyWhen, search, toolboxEntries, wantFor, type Entry } from './quickadd';
+import { attach, freeSpot, intoEmptyWhen, search, toolboxEntries, wantFor, type Entry } from './quickadd';
 import { registerCoreBlocks } from '../blocks/core';
 import { registerConditionBlocks } from '../blocks/conditions';
 import { registerHelperBlocks } from '../blocks/helpers';
@@ -159,5 +159,29 @@ describe('quick add placement', () => {
     expect(attach(cmp, m)).toBe(true);
     expect(cmp.getInputTargetBlock('B')).toBe(m);
     expect(attach(cmp, make(ws, { type: 'math_number' }))).toBe(false);
+  });
+});
+
+describe('free spot', () => {
+  const box = (left: number, top: number, w: number, h: number) => ({ left, top, right: left + w, bottom: top + h });
+  const xy = (c: Blockly.utils.Coordinate) => [c.x, c.y];
+
+  it('is the mouse when nothing is there', () => {
+    expect(xy(freeSpot([box(0, 0, 100, 50)], 80, 40, { x: 300, y: 300 }))).toEqual([300, 300]);
+  });
+
+  it('is next to the block under the mouse, on the nearer side', () => {
+    // A wide, short block: going below it is shorter than going round it.
+    expect(xy(freeSpot([box(0, 0, 400, 60)], 80, 40, { x: 150, y: 10 }))).toEqual([150, 80]);
+    // A tall, narrow one: going right is shorter.
+    expect(xy(freeSpot([box(0, 0, 100, 600)], 80, 40, { x: 70, y: 300 }))).toEqual([120, 300]);
+  });
+
+  it('avoids the neighbours of that spot too', () => {
+    const taken = [box(0, 0, 400, 60), box(0, 70, 400, 60)];
+    // Below the first is taken by the second, so above it is nearest.
+    const at = freeSpot(taken, 80, 40, { x: 150, y: 10 });
+    expect(taken.every((r) => at.y >= r.bottom || at.y + 40 <= r.top || at.x >= r.right || at.x + 80 <= r.left)).toBe(true);
+    expect(xy(at)).toEqual([150, -60]);
   });
 });

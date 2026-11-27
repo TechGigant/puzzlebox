@@ -122,6 +122,16 @@ pub trait RunHooks: Send + Sync {
         Err("timers are not available".into())
     }
     fn timer_cancel(&self, _ctx: &RunCtx, _name: &str) {}
+    /// "run program": starts another program and, with `wait`, waits for that run to end.
+    async fn run_program(
+        &self,
+        _ctx: &RunCtx,
+        _block: &str,
+        _program_id: &str,
+        _wait: bool,
+    ) -> Result<(), String> {
+        Err("running other programs is not available here".into())
+    }
     fn timer_running(&self, _ctx: &RunCtx, _name: &str) -> bool {
         false
     }
@@ -153,6 +163,9 @@ pub trait HttpClient: Send + Sync {
         headers: Option<Value>,
     ) -> Result<Value, String>;
 }
+
+#[path = "fade.rs"]
+mod fade;
 
 pub struct RunCtx {
     pub program_id: String,
@@ -309,12 +322,12 @@ impl RunCtx {
         }
     }
 
-    fn waiting(&self, block: &str, text: String, timeout: Option<f64>) {
+    pub(crate) fn waiting(&self, block: &str, text: String, timeout: Option<f64>) {
         let until = timeout.map(|t| puzzlebox_storage::now_ms() + (t * 1000.0) as i64);
         self.hooks.on_wait(self, Some(Waiting { block_id: block.to_owned(), text, until }));
     }
 
-    fn waited(&self, block: &str, note: String) {
+    pub(crate) fn waited(&self, block: &str, note: String) {
         self.hooks.on_wait(self, None);
         self.note(block, note);
     }
@@ -522,6 +535,17 @@ impl RunCtx {
                     },
                     None => None,
                 };
+                // HA only logs a warning and keeps the user's scene, so restoring would
+                // silently turn that one on instead.
+                if service == "scene.create"
+                    && let Some(scene_id) = data.as_ref().and_then(|d| d["scene_id"].as_str())
+                    && self
+                        .ha
+                        .state(&format!("scene.{scene_id}"))
+                        .is_some_and(|s| crate::ha::scene_taken(&s, scene_id))
+                {
+                    return Err(RunError::at(id, format!("The scene scene.{scene_id} already exists")));
+                }
                 let resp = self
                     .ha
                     .call_service_checked(service, data, target, response_var.is_some())
@@ -667,6 +691,12 @@ impl RunCtx {
                 Err(e) if e.kind == ErrorKind::Error && skips(&e, body) => self.error_skipped(&e),
                 other => return other,
             },
+            StmtKind::RunProgram { program, wait } => {
+                self.hooks.run_program(self, id, program, *wait).await.at(id)?;
+            }
+            StmtKind::Fade { target, from, to, seconds } => {
+                self.fade(frame, id, target, from, to, seconds).await?
+            }
         }
         Ok(Flow::Normal)
     }

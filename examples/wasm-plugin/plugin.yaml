@@ -19,5 +19,5 @@ blocks:
     kind: action
     title: turn on light if dark
     params:
-      - {name: light, label: light, required: true, input: entity, domains: [light], default: light.porch}
+      - {name: light, label: light, required: true, input: entity, domains: [light]}
     lowering: {type: plugin, plugin: example_wasm, function: light_when_dark}

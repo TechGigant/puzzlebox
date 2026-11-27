@@ -18,7 +18,7 @@ pub const MIN_PEER_PROTOCOL: u32 = 1;
 /// change; add a feature when adding a message kind.
 pub fn features() -> BTreeMap<String, u32> {
     [
-        ("programs", 1),   // program list, enable/disable, run, set_variable
+        ("programs", 2),   // program list, enable/disable, run, set_variable; 2: activity, failures
         ("run_events", 1), // run_started / run_finished
         ("webhooks", 1),   // webhook ids for the integration to register
         ("packs", 1),      // blocks and handlers registered by integrations (invoke)
@@ -137,6 +137,8 @@ mod tests {
         assert!(p.compatible());
         assert_eq!(p.outdated(), Some("integration"));
         assert_eq!(p.shared("variables"), Some(1));
+        assert_eq!(p.shared("programs"), Some(1));
+        assert!(p.missing().contains(&"programs".to_owned()));
     }
 
     #[test]
@@ -154,11 +156,11 @@ mod tests {
     fn newer_integration_and_incompatible_protocols() {
         let newer = Peer::from_hello(&json!({
             "protocol": PROTOCOL + 1, "min_protocol": PROTOCOL, "integration_version": "99.0.0",
-            "features": {"programs": 2, "teleport": 1},
+            "features": {"programs": 3, "teleport": 1},
         }));
         assert!(newer.compatible());
         assert_eq!(newer.outdated(), Some("app"));
-        assert_eq!(newer.shared("programs"), Some(1));
+        assert_eq!(newer.shared("programs"), Some(2));
         assert_eq!(newer.shared("teleport"), None);
         assert!(newer.missing().contains(&"variables".to_owned()));
 

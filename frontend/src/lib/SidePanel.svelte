@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, events, type ActiveRun, type CompileError, type LogEntry, type RunRecord } from './api';
+  import { formatTime } from './locale';
   import { activity, triggerSummary } from './runs';
   import { plainError } from './ha_errors';
 
@@ -83,7 +84,7 @@
   const STATUS: Record<string, string> = { ok: 'done', error: 'failed', cancelled: 'stopped', running: 'running' };
 
   function fmtTime(ms: number) {
-    return new Date(ms).toLocaleTimeString();
+    return formatTime(ms);
   }
 
   function fmtValue(v: unknown) {

@@ -59,6 +59,20 @@ ALTER TABLE programs ADD COLUMN deleted_at INTEGER;
 ALTER TABLE programs ADD COLUMN labels TEXT NOT NULL DEFAULT '{}';
 ALTER TABLE runs ADD COLUMN summary TEXT;
 "#,
+    r#"
+CREATE TABLE program_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    program_id  TEXT NOT NULL,
+    ts          INTEGER NOT NULL,
+    level       TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    run_id      TEXT
+);
+CREATE INDEX log_by_program ON program_log(program_id, id DESC);
+"#,
+    r#"
+ALTER TABLE program_versions ADD COLUMN mode TEXT;
+"#,
 ];
 
 /// Days a deleted program stays in the recycle bin.
@@ -91,6 +105,9 @@ pub struct ProgramVersion {
     pub id: i64,
     pub saved_at: i64,
     pub name: String,
+    /// Run mode when it was saved; `None` for versions saved before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     /// Blocks in this version, not counting shadows.
     #[serde(default)]
     pub blocks: usize,
@@ -115,6 +132,16 @@ pub struct RunRecord {
     /// What started it, in words ("Movement turned on").
     #[serde(default)]
     pub summary: Option<String>,
+}
+
+/// A line of a program's log.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LogRecord {
+    pub program_id: String,
+    pub ts: i64,
+    pub level: String,
+    pub message: String,
+    pub run_id: Option<String>,
 }
 
 /// A program in the recycle bin.
@@ -242,19 +269,22 @@ impl Store {
                     p.folder
                 ],
             )?;
-            // A restore point for every save that changed the blocks.
+            // A restore point for every save that changed the blocks, the name or the run mode.
             let ws = p.workspace.to_string();
-            let last: Option<String> = c
+            let last: Option<(String, String, Option<String>)> = c
                 .query_row(
-                    "SELECT workspace FROM program_versions WHERE program_id = ?1 ORDER BY id DESC LIMIT 1",
+                    "SELECT workspace, name, mode FROM program_versions WHERE program_id = ?1 ORDER BY id DESC LIMIT 1",
                     [&p.id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
-            if last.as_deref() != Some(ws.as_str()) {
+            let unchanged = last.as_ref().is_some_and(|(w, name, mode)| {
+                *w == ws && *name == p.name && mode.as_deref().is_none_or(|m| m == p.mode)
+            });
+            if !unchanged {
                 c.execute(
-                    "INSERT INTO program_versions (program_id, saved_at, name, workspace) VALUES (?1, ?2, ?3, ?4)",
-                    params![p.id, p.updated_at, p.name, ws],
+                    "INSERT INTO program_versions (program_id, saved_at, name, workspace, mode) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![p.id, p.updated_at, p.name, ws, p.mode],
                 )?;
                 c.execute(
                     "DELETE FROM program_versions WHERE program_id = ?1 AND id NOT IN
@@ -272,29 +302,44 @@ impl Store {
         let id = program_id.to_owned();
         self.with(move |c| {
             let mut st = c.prepare(
-                "SELECT id, saved_at, name, workspace FROM program_versions WHERE program_id = ?1 ORDER BY id",
+                "SELECT id, saved_at, name, workspace, mode FROM program_versions WHERE program_id = ?1 ORDER BY id",
             )?;
             let rows = st.query_map([id], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
             })?;
             let mut out = Vec::new();
-            let mut prev: Option<(BTreeMap<String, Value>, String)> = None;
+            let mut prev: Option<(BTreeMap<String, Value>, String, Option<String>)> = None;
             for row in rows {
-                let (id, saved_at, name, ws) = row?;
+                let (id, saved_at, name, ws, mode) = row?;
                 let blocks = block_map(&from_str_deep(&ws).unwrap_or(Value::Null));
                 let changes = match &prev {
                     None => "first save".to_owned(),
-                    Some((before, before_name)) => describe_changes(before, &blocks, before_name, &name),
+                    Some((before, before_name, before_mode)) => {
+                        let text = describe_changes(before, &blocks, before_name, &name);
+                        let mode_changed = before_mode.is_some() && mode.is_some() && *before_mode != mode;
+                        match (mode_changed, *before == blocks && before_name == &name) {
+                            (false, _) => text,
+                            (true, true) => "run mode changed".to_owned(),
+                            (true, false) => format!("{text}, run mode changed"),
+                        }
+                    }
                 };
                 out.push(ProgramVersion {
                     id,
                     saved_at,
                     name: name.clone(),
+                    mode: mode.clone(),
                     blocks: blocks.len(),
                     changes,
                     workspace: None,
                 });
-                prev = Some((blocks, name));
+                prev = Some((blocks, name, mode.clone()));
             }
             out.reverse();
             Ok(out)
@@ -306,7 +351,7 @@ impl Store {
         let id = program_id.to_owned();
         self.with(move |c| {
             Ok(c.query_row(
-                "SELECT id, saved_at, name, workspace FROM program_versions WHERE program_id = ?1 AND id = ?2",
+                "SELECT id, saved_at, name, workspace, mode FROM program_versions WHERE program_id = ?1 AND id = ?2",
                 params![id, version],
                 |r| {
                     let ws: String = r.get(3)?;
@@ -315,6 +360,7 @@ impl Store {
                         id: r.get(0)?,
                         saved_at: r.get(1)?,
                         name: r.get(2)?,
+                        mode: r.get(4)?,
                         blocks: workspace.as_ref().map(|w| block_map(w).len()).unwrap_or_default(),
                         changes: String::new(),
                         workspace,
@@ -394,10 +440,11 @@ impl Store {
 
     /// Empties the bin of programs deleted more than `BIN_DAYS` ago, and drops the stray
     /// "New program"s older versions created on every click (still named so, no blocks, never
-    /// saved again, never run).
-    pub async fn purge_old(&self) -> Result<usize> {
-        self.with(|c| {
-            let cutoff = now_ms() - BIN_DAYS * 24 * 3600 * 1000;
+    /// saved again, never run) created more than `strays_after_ms` ago. Returns the ids removed.
+    pub async fn purge_old(&self, strays_after_ms: i64) -> Result<Vec<String>> {
+        self.with(move |c| {
+            let now = now_ms();
+            let cutoff = now - BIN_DAYS * 24 * 3600 * 1000;
             let mut ids: Vec<String> = {
                 let mut st =
                     c.prepare("SELECT id FROM programs WHERE deleted_at IS NOT NULL AND deleted_at < ?1")?;
@@ -406,10 +453,12 @@ impl Store {
             {
                 let mut st = c.prepare(
                     "SELECT id, workspace FROM programs p WHERE created_at = updated_at AND description = ''
-                     AND name = 'New program' AND deleted_at IS NULL
+                     AND name = 'New program' AND deleted_at IS NULL AND created_at <= ?1
                      AND NOT EXISTS (SELECT 1 FROM runs WHERE program_id = p.id)",
                 )?;
-                let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                let rows = st.query_map([now - strays_after_ms], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?;
                 for row in rows {
                     let (id, ws) = row?;
                     // A workspace that doesn't parse isn't known to be empty.
@@ -424,7 +473,58 @@ impl Store {
                 purge_rest(&tx, id)?;
             }
             tx.commit()?;
-            Ok(ids.len())
+            Ok(ids)
+        })
+        .await
+    }
+
+    /// Appends log lines and keeps only the newest `keep` per program. Lines of programs that
+    /// no longer exist (purged meanwhile) are dropped.
+    pub async fn append_log(&self, lines: Vec<LogRecord>, keep: usize) -> Result<()> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+        self.with(move |c| {
+            let tx = c.transaction()?;
+            let mut programs = std::collections::BTreeSet::new();
+            {
+                let mut st = tx.prepare(
+                    "INSERT INTO program_log (program_id, ts, level, message, run_id)
+                     SELECT ?1, ?2, ?3, ?4, ?5 WHERE EXISTS (SELECT 1 FROM programs WHERE id = ?1)",
+                )?;
+                for l in &lines {
+                    st.execute(params![l.program_id, l.ts, l.level, l.message, l.run_id])?;
+                    programs.insert(l.program_id.as_str());
+                }
+            }
+            for p in programs {
+                tx.execute(
+                    "DELETE FROM program_log WHERE program_id = ?1 AND id NOT IN
+                       (SELECT id FROM program_log WHERE program_id = ?1 ORDER BY id DESC LIMIT ?2)",
+                    params![p, keep as i64],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Every program's log (in the bin too), oldest line first.
+    pub async fn all_logs(&self) -> Result<Vec<LogRecord>> {
+        self.with(|c| {
+            let mut st =
+                c.prepare("SELECT program_id, ts, level, message, run_id FROM program_log ORDER BY id")?;
+            let rows = st.query_map([], |r| {
+                Ok(LogRecord {
+                    program_id: r.get(0)?,
+                    ts: r.get(1)?,
+                    level: r.get(2)?,
+                    message: r.get(3)?,
+                    run_id: r.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
         .await
     }
@@ -591,6 +691,7 @@ fn row_to_program(r: &rusqlite::Row<'_>) -> rusqlite::Result<ProgramRecord> {
 fn purge_rest(tx: &rusqlite::Transaction<'_>, id: &str) -> rusqlite::Result<()> {
     tx.execute("DELETE FROM runs WHERE program_id = ?1", [id])?;
     tx.execute("DELETE FROM program_versions WHERE program_id = ?1", [id])?;
+    tx.execute("DELETE FROM program_log WHERE program_id = ?1", [id])?;
     tx.execute("DELETE FROM kv WHERE scope = ?1", [format!("program:{id}")])?;
     Ok(())
 }
@@ -729,10 +830,40 @@ mod tests {
         let mut used = program("used");
         used.workspace = json!({"blocks": {"blocks": [{"type": "ha_when", "id": "w"}]}});
         s.save_program(used).await.unwrap();
-        assert_eq!(s.purge_old().await.unwrap(), 1);
+        // Strays are kept for a while: the editor may still have one open.
+        assert!(s.purge_old(3_600_000).await.unwrap().is_empty());
+        assert_eq!(s.purge_old(0).await.unwrap(), ["empty"]);
         let left: Vec<_> = s.list_programs().await.unwrap().into_iter().map(|p| p.id).collect();
         assert_eq!(left.len(), 2);
         assert!(left.contains(&"named".to_owned()) && left.contains(&"used".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn logs_are_bounded_kept_in_the_bin_and_purged() {
+        let s = Store::open_in_memory().unwrap();
+        s.save_program(program("a")).await.unwrap();
+        s.save_program(program("b")).await.unwrap();
+        let line = |p: &str, i: i64| LogRecord {
+            program_id: p.into(),
+            ts: i,
+            level: "info".into(),
+            message: format!("line {i}"),
+            run_id: None,
+        };
+        s.append_log((0..5).map(|i| line("a", i)).collect(), 3).await.unwrap();
+        s.append_log(vec![line("b", 9), line("gone", 1)], 3).await.unwrap();
+        let ts = |logs: &[LogRecord], p: &str| {
+            logs.iter().filter(|l| l.program_id == p).map(|l| l.ts).collect::<Vec<_>>()
+        };
+        let logs = s.all_logs().await.unwrap();
+        assert_eq!(ts(&logs, "a"), [2, 3, 4]);
+        assert_eq!(ts(&logs, "b"), [9]);
+        assert!(ts(&logs, "gone").is_empty(), "lines of unknown programs are dropped");
+
+        s.delete_program("a").await.unwrap();
+        assert_eq!(ts(&s.all_logs().await.unwrap(), "a").len(), 3);
+        s.purge_program("a").await.unwrap();
+        assert!(ts(&s.all_logs().await.unwrap(), "a").is_empty());
     }
 
     #[test]
@@ -811,6 +942,17 @@ mod tests {
         let first = s.get_version("v1", versions[2].id).await.unwrap().unwrap();
         assert_eq!(first.workspace, Some(serde_json::json!({"n": 0})));
         assert_eq!(versions[2].changes, "first save");
+        assert_eq!(first.mode.as_deref(), Some("single"));
+        // A new run mode or name is a restore point too, so restoring brings them back.
+        p.mode = "queued".into();
+        s.save_program(p.clone()).await.unwrap();
+        p.name = "Renamed".into();
+        s.save_program(p.clone()).await.unwrap();
+        let versions = s.list_versions("v1").await.unwrap();
+        assert_eq!(versions.len(), 5);
+        assert_eq!(versions[1].changes, "run mode changed");
+        assert_eq!(versions[1].mode.as_deref(), Some("queued"));
+        assert!(versions[0].changes.contains("renamed from"), "{}", versions[0].changes);
         s.delete_program("v1").await.unwrap();
         s.purge_program("v1").await.unwrap();
         assert!(s.list_versions("v1").await.unwrap().is_empty());

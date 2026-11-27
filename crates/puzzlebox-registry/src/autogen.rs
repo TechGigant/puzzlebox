@@ -312,8 +312,11 @@ pub fn generate(d: &HaDescriptions<'_>) -> Vec<BlockDef> {
                 .unwrap_or("")
                 .to_owned();
             // HA's entity actions fail without a target ("at least one of entity_id, …"); the few
-            // that can be pointed at a config entry instead have an entry_id field.
-            let target_required = !params.iter().any(|p| p.name.ends_with("entry_id"));
+            // that can be pointed elsewhere have a field for it (a config entry, entity patterns
+            // or whole domains, as in recorder.purge_entities).
+            let target_required = !params.iter().any(|p| {
+                p.name.ends_with("entry_id") || matches!(p.name.as_str(), "entity_globs" | "domains")
+            });
             let target =
                 spec.get("target").map(|tg| TargetSpec { required: target_required, ..target_spec(tg) });
             if optional_response {

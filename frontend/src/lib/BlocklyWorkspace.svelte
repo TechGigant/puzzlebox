@@ -35,6 +35,8 @@
   const runStackHandlers = new Map<string, (topBlockId: string) => void>();
   const quickAddHandlers = new Map<string, () => void>();
   const ENTRY_BLOCKS = new Set(['ha_when', 'ha_on_run', 'ha_on_start']);
+  /** Largest zoom the toolbox and backpack flyouts show blocks at. */
+  const FLYOUT_MAX_SCALE = 1;
 
   Blockly.ContextMenuRegistry.registry.register({
     id: 'puzzlebox_run_stack',
@@ -511,6 +513,11 @@
       contextMenu: { copyAllToBackpack: true, pasteAllToBackpack: true, emptyBackpack: true, removeFromBackpack: true },
     });
     backpack.init();
+    // Flyouts draw blocks at the workspace's zoom; zoomed in, they grow wider than the canvas
+    // and run under the toolbox. Cap them at 100 % (they still shrink when zoomed out).
+    for (const flyout of [backpack.getFlyout(), workspace.getToolbox()?.getFlyout()]) {
+      if (flyout instanceof Blockly.Flyout) flyout.getFlyoutScale = () => Math.min(workspace!.scale, FLYOUT_MAX_SCALE);
+    }
     // The backpack is shared by all programs and kept by the app, not in this program.
     // Until the stored backpack has been read, changes aren't saved (they would overwrite it).
     let restoring = true;
@@ -576,6 +583,13 @@
     workspace.addChangeListener((e) => {
       if (e.type === 'backpack_change' && !restoring) {
         api.setEditorData('backpack', backpack.getContents()).catch(() => {});
+      }
+      // The backpack and the toolbox open over the same part of the canvas: one at a time.
+      if (e.type === 'backpack_open' && (e as Blockly.Events.Abstract & { isOpen?: boolean }).isOpen) {
+        workspace?.getToolbox()?.clearSelection();
+      }
+      if (e.type === Blockly.Events.TOOLBOX_ITEM_SELECT && (e as Blockly.Events.ToolboxItemSelect).newItem && backpack.isOpen()) {
+        backpack.close();
       }
       if (!e.isUiEvent || e.type === Blockly.Events.THEME_CHANGE) zebra();
       // A block created while a drag is under way came out of the toolbox.

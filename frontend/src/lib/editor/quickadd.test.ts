@@ -2,7 +2,20 @@
 import * as Blockly from 'blockly/core';
 import 'blockly/blocks';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { attach, freeSpot, intoEmptyWhen, search, toolboxEntries, wantFor, type Entry } from './quickadd';
+import {
+  attach,
+  connectTo,
+  freeSpot,
+  hasEmptyWhen,
+  intoEmptyWhen,
+  prefill,
+  queryNumber,
+  search,
+  toolboxEntries,
+  wantFor,
+  wantForConnection,
+  type Entry,
+} from './quickadd';
 import { registerCoreBlocks } from '../blocks/core';
 import { registerConditionBlocks } from '../blocks/conditions';
 import { registerHelperBlocks } from '../blocks/helpers';
@@ -27,9 +40,21 @@ beforeAll(() => {
 describe('quick add search', () => {
   const entries = [entry('Turn off light'), entry('Turn on light'), entry('Toggle light'), entry('wait 5 seconds', 'Actions')];
 
-  it('needs every word', () => {
-    expect(search(entries, 'turn off').map((e) => e.label)).toEqual(['Turn off light']);
-    expect(search(entries, 'turn zebra')).toEqual([]);
+  it('ranks blocks that match more of the words first', () => {
+    expect(search(entries, 'turn off')[0].label).toBe('Turn off light');
+    expect(search(entries, 'turn off').map((e) => e.label)).toContain('Turn on light');
+    expect(search(entries, 'turn zebra').map((e) => e.label)).toEqual(['Turn on light', 'Turn off light']);
+    expect(search(entries, 'zebra')).toEqual([]);
+    // At least half of the words have to match.
+    expect(search(entries, 'turn zebra giraffe')).toEqual([]);
+  });
+
+  it('ignores numbers, which are filled in instead', () => {
+    expect(search(entries, 'wait 10').map((e) => e.label)).toEqual(['wait 5 seconds']);
+    expect(search(entries, '10')).toEqual([]);
+    expect(queryNumber('wait 10')).toBe(10);
+    expect(queryNumber('set to 21,5 degrees')).toBe(21.5);
+    expect(queryNumber('wait')).toBeNull();
   });
 
   it('ranks matches at the start of the label first', () => {
@@ -86,6 +111,18 @@ describe('quick add search', () => {
     expect(search(list, 'turn on light', 40, { shape: 'trigger' }).map((e) => e.shape)).toEqual(['statement', 'statement', 'trigger']);
     expect(search(list, 'light', 40, { shape: 'trigger' })[0].shape).toBe('trigger');
   });
+
+  it('puts triggers first for an empty "when"', () => {
+    const list = [
+      entry('open …', 'Home', { tier: 2, shape: 'statement' }),
+      entry('⚡ … becomes on for 0 seconds', 'Events', { tier: 2, shape: 'trigger' }),
+    ];
+    expect(search(list, 'door open')[0].shape).toBe('statement');
+    expect(search(list, 'door open', 40, { shape: 'trigger', slot: true })[0].shape).toBe('trigger');
+    // Unless an action matches more of the words.
+    const more = [...list, entry('open the door', 'Home', { tier: 2, shape: 'statement' })];
+    expect(search(more, 'open the door', 40, { shape: 'trigger', slot: true })[0].label).toBe('open the door');
+  });
 });
 
 describe('quick add entries', () => {
@@ -110,6 +147,10 @@ describe('quick add entries', () => {
     const top = (q: string) => search(entries(), q)[0]?.state.type;
     expect(top('wait')).toBe('ha_wait');
     expect(top('motion')).toBe('ha_trigger_becomes');
+    expect(top('notify')).toBe('notify_send');
+    expect(top('repeat every')).toBe('ha_trigger_every');
+    expect(search(entries(), 'for 2 minutes').map((e) => e.state.type)).toContain('device_on_for');
+    expect(search(entries(), 'door open', 40, { shape: 'trigger', slot: true })[0].state.type).toBe('ha_trigger_becomes');
     expect(search(entries(), 'yaml').every((e) => e.tier === 0)).toBe(true);
   });
 });
@@ -121,7 +162,7 @@ describe('quick add placement', () => {
   it('puts triggers into a "when" and actions at the end of its "do"', () => {
     const ws = new Blockly.Workspace();
     const when = make(ws, { type: 'ha_when', inputs: { DO: { block: { type: 'ha_wait', id: 'w1' } } } });
-    expect(wantFor(when)).toEqual({ shape: 'trigger' });
+    expect(wantFor(when)).toEqual({ shape: 'trigger', slot: true });
     const t1 = make(ws, { type: 'ha_trigger_becomes' });
     expect(attach(when, t1)).toBe(true);
     expect(when.getInputTargetBlock('TRIGGERS')).toBe(t1);
@@ -141,11 +182,56 @@ describe('quick add placement', () => {
   it('puts a trigger into an empty "when" when nothing is selected', () => {
     const ws = new Blockly.Workspace();
     const when = make(ws, { type: 'ha_when' });
-    expect(wantFor(when)).toEqual({ shape: 'trigger' });
+    expect(wantFor(when)).toEqual({ shape: 'trigger', slot: true });
+    expect(hasEmptyWhen(ws)).toBe(true);
     const t = make(ws, { type: 'ha_trigger_becomes' });
     expect(intoEmptyWhen(ws, t)).toBe(true);
     expect(when.getInputTargetBlock('TRIGGERS')).toBe(t);
     expect(intoEmptyWhen(ws, make(ws, { type: 'ha_trigger_becomes' }))).toBe(false);
+    expect(hasEmptyWhen(ws)).toBe(false);
+  });
+
+  it('plugs into the connection the keyboard cursor is on', () => {
+    const ws = new Blockly.Workspace();
+    const when = make(ws, { type: 'ha_when', inputs: { DO: { block: { type: 'ha_wait', id: 'w1' } } } });
+    const triggers = when.getInput('TRIGGERS')!.connection!;
+    expect(wantForConnection(triggers)).toEqual({ shape: 'trigger', slot: true });
+    // An action can't go into the trigger slot.
+    expect(connectTo(triggers, make(ws, { type: 'ha_log' }))).toBe(false);
+    // Into the "do", in front of what is there.
+    const body = when.getInput('DO')!.connection!;
+    expect(wantForConnection(body)).toEqual({ shape: 'statement' });
+    const log = make(ws, { type: 'ha_log' });
+    expect(connectTo(body, log)).toBe(true);
+    expect(when.getInputTargetBlock('DO')).toBe(log);
+    expect(log.getNextBlock()?.id).toBe('w1');
+    // Above a block: between it and the one before.
+    const log2 = make(ws, { type: 'ha_log' });
+    expect(connectTo(ws.getBlockById('w1')!.previousConnection!, log2)).toBe(true);
+    expect(log.getNextBlock()).toBe(log2);
+    expect(log2.getNextBlock()?.id).toBe('w1');
+    // A value into a socket.
+    const cmp = make(ws, { type: 'logic_compare' });
+    const a = cmp.getInput('A')!.connection!;
+    expect(wantForConnection(a)?.shape).toBe('value');
+    const n = make(ws, { type: 'math_number' });
+    expect(connectTo(a, n)).toBe(true);
+    expect(cmp.getInputTargetBlock('A')).toBe(n);
+  });
+
+  it('fills a number from the query into the block', () => {
+    const ws = new Blockly.Workspace();
+    const wait = make(ws, { type: 'ha_wait', inputs: { SECONDS: { shadow: { type: 'duration', inputs: { N: { shadow: { type: 'math_number', fields: { NUM: 5 } } } } } } } });
+    expect(prefill(wait, 'wait 2 minutes')).toBe(true);
+    const d = wait.getInputTargetBlock('SECONDS')!;
+    expect(d.getInputTargetBlock('N')!.getFieldValue('NUM')).toBe(2);
+    expect(d.getFieldValue('UNIT')).toBe('minutes');
+    const every = make(ws, { type: 'ha_trigger_every' });
+    expect(prefill(every, 'every 10 sec')).toBe(true);
+    expect(every.getFieldValue('N')).toBe(10);
+    expect(every.getFieldValue('UNIT')).toBe('seconds');
+    expect(prefill(make(ws, { type: 'ha_log' }), 'log 5')).toBe(false);
+    expect(prefill(every, 'every minute')).toBe(false);
   });
 
   it('puts a value into the first empty socket that fits', () => {

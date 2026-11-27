@@ -28,6 +28,8 @@ export interface Want {
   shape: Exclude<Shape, 'top'>;
   /** Check of the empty socket a value would go into (null: anything; undefined: no socket). */
   check?: string[] | null;
+  /** The block goes into an empty trigger slot, where only triggers fit. */
+  slot?: boolean;
 }
 
 function stateOf(item: Item): State | null {
@@ -187,6 +189,15 @@ const SYNONYMS: Record<string, string[]> = {
   heating: ['climate', 'thermostat', 'heat'],
   door: ['contact', 'opening', 'becomes', 'open'],
   window: ['contact', 'opening', 'becomes', 'open'],
+  // A door sensor that opens "becomes on".
+  open: ['becomes', 'opens'],
+  opens: ['becomes', 'open'],
+  closed: ['becomes', 'off'],
+  minute: ['minutes'],
+  hour: ['hours'],
+  second: ['seconds'],
+  repeat: ['every', 'while', 'loop'],
+  every: ['repeat'],
   blind: ['cover', 'shutter', 'curtain'],
   shutter: ['cover', 'blind'],
   curtain: ['cover', 'blind'],
@@ -232,6 +243,8 @@ const overlaps = (a: string[] | null | undefined, b: string[] | null | undefined
 
 function fitScore(e: Entry, want: Want | null | undefined): number {
   if (!want || !e.shape) return 0;
+  // Into an empty "when": triggers first, unless an action matches more of the words.
+  if (want.slot) return e.shape === 'trigger' ? 20 : 0;
   // With a "when" or trigger selected, an action fits too: it goes into the "do".
   if (want.shape === 'trigger' && e.shape === 'statement') return 3;
   if (e.shape === 'value') {
@@ -241,34 +254,88 @@ function fitScore(e: Entry, want: Want | null | undefined): number {
   return e.shape === want.shape ? 10 : 0;
 }
 
+const NUMBER = /^-?\d+(?:[.,]\d+)?$/;
+
+/** The first number typed in a query ("wait 10" → 10), to fill into the block. */
+export function queryNumber(query: string): number | null {
+  const w = query.split(/\s+/).find((x) => NUMBER.test(x));
+  return w === undefined ? null : Number(w.replace(',', '.'));
+}
+
+const UNITS: Record<string, string> = { s: 'seconds', sec: 'seconds', min: 'minutes', h: 'hours', d: 'days' };
+
+/** A unit typed in a query ("2 minutes", "5 min"), as the duration menus name it. */
+function queryUnit(query: string): string | null {
+  for (const w of query.toLowerCase().split(/\s+/)) {
+    if (UNITS[w]) return UNITS[w];
+    const m = w.match(/^(second|minute|hour|day)s?$/);
+    if (m) return `${m[1]}s`;
+  }
+  return null;
+}
+
+function setUnit(b: Blockly.Block, unit: string | null) {
+  const f = b.getField('UNIT');
+  if (unit && f instanceof Blockly.FieldDropdown && f.getOptions(false).some((o) => Array.isArray(o) && o[1] === unit)) f.setValue(unit);
+}
+
 /**
- * Every query word (or a synonym of it) must appear. Matches at the start of the label's words
- * rank higher, then hand-made blocks above generated and technical ones, and blocks that fit
- * the selected block above the rest.
+ * Fills the number (and unit) of the query into the block's first number: "wait 10" gives
+ * "wait 10 seconds", "on for 2 minutes" sets its duration to 2 minutes.
+ */
+export function prefill(block: Blockly.Block, query: string): boolean {
+  const n = queryNumber(query);
+  if (n === null) return false;
+  const unit = queryUnit(query);
+  const visit = (b: Blockly.Block): boolean => {
+    for (const input of b.inputList) {
+      if (!input.isVisible()) continue;
+      const field = input.fieldRow.find((f) => f instanceof Blockly.FieldNumber);
+      if (field) {
+        field.setValue(n);
+        setUnit(b, unit);
+        return true;
+      }
+      const child = input.connection?.targetBlock();
+      if (child && visit(child)) {
+        // "5 minutes" blocks hold their number in a socket, next to the unit.
+        if (b.type === 'duration') setUnit(b, unit);
+        return true;
+      }
+    }
+    return false;
+  };
+  return visit(block);
+}
+
+/**
+ * Blocks that match more of the query's words rank higher; a block has to match at least half
+ * of them (numbers don't count: they are filled in, see `prefill`). Matches at the start of the
+ * label's words rank higher, then hand-made blocks above generated and technical ones, and
+ * blocks that fit the selected block above the rest.
  */
 export function search(entries: Entry[], query: string, limit = 40, want?: Want | null): Entry[] {
-  const words = query.toLowerCase().split(/\s+/).filter(Boolean);
+  const words = query.toLowerCase().split(/\s+/).filter((w) => w && !NUMBER.test(w));
   if (!words.length) return [];
   const alts = words.map(alternatives);
   const scored: [number, Entry][] = [];
   for (const e of entries) {
     let score = 0;
-    let ok = true;
+    let matched = 0;
     const label = e.label.toLowerCase();
-    for (let i = 0; i < words.length && ok; i++) {
+    const path = e.path.toLowerCase();
+    for (let i = 0; i < words.length; i++) {
       const w = words[i];
-      if (e.haystack.includes(w)) {
-        score += wordScore(label, w) || 1;
-        continue;
-      }
+      const direct = e.haystack.includes(w) ? wordScore(label, w) || 1 : 0;
       // Synonyms only count at the start of a word of the label or category ("lamp" → "Lights & colours"),
       // not inside type names, where "state" would match half the blocks for "motion".
-      const path = e.path.toLowerCase();
-      if (alts[i].some((a) => wordScore(label, a) >= 4)) score += 3;
-      else if (alts[i].some((a) => wordScore(path, a) >= 4)) score += 1;
-      else ok = false;
+      const synonym = alts[i].some((a) => wordScore(label, a) >= 4) ? 3 : alts[i].some((a) => wordScore(path, a) >= 4) ? 1 : 0;
+      if (!direct && !synonym) continue;
+      score += Math.max(direct, synonym);
+      matched++;
     }
-    if (!ok) continue;
+    if (!matched || matched * 2 < words.length) continue;
+    score += 100 * matched;
     if (words.length > 1 && label.includes(words.join(' '))) score += 4;
     score += 10 * (e.tier ?? 1) + fitScore(e, want);
     scored.push([score - label.length / 100, e]);
@@ -305,11 +372,35 @@ function firstEmptyValueInput(b: Blockly.Block): Blockly.Input | null {
   return b.inputList.find((i) => i.isVisible() && i.type === Blockly.inputs.inputTypes.VALUE && i.connection && isEmpty(i.connection)) ?? null;
 }
 
+/** The connection Blockly's keyboard cursor is on, if it is one of `ws`. */
+export function focusedConnection(ws: Blockly.WorkspaceSvg): Blockly.RenderedConnection | null {
+  const node = Blockly.getFocusManager().getFocusedNode();
+  if (!(node instanceof Blockly.RenderedConnection)) return null;
+  const b = node.getSourceBlock();
+  return b.workspace === ws && !b.isInFlyout ? node : null;
+}
+
+/** What fits the connection the keyboard cursor is on. */
+export function wantForConnection(c: Blockly.Connection): Want | null {
+  const check = c.getCheck();
+  if (c.type === Blockly.ConnectionType.INPUT_VALUE) return { shape: 'value', check };
+  if (c.type === Blockly.ConnectionType.OUTPUT_VALUE) return null;
+  return check?.includes('Trigger') ? { shape: 'trigger', slot: true } : { shape: 'statement' };
+}
+
+/** A "when" without triggers, where a trigger goes when nothing is selected. */
+export function hasEmptyWhen(ws: Blockly.Workspace): boolean {
+  return ws.getTopBlocks(false).some((b) => {
+    const input = triggerInput(b);
+    return !!input && b.isEnabled() && !input.connection?.targetBlock();
+  });
+}
+
 /** What fits the selected block best, for ranking the search results. */
 export function wantFor(target: Blockly.Block | null): Want | null {
   if (!target) return null;
   const triggers = triggerInput(target);
-  if (triggers) return { shape: triggers.connection!.targetBlock() ? 'statement' : 'trigger' };
+  if (triggers) return triggers.connection!.targetBlock() ? { shape: 'statement' } : { shape: 'trigger', slot: true };
   // A value fits the selected block's first empty socket, if it has one.
   const input = firstEmptyValueInput(target);
   const check = input ? input.connection!.getCheck() : undefined;
@@ -318,13 +409,25 @@ export function wantFor(target: Blockly.Block | null): Want | null {
   return { shape: 'statement', check };
 }
 
-/** Creates the block, attached to the selected block (`target`) when it fits, else at `at`. */
-export function insert(ws: Blockly.WorkspaceSvg, state: State, at: Blockly.utils.Coordinate, target: Blockly.BlockSvg | null) {
+/**
+ * Creates the block, plugged into the connection the keyboard cursor is on (`at`), or attached
+ * to the selected block (`target`) when it fits, else at `at`. `query` may hold a number to fill in.
+ */
+export function insert(
+  ws: Blockly.WorkspaceSvg,
+  state: State,
+  at: Blockly.utils.Coordinate,
+  target: Blockly.BlockSvg | null,
+  connection: Blockly.Connection | null = null,
+  query = '',
+) {
   Blockly.Events.setGroup(true);
   try {
     const block = Blockly.serialization.blocks.append(state, ws) as Blockly.BlockSvg;
+    if (query) prefill(block, query);
     const live = target && !target.isDeadOrDying() ? target : null;
-    if (!((live && attach(live, block)) || (!live && isTrigger(block) && intoEmptyWhen(ws, block)))) {
+    const into = connection && !connection.getSourceBlock().isDeadOrDying() ? connection : null;
+    if (!((into && connectTo(into, block)) || (live && attach(live, block)) || (!live && isTrigger(block) && intoEmptyWhen(ws, block)))) {
       const others = ws.getTopBlocks(false).filter((b) => b !== block).map((b) => b.getBoundingRectangle());
       const { height, width } = block.getHeightWidth();
       block.moveTo(freeSpot(others, width, height, at));
@@ -373,6 +476,23 @@ function tryConnect(a: Blockly.Connection | null | undefined, b: Blockly.Connect
   if (!checker.canConnect(a, b, false)) return false;
   a.connect(b);
   return true;
+}
+
+/** Plugs `block` into connection `c`, in front of whatever is there already. */
+export function connectTo(c: Blockly.Connection, block: Blockly.Block): boolean {
+  // Actions have no check, so Blockly would let them into a trigger slot.
+  if (!!c.getCheck()?.includes('Trigger') !== isTrigger(block) && c.type !== Blockly.ConnectionType.INPUT_VALUE) return false;
+  switch (c.type) {
+    case Blockly.ConnectionType.INPUT_VALUE:
+      return tryConnect(c, block.outputConnection);
+    case Blockly.ConnectionType.NEXT_STATEMENT:
+      return tryConnect(c, block.previousConnection);
+    case Blockly.ConnectionType.PREVIOUS_STATEMENT:
+      // Above a block: after the one it hangs under, if any.
+      return c.targetConnection ? tryConnect(c.targetConnection, block.previousConnection) : tryConnect(c, block.nextConnection);
+    default:
+      return false;
+  }
 }
 
 /** Puts `block` at the end of the stack in `input` (or into it, when it's empty). */

@@ -3,6 +3,8 @@
   import { api, events, MODE_LABELS, type DeletedProgram, type Program } from './api';
   import StatusChip from './StatusChip.svelte';
   import { plainError } from './ha_errors';
+  import { modal } from './dialog';
+  import { STARTERS } from './starters';
 
   let { onopen, onimport }: { onopen: (id: string) => void; onimport?: () => void } = $props();
 
@@ -198,8 +200,6 @@
   });
 </script>
 
-<svelte:window onkeydown={(e) => moving && e.key === 'Escape' && (moving = null)} />
-
 <div class="page">
   <div class="toolbar">
     <input class="search" placeholder="Search programs and folders" bind:value={filter} />
@@ -217,8 +217,23 @@
   {#if programs.length === 0 && !error}
     <div class="empty">
       <h2>No programs yet</h2>
-      <p>Programs are automations built from blocks. Create one to get started.</p>
-      <button class="btn primary" onclick={create}>Create your first program</button>
+      <p>Programs are automations built from blocks. Start from an example, or with empty blocks.</p>
+      <ul class="starters">
+        {#each STARTERS as s (s.key)}
+          <li>
+            <button class="starter" onclick={() => onopen(`new-${s.key}`)}>
+              <span class="name">{s.name}</span>
+              <span class="summary">{s.summary}</span>
+            </button>
+          </li>
+        {/each}
+      </ul>
+      <p class="muted">Examples open with the devices left to choose: click each empty box, pick yours, and save.</p>
+      <div class="empty-actions">
+        <button class="btn primary" onclick={create}>Start with empty blocks</button>
+        {#if onimport}<button class="btn" onclick={onimport}>Import from Home Assistant</button>{/if}
+      </div>
+      {#if onimport}<p class="muted">Already have automations? Import turns them into programs you can edit as blocks.</p>{/if}
     </div>
   {/if}
 
@@ -249,7 +264,7 @@
       <button class="icon" title="Move to folder" onclick={() => startMove(p)} aria-label="Move to folder">⇄</button>
       <button class="icon" title="Run now" disabled={!p.enabled} onclick={() => run(p)} aria-label="Run now">▶</button>
       <label class="switch" title={p.enabled ? 'Disable' : 'Enable'}>
-        <input type="checkbox" checked={p.enabled} onchange={() => toggle(p)} />
+        <input type="checkbox" checked={p.enabled} onchange={() => toggle(p)} aria-label={`${p.name}: on`} />
         <span></span>
       </label>
     </li>
@@ -315,27 +330,29 @@
 
   {#if moving}
     <div class="dialog-backdrop" role="presentation" onclick={() => (moving = null)}></div>
-    <form class="dialog" onsubmit={(e) => (e.preventDefault(), confirmMove())}>
-      <h3>Move “{moving.name}”</h3>
-      <label>
-        Folder
-        <input list="pb-folders" bind:value={moveTo} placeholder="e.g. Lights/Outside (empty: no folder)" />
-      </label>
-      <datalist id="pb-folders">
-        {#each allFolders as f (f)}<option value={f}></option>{/each}
-      </datalist>
-      <p class="muted">Use “/” for folders inside folders. You can also drag programs onto a folder.</p>
-      <div class="actions">
-        <button type="button" class="btn" onclick={() => (moving = null)}>Cancel</button>
-        <button type="submit" class="btn primary">Move</button>
-      </div>
-    </form>
+    <div class="dialog" role="dialog" aria-labelledby="pb-move-title" use:modal={() => (moving = null)}>
+      <form onsubmit={(e) => (e.preventDefault(), confirmMove())}>
+        <h3 id="pb-move-title">Move “{moving.name}”</h3>
+        <label>
+          Folder
+          <input list="pb-folders" bind:value={moveTo} placeholder="e.g. Lights/Outside (empty: no folder)" />
+        </label>
+        <datalist id="pb-folders">
+          {#each allFolders as f (f)}<option value={f}></option>{/each}
+        </datalist>
+        <p class="muted">Use “/” for folders inside folders. You can also drag programs onto a folder.</p>
+        <div class="actions">
+          <button type="button" class="btn" onclick={() => (moving = null)}>Cancel</button>
+          <button type="submit" class="btn primary">Move</button>
+        </div>
+      </form>
+    </div>
   {/if}
 
   {#if bin}
     <div class="dialog-backdrop" role="presentation" onclick={() => (bin = null)}></div>
-    <div class="dialog" role="dialog" aria-label="Recycle bin">
-      <h3>Recycle bin</h3>
+    <div class="dialog" role="dialog" aria-labelledby="pb-bin-title" use:modal={() => (bin = null)}>
+      <h3 id="pb-bin-title">Recycle bin</h3>
       <p class="muted">Deleted programs stay here, with their run history, for {bin.days} days.</p>
       {#if bin.programs.length}
         <ul class="bin">
@@ -580,6 +597,46 @@
   .empty h2 {
     color: var(--pb-text);
     font-weight: 400;
+  }
+  .starters {
+    list-style: none;
+    padding: 0;
+    margin: 24px auto 8px;
+    max-width: 720px;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 320px), 1fr));
+    gap: 8px;
+  }
+  .starter {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px 16px;
+    text-align: left;
+    background: var(--pb-card);
+    border: 1px solid var(--pb-divider);
+    border-radius: 12px;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+  }
+  .starter:hover {
+    border-color: var(--pb-primary);
+  }
+  .starter .name {
+    color: var(--pb-text);
+  }
+  .starter .summary {
+    white-space: normal;
+  }
+  .empty-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin: 16px 0 8px;
   }
   .error {
     color: #e53935;

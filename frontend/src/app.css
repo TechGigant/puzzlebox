@@ -127,6 +127,14 @@ select:focus {
 .switch input:checked + span::before {
   transform: translateX(16px);
 }
+.switch input:focus-visible + span {
+  outline: 2px solid var(--pb-primary);
+  outline-offset: 2px;
+}
+/* Dialogs take focus when they open (see dialog.ts); the ring would frame the whole box. */
+[role='dialog']:focus {
+  outline: none;
+}
 
 .pb-entity-list {
   max-height: 320px;

@@ -12,6 +12,9 @@
   import { registerUsageMenu } from './editor/usages';
   import { noteUsed, registerFavourites, registerFavouritesMenu } from './editor/favourites';
   import { installDropdownSearch } from './editor/dropdown_search';
+  import { installDecimalComma } from './editor/number_input';
+  import { installSharedClipboard } from './editor/clipboard';
+  import { installMenuText } from './editor/menus';
 
   Blockly.setLocale(En as unknown as Record<string, string>);
   registerCoreBlocks();
@@ -22,6 +25,9 @@
   registerUsageMenu();
   registerFavouritesMenu();
   installDropdownSearch();
+  installDecimalComma();
+  installSharedClipboard();
+  installMenuText();
 
   /** Per-workspace callbacks for the editor that owns it (menus are registered globally). */
   const runStackHandlers = new Map<string, (topBlockId: string) => void>();
@@ -108,10 +114,24 @@
   import { Backpack } from '@blockly/workspace-backpack';
   import { api, type CompileError } from './api';
   import QuickAdd from './editor/QuickAdd.svelte';
-  import { blockWords, insert, isTrigger, selectedBlock, toolboxEntries, wantFor, workspaceEntries, type Entry, type Want } from './editor/quickadd';
+  import {
+    blockWords,
+    focusedConnection,
+    hasEmptyWhen,
+    insert,
+    isTrigger,
+    selectedBlock,
+    toolboxEntries,
+    wantFor,
+    wantForConnection,
+    workspaceEntries,
+    type Entry,
+    type Want,
+  } from './editor/quickadd';
   import { applyZebra, loadPrefs, markLoose, rendererName } from './editor/appearance';
   import { installDragTricks } from './editor/drag';
   import { installSummaries } from './editor/summaries';
+  import { installSlotHints } from './editor/slot_hints';
   import { migrateWorkspace } from './editor/migrate';
   import { entityWarnings } from './blocks/checks';
   import { knownEntities, loadEntities, loadRegistry as loadHaNames, refreshNameFields } from './blocks/field_entity';
@@ -148,13 +168,15 @@
     y: number;
     at: Blockly.utils.Coordinate;
     target: Blockly.BlockSvg | null;
+    connection: Blockly.RenderedConnection | null;
     want: Want | null;
     hint: string;
   } | null>(null);
   let mouse = { x: 80, y: 80, clientX: 0, clientY: 0 };
   let toolboxDef: Blockly.utils.toolbox.ToolboxInfo | null = null;
 
-  function quickHint(target: Blockly.BlockSvg | null, want: Want | null): string {
+  function quickHint(target: Blockly.BlockSvg | null, want: Want | null, connection: Blockly.Connection | null): string {
+    if (connection) return 'Enter puts the block where the keyboard cursor is.';
     if (!target) return 'Enter adds the block where you clicked (a trigger goes into an empty “when”).';
     if (want?.shape === 'trigger' || target.type === 'ha_when')
       return 'Triggers go into the selected “when”, actions at the end of its “do”.';
@@ -162,42 +184,54 @@
     return 'Enter adds the block after the selected one.';
   }
 
-  function openQuickAdd() {
+  /** `keyboard`: opened with Ctrl+Space, so the keyboard cursor matters more than the mouse. */
+  function openQuickAdd(keyboard = false) {
     if (!workspace || !toolboxDef) return;
+    // Read now: once the search box has focus, Blockly no longer reports a selection.
+    const connection = keyboard ? focusedConnection(workspace) : null;
+    const target = (connection?.getSourceBlock() as Blockly.BlockSvg | undefined) ?? selectedBlock(workspace);
+    const want = connection ? wantForConnection(connection) : target ? wantFor(target) : hasEmptyWhen(workspace) ? { shape: 'trigger' as const, slot: true } : null;
     const rect = host.getBoundingClientRect();
-    const x = Math.min(Math.max(mouse.x, 16), Math.max(16, rect.width - 480));
-    // The popup is up to ~400px tall (search box and results); keep all of it on screen.
-    const y = Math.min(Math.max(mouse.y, 16), Math.max(16, rect.height - 420));
-    // Where the block lands if nothing is selected: under the mouse.
-    const at = mouse.clientX
+    let pos = { x: mouse.x, y: mouse.y };
+    // Where the block lands if it plugs in nowhere: under the mouse, or next to the keyboard cursor.
+    let at = mouse.clientX
       ? Blockly.utils.svgMath.screenToWsCoordinates(workspace, new Blockly.utils.Coordinate(mouse.clientX, mouse.clientY))
       : new Blockly.utils.Coordinate(40, 40);
-    // Read now: once the search box has focus, Blockly no longer reports a selection.
-    const target = selectedBlock(workspace);
-    const want = wantFor(target);
+    if (keyboard && target) {
+      const r = target.getSvgRoot().getBoundingClientRect();
+      pos = { x: r.left - rect.left, y: r.bottom - rect.top + 8 };
+      const root = target.getRootBlock() as Blockly.BlockSvg;
+      const xy = root.getRelativeToSurfaceXY();
+      at = new Blockly.utils.Coordinate(xy.x + root.getHeightWidth().width + 40, xy.y);
+    }
+    const x = Math.min(Math.max(pos.x, 16), Math.max(16, rect.width - 480));
+    // The popup is up to ~400px tall (search box and results); keep all of it on screen.
+    const y = Math.min(Math.max(pos.y, 16), Math.max(16, rect.height - 420));
     quick = {
       entries: [...workspaceEntries(workspace), ...toolboxEntries(toolboxDef)],
       x,
       y,
       at,
       target,
+      connection,
       want,
-      hint: quickHint(target, want),
+      hint: quickHint(target, want, connection),
     };
   }
 
   /** Gives the keyboard back to the blocks, so Ctrl+Space and shortcuts keep working. */
   function closeQuick() {
-    const target = quick?.target;
+    const node = quick?.connection ?? quick?.target;
+    const block = quick?.connection?.getSourceBlock() ?? quick?.target;
     quick = null;
-    if (target && !target.isDeadOrDying()) Blockly.getFocusManager().focusNode(target);
+    if (node && block && !block.isDeadOrDying()) Blockly.getFocusManager().focusNode(node);
     else if (workspace) Blockly.getFocusManager().focusTree(workspace);
   }
 
-  function pick(e: Entry) {
+  function pick(e: Entry, query: string) {
     const q = quick;
     quick = null;
-    if (workspace && q) noteUsed(insert(workspace, e.state, q.at, q.target));
+    if (workspace && q) noteUsed(insert(workspace, e.state, q.at, q.target, q.connection, query));
   }
 
   let host: HTMLDivElement;
@@ -470,7 +504,7 @@
       const typing = (e.target as HTMLElement)?.closest('input, textarea, [contenteditable]');
       if (e.code === 'Space' && (e.ctrlKey || e.metaKey) && !typing) {
         e.preventDefault();
-        openQuickAdd();
+        openQuickAdd(true);
       }
     };
     const onMiddle = (e: MouseEvent) => {
@@ -483,6 +517,7 @@
     registerFavourites(workspace);
     const stopDrag = installDragTricks(workspace, host, () => (mouse.clientX ? mouse : null));
     const stopSummaries = installSummaries(workspace);
+    const stopSlotHints = installSlotHints(workspace);
     host.addEventListener('keydown', onKey);
     host.addEventListener('mousedown', onMiddle);
 
@@ -542,6 +577,7 @@
       host.removeEventListener('mousemove', onMouse);
       stopDrag();
       stopSummaries();
+      stopSlotHints();
       host.removeEventListener('keydown', onKey);
       host.removeEventListener('mousedown', onMiddle);
       runStackHandlers.delete(wsId);
@@ -614,6 +650,11 @@
     background: #fff;
     color: #000;
   }
+  /* Text Blockly won't take (e.g. "1,234,5" in a number); the field keeps its old value. */
+  :global(.blocklyWidgetDiv input.blocklyHtmlInput.blocklyInvalidInput) {
+    background: #ffd6d6;
+    outline: 2px solid #e53935;
+  }
   .workspace :global(.pb-breakpoint > .blocklyPath) {
     stroke: #e53935;
     stroke-width: 3px;
@@ -632,6 +673,12 @@
     stroke: #e53935;
     stroke-width: 4px;
     filter: drop-shadow(0 0 8px #e53935);
+  }
+  .workspace :global(.pb-slot-hint) {
+    fill: var(--pb-text-2);
+    font-size: 13px;
+    font-style: italic;
+    pointer-events: none;
   }
   .workspace :global(.pb-loose) {
     opacity: 0.6;

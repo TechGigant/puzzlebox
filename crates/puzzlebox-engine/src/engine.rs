@@ -1,13 +1,13 @@
 //! Program lifecycle, trigger dispatch and HA-style run modes.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
 use puzzlebox_ir::{BlockLowerer, CompileError, HandlerKind, LogLevel, NoExternals, Program, Trigger};
-use puzzlebox_storage::{ProgramRecord, RunRecord, Store, now_ms};
+use puzzlebox_storage::{LogRecord, ProgramRecord, RunRecord, Store, now_ms};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::{broadcast, mpsc};
@@ -80,6 +80,16 @@ pub struct LogEntry {
 
 /// Log lines kept per program.
 const LOG_KEPT: usize = 200;
+
+/// How long new log lines wait to be written, so a burst of them is one write.
+const LOG_FLUSH_DELAY: Duration = Duration::from_secs(2);
+
+/// How often the recycle bin is emptied of programs past `BIN_DAYS`.
+const PURGE_EVERY: Duration = Duration::from_secs(24 * 3600);
+
+/// Untouched "New program"s younger than this survive a periodic purge, since the editor may
+/// still have one open.
+const STRAY_GRACE_MS: i64 = 24 * 3600 * 1000;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -171,6 +181,10 @@ pub(crate) struct Inner {
     pub(crate) debugger: Debugger,
     active: Mutex<HashMap<String, ActiveRun>>,
     logs: Mutex<HashMap<String, VecDeque<LogEntry>>>,
+    /// Log lines not yet written to the store.
+    log_pending: Mutex<Vec<LogRecord>>,
+    log_flush_scheduled: AtomicBool,
+    log_writing: tokio::sync::Mutex<()>,
 }
 
 #[derive(Clone)]
@@ -189,6 +203,15 @@ fn new_id() -> String {
 impl Engine {
     pub async fn new(ha: Arc<dyn HaApi>, store: Store) -> anyhow::Result<Self> {
         let globals = store.kv_all("global").await?;
+        let mut logs: HashMap<String, VecDeque<LogEntry>> = HashMap::new();
+        for r in store.all_logs().await? {
+            let Ok(level) = serde_json::from_value(Value::String(r.level)) else { continue };
+            let log = logs.entry(r.program_id).or_default();
+            if log.len() >= LOG_KEPT {
+                log.pop_front();
+            }
+            log.push_back(LogEntry { ts: r.ts, level, message: r.message, run_id: r.run_id });
+        }
         let (events, _) = broadcast::channel(1024);
         Ok(Self {
             inner: Arc::new(Inner {
@@ -204,7 +227,10 @@ impl Engine {
                 sources: TriggerSources::default(),
                 debugger: Debugger::default(),
                 active: Mutex::new(HashMap::new()),
-                logs: Mutex::new(HashMap::new()),
+                logs: Mutex::new(logs),
+                log_pending: Mutex::new(Vec::new()),
+                log_flush_scheduled: AtomicBool::new(false),
+                log_writing: tokio::sync::Mutex::new(()),
             }),
         })
     }
@@ -274,15 +300,57 @@ impl Engine {
     }
 
     pub async fn load_all(&self) -> anyhow::Result<()> {
-        match self.inner.store.purge_old().await {
-            Ok(0) => {}
-            Ok(n) => info!("removed {n} programs from the recycle bin or never used"),
-            Err(e) => warn!(error = %e, "failed to empty the recycle bin"),
-        }
+        self.purge_old(0).await;
         for p in self.inner.store.list_programs().await? {
             self.start(&p).await;
         }
         Ok(())
+    }
+
+    /// Empties the recycle bin of old programs (see `Store::purge_old`), stopping and
+    /// forgetting any that were still loaded. Returns how many were removed.
+    pub async fn purge_old(&self, strays_after_ms: i64) -> usize {
+        let ids = match self.inner.store.purge_old(strays_after_ms).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(error = %e, "failed to empty the recycle bin");
+                return 0;
+            }
+        };
+        for id in &ids {
+            self.stop_program(id);
+            lock(&self.inner.status).remove(id);
+            lock(&self.inner.logs).remove(id);
+            let _ = self.inner.events.send(EngineEvent::Removed { program_id: id.clone() });
+        }
+        if !ids.is_empty() {
+            info!("removed {} programs from the recycle bin or never used", ids.len());
+        }
+        ids.len()
+    }
+
+    /// Runs `purge_old` once a day in the background.
+    pub fn spawn_housekeeping(&self) -> JoinHandle<()> {
+        let engine = self.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(PURGE_EVERY);
+            every.tick().await;
+            loop {
+                every.tick().await;
+                engine.purge_old(STRAY_GRACE_MS).await;
+            }
+        })
+    }
+
+    /// Writes log lines still waiting to the store; call before shutting down.
+    pub async fn flush_log(&self) {
+        // One write at a time, so lines reach the store in order.
+        let _writing = self.inner.log_writing.lock().await;
+        self.inner.log_flush_scheduled.store(false, Ordering::SeqCst);
+        let lines = std::mem::take(&mut *lock(&self.inner.log_pending));
+        if let Err(e) = self.inner.store.append_log(lines, LOG_KEPT).await {
+            warn!(error = %e, "failed to save program logs");
+        }
     }
 
     /// Swaps the block lowerer and restarts programs that failed to compile, since
@@ -335,6 +403,7 @@ impl Engine {
     /// Deletes a program in the recycle bin for good.
     pub async fn purge(&self, id: &str) -> anyhow::Result<bool> {
         lock(&self.inner.logs).remove(id);
+        lock(&self.inner.log_pending).retain(|l| l.program_id != id);
         self.inner.store.purge_program(id).await
     }
 
@@ -380,6 +449,25 @@ impl Engine {
                 level,
                 message: message.to_owned(),
                 run_id: run_id.map(str::to_owned),
+            });
+        }
+        lock(&self.inner.log_pending).push(LogRecord {
+            program_id: program_id.to_owned(),
+            ts,
+            level: serde_json::to_value(level)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            message: message.to_owned(),
+            run_id: run_id.map(str::to_owned),
+        });
+        if !self.inner.log_flush_scheduled.swap(true, Ordering::SeqCst)
+            && let Ok(rt) = tokio::runtime::Handle::try_current()
+        {
+            let engine = self.clone();
+            rt.spawn(async move {
+                tokio::time::sleep(LOG_FLUSH_DELAY).await;
+                engine.flush_log().await;
             });
         }
         let _ = self.inner.events.send(EngineEvent::Log {

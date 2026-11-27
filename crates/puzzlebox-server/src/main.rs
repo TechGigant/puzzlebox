@@ -91,6 +91,8 @@ async fn run() -> Result<()> {
     }
     engine.set_lowerer(registry.registry.lowerer());
     engine.load_all().await?;
+    engine.spawn_housekeeping();
+    let on_exit = engine.clone();
 
     let state = routes::AppState {
         ha,
@@ -108,12 +110,13 @@ async fn run() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     info!(addr = %cfg.bind, ha = %cfg.ha_ws_url, "puzzlebox listening");
     axum::serve(listener, routes::router(state).into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown())
+        .with_graceful_shutdown(shutdown(on_exit.clone()))
         .await?;
+    on_exit.flush_log().await;
     Ok(())
 }
 
-async fn shutdown() {
+async fn shutdown(engine: Engine) {
     let ctrl_c = tokio::signal::ctrl_c();
     let mut term =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
@@ -121,4 +124,7 @@ async fn shutdown() {
         _ = ctrl_c => {},
         _ = term.recv() => {},
     }
+    // Open editor connections can hold the graceful shutdown up past the Supervisor's kill
+    // timeout, so save the log now.
+    engine.flush_log().await;
 }

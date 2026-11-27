@@ -1046,3 +1046,64 @@ async fn failed_runs_are_logged_and_marked() {
     assert_eq!(engine.status("p").unwrap().last_status.as_deref(), Some("error"));
     assert_eq!(engine.cancel_runs("p"), 0);
 }
+
+#[tokio::test]
+async fn log_survives_a_restart_and_goes_with_the_program() {
+    let ha = Arc::new(MockHa::default());
+    let store = Store::open_in_memory().unwrap();
+    let engine = Engine::new(ha.clone(), store.clone()).await.unwrap();
+    let mut events = engine.subscribe();
+    let ws = workspace(vec![on_run(call("c", "fail.now", "x.y"))], json!([]));
+    engine.save(program("p", ws, "single")).await.unwrap();
+    assert!(engine.run_now("p", None, None));
+    next_finished(&mut events).await;
+    engine.flush_log().await;
+
+    let again = Engine::new(ha.clone(), store.clone()).await.unwrap();
+    let log = again.log("p");
+    assert!(log.last().unwrap().message.contains("boom"), "{log:?}");
+    again.delete("p").await.unwrap();
+    let in_bin = Engine::new(ha.clone(), store.clone()).await.unwrap();
+    assert_eq!(in_bin.log("p").len(), log.len(), "the bin keeps the log");
+    in_bin.purge("p").await.unwrap();
+    assert!(Engine::new(ha, store).await.unwrap().log("p").is_empty());
+}
+
+#[tokio::test]
+async fn log_is_written_behind() {
+    let ha = Arc::new(MockHa::default());
+    let store = Store::open_in_memory().unwrap();
+    let engine = Engine::new(ha.clone(), store.clone()).await.unwrap();
+    let mut events = engine.subscribe();
+    let ws = workspace(vec![on_run(call("c", "fail.now", "x.y"))], json!([]));
+    engine.save(program("p", ws, "single")).await.unwrap();
+    assert!(engine.run_now("p", None, None));
+    next_finished(&mut events).await;
+    for _ in 0..20 {
+        if !store.all_logs().await.unwrap().is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    panic!("the log line was never written");
+}
+
+#[tokio::test]
+async fn periodic_purge_spares_fresh_strays_and_unloads_old_ones() {
+    let (engine, _ha) = setup().await;
+    let mut events = engine.subscribe();
+    let mut stray = program("stray", json!({"blocks": {}}), "single");
+    stray.name = "New program".into();
+    engine.save(stray).await.unwrap();
+    assert!(engine.status("stray").is_some());
+    assert_eq!(engine.purge_old(3_600_000).await, 0, "the editor may still have it open");
+    assert_eq!(engine.purge_old(0).await, 1);
+    assert!(engine.status("stray").is_none());
+    loop {
+        let ev = timeout(Duration::from_secs(5), events.recv()).await.unwrap().unwrap();
+        if let EngineEvent::Removed { program_id } = ev {
+            assert_eq!(program_id, "stray");
+            break;
+        }
+    }
+}

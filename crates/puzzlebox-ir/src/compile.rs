@@ -9,6 +9,8 @@ use crate::ir::*;
 
 #[path = "compile_conditions.rs"]
 mod conditions;
+#[path = "compile_everyday.rs"]
+mod everyday;
 #[path = "compile_helpers.rs"]
 mod helpers;
 #[path = "compile_triggers.rs"]
@@ -642,6 +644,9 @@ impl<'a> Compiler<'a> {
                 if let Some(t) = self.helper_trigger(&b) {
                     return t;
                 }
+                if let Some(t) = self.everyday_trigger(&b) {
+                    return t;
+                }
                 let ext = self.ext;
                 let t = ext.lower_trigger(b, self);
                 if t.is_none() {
@@ -1036,6 +1041,9 @@ impl<'a> Compiler<'a> {
             },
             _ => {
                 if let Some(k) = self.helper_stmt(&b) {
+                    return Some(k);
+                }
+                if let Some(k) = self.everyday_stmt(&b) {
                     return Some(k);
                 }
                 let ext = self.ext;
@@ -1595,6 +1603,9 @@ impl<'a> Compiler<'a> {
             },
             _ => {
                 if let Some(k) = self.helper_expr(b) {
+                    return k;
+                }
+                if let Some(k) = self.everyday_expr(b) {
                     return k;
                 }
                 if let Some(k) = self.ha_value_expr(b) {

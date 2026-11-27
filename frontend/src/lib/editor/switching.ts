@@ -65,6 +65,7 @@ const GROUPS: [string, string][][] = [
     ['ha_numeric_state', 'is above / below'],
     ['person_is_home', 'is home'],
     ['zone_condition', 'is in zone'],
+    ['alarm_is', 'alarm is armed / disarmed'],
   ],
   [
     ['sun_is', 'the sun is up'],
@@ -97,6 +98,18 @@ const GROUPS: [string, string][][] = [
   [
     ['time_now', 'now'],
     ['time_today_at', 'today at'],
+  ],
+  [
+    ['ha_trigger_zone', 'person arrives at / leaves'],
+    ['ha_trigger_occupancy', 'first person arrives / last person leaves'],
+  ],
+  [
+    ['alarm_arm', 'arm alarm'],
+    ['alarm_disarm', 'disarm alarm'],
+  ],
+  [
+    ['notify_send', 'send notification'],
+    ['notify_ask', 'send notification and wait for a reply'],
   ],
 ];
 

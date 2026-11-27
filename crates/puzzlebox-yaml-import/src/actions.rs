@@ -998,7 +998,7 @@ impl Builder {
         }
         let snap = self.snapshot();
         if response.is_none()
-            && let Some(b) = self.helper(&svc, &target, &data)
+            && let Some(b) = self.helper(&svc, &target, &data).or_else(|| self.everyday(&svc, &target, &data))
         {
             return Some((vec![b], Lost::default()));
         }
@@ -1360,6 +1360,82 @@ impl Builder {
         }
         let (ty, fields, inputs) = spec?;
         self.light_block(ty, fields, inputs, target)
+    }
+
+    /// Remember/restore, alarm and button blocks, for the calls they send exactly.
+    fn everyday(
+        &mut self,
+        svc: &str,
+        target: &Map<String, Value>,
+        data: &Map<String, Value>,
+    ) -> Option<Value> {
+        let entity_ids = || -> Option<Vec<String>> {
+            if !only_keys(target, &["entity_id"]) {
+                return None;
+            }
+            match target.get("entity_id")? {
+                Value::String(s) => s.split(',').map(|e| entity_id(e.trim())).collect(),
+                Value::Array(a) => a.iter().map(|e| entity_id(e.as_str()?)).collect(),
+                _ => None,
+            }
+        };
+        match svc {
+            "scene.create" if target.is_empty() => {
+                // The block's name is the scene id, cleaned up as HA's slug check wants it.
+                let id = data.get("scene_id")?.as_str()?;
+                let slug = id.split('_').all(|p| {
+                    !p.is_empty() && p.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+                });
+                if !slug || data.len() != 2 {
+                    return None;
+                }
+                let snapshot = data.get("snapshot_entities").filter(|v| !has_tpl(v))?;
+                let mut t = Map::new();
+                t.insert("entity_id".into(), snapshot.clone());
+                let what = self.target_from(&t)?;
+                Some(self.block("scene_remember", json!({"NAME": id}), vec![("TARGET", Some(what))], None))
+            }
+            "button.press" | "input_button.press" if data.is_empty() => {
+                // The block picks input_button.press when every entity is a button helper.
+                let helpers = entity_ids()
+                    .is_some_and(|ids| !ids.is_empty() && ids.iter().all(|e| e.starts_with("input_button.")));
+                let any_helper =
+                    entity_ids().is_some_and(|ids| ids.iter().any(|e| e.starts_with("input_button.")));
+                if (svc == "input_button.press") != helpers || (svc == "button.press" && any_helper) {
+                    return None;
+                }
+                let t = self.target_from(target)?;
+                Some(self.block("button_press", json!({}), vec![("TARGET", Some(t))], None))
+            }
+            _ => {
+                let name = svc.strip_prefix("alarm_control_panel.alarm_")?;
+                let mode = name.strip_prefix("arm_");
+                if (mode.is_none() && name != "disarm") || !only_keys(data, &["code"]) {
+                    return None;
+                }
+                let modes = ["away", "home", "night", "vacation", "custom_bypass"];
+                if mode.is_some_and(|m| !modes.contains(&m)) {
+                    return None;
+                }
+                // HA reads the code as text; an empty code would be left out by the block.
+                let code = match data.get("code") {
+                    None => None,
+                    Some(Value::Number(n)) => Some(json!(n.to_string())),
+                    Some(Value::String(s)) if !s.trim().is_empty() => Some(json!(s)),
+                    Some(_) => return None,
+                };
+                let code = match code {
+                    Some(c) => Some(self.text_input(&c)?),
+                    None => None,
+                };
+                let t = self.target_from(target)?;
+                let (ty, fields) = match mode {
+                    Some(m) => ("alarm_arm", json!({"MODE": m})),
+                    None => ("alarm_disarm", json!({})),
+                };
+                Some(self.block(ty, fields, vec![("TARGET", Some(t)), ("CODE", code)], None))
+            }
+        }
     }
 
     /// A helper block with its value sockets and TARGET.

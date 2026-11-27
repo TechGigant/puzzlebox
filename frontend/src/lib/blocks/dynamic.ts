@@ -3,6 +3,7 @@
 import * as Blockly from 'blockly/core';
 import type { ExtraCategory } from '../toolbox';
 import { ENTITY_DOMAINS, HELPER_DOMAINS } from './helpers';
+import { EVERYDAY_DOMAINS } from './everyday';
 import { FieldOptions, FieldRegistry, FieldStateValue, setDomainResolver } from './field_entity';
 import { addTriggerSettings, chooseTriggerSetting, triggerSettingItems } from './trigger_settings';
 
@@ -82,7 +83,9 @@ setDomainResolver((parent, inputName) => {
   if (!def && inputName === 'TARGET') {
     if (parent.type.startsWith('light_')) return { domains: ['light'], areas: true };
     if (HELPER_DOMAINS[parent.type]) return { domains: HELPER_DOMAINS[parent.type], areas: !NO_AREA_TARGET.has(parent.type) };
+    if (EVERYDAY_DOMAINS[parent.type]) return { domains: EVERYDAY_DOMAINS[parent.type] };
   }
+  if (!def && inputName === 'ENTITY' && EVERYDAY_DOMAINS[parent.type]) return { domains: EVERYDAY_DOMAINS[parent.type] };
   if (!def && inputName === 'ENTITY' && ENTITY_DOMAINS[parent.type]) return { domains: ENTITY_DOMAINS[parent.type] };
   if (!def) return { domains: [] };
   if (inputName === 'TARGET') return { domains: def.target?.domains ?? [], deviceClasses: def.target?.device_classes, areas: true };

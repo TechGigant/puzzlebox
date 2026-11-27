@@ -1,6 +1,7 @@
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
+use puzzlebox_engine::HaApi;
 use puzzlebox_storage::ProgramRecord;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -41,11 +42,14 @@ pub struct ProgramInput {
     max_runs: Option<u32>,
     workspace: Option<Value>,
     folder: Option<String>,
+    /// Block id → the block's text in the editor (see `Store::labels`).
+    labels: Option<Value>,
 }
 
 const MODES: [&str; 4] = ["single", "restart", "queued", "parallel"];
 
-fn apply(rec: &mut ProgramRecord, input: ProgramInput) -> Result<(), ApiError> {
+fn apply(rec: &mut ProgramRecord, mut input: ProgramInput) -> Result<Option<Value>, ApiError> {
+    let labels = input.labels.take();
     if let Some(n) = input.name {
         let n = n.trim().to_owned();
         if n.is_empty() {
@@ -75,11 +79,11 @@ fn apply(rec: &mut ProgramRecord, input: ProgramInput) -> Result<(), ApiError> {
         // Normalise "a / b/" to "a/b"; empty means no folder.
         rec.folder = f.split('/').map(str::trim).filter(|p| !p.is_empty()).collect::<Vec<_>>().join("/");
     }
-    Ok(())
+    Ok(labels)
 }
 
-async fn save(st: &AppState, rec: ProgramRecord) -> ApiResult {
-    let (saved, errors) = st.engine.save(rec).await?;
+async fn save(st: &AppState, rec: ProgramRecord, labels: Option<Value>) -> ApiResult {
+    let (saved, errors) = st.engine.save_with_labels(rec, labels).await?;
     let mut out = with_status(st, &saved, true);
     out["errors"] = serde_json::to_value(errors).unwrap_or_default();
     Ok(Json(out))
@@ -98,8 +102,8 @@ pub async fn create(State(st): State<AppState>, DeepJson(input): DeepJson<Progra
         created_at: 0,
         updated_at: 0,
     };
-    apply(&mut rec, input)?;
-    save(&st, rec).await
+    let labels = apply(&mut rec, input)?;
+    save(&st, rec, labels).await
 }
 
 pub async fn update(
@@ -108,8 +112,8 @@ pub async fn update(
     DeepJson(input): DeepJson<ProgramInput>,
 ) -> ApiResult {
     let mut rec = st.engine.store().get_program(&id).await?.ok_or_else(not_found)?;
-    apply(&mut rec, input)?;
-    save(&st, rec).await
+    let labels = apply(&mut rec, input)?;
+    save(&st, rec, labels).await
 }
 
 pub async fn delete(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
@@ -125,6 +129,8 @@ pub struct RunInput {
     /// Top block of the stack to run (an entry block or a loose stack), instead of `handler`.
     block: Option<String>,
     trigger: Option<Value>,
+    /// A trigger block: run its "when" as if that trigger fired.
+    as_trigger: Option<String>,
 }
 
 pub async fn run(
@@ -133,6 +139,15 @@ pub async fn run(
     body: Option<Json<RunInput>>,
 ) -> ApiResult {
     let input = body.map(|b| b.0).unwrap_or_default();
+    if let Some(t) = &input.as_trigger {
+        if !st.engine.run_as_trigger(&id, t) {
+            return Err(ApiError(
+                StatusCode::CONFLICT,
+                "this trigger can't run: save the program, turn it on, and fix any problems in it".into(),
+            ));
+        }
+        return Ok(Json(json!({"ok": true})));
+    }
     let handler = match &input.block {
         Some(block) => Some(st.engine.handler_index(&id, block).ok_or_else(|| {
             ApiError(
@@ -149,8 +164,85 @@ pub async fn run(
 }
 
 pub async fn cancel(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
-    st.engine.cancel_runs(&id);
+    let cancelled = st.engine.cancel_runs(&id);
+    Ok(Json(json!({"ok": true, "cancelled": cancelled})))
+}
+
+/// Runs in progress and what they are doing.
+pub async fn active(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    Ok(Json(serde_json::to_value(st.engine.active_runs(&id)).unwrap_or_default()))
+}
+
+pub async fn log(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    Ok(Json(serde_json::to_value(st.engine.log(&id)).unwrap_or_default()))
+}
+
+/// The program's triggers in words, for "Run as if … fired".
+pub async fn triggers(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let list: Vec<Value> = st
+        .engine
+        .triggers(&id)
+        .into_iter()
+        .map(|(block_id, summary)| json!({"block_id": block_id, "summary": summary}))
+        .collect();
+    Ok(Json(Value::Array(list)))
+}
+
+/// A copy of the program, turned off so it doesn't run twice.
+pub async fn duplicate(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let store = st.engine.store();
+    let orig = store.get_program(&id).await?.ok_or_else(not_found)?;
+    let labels = store.labels(&id).await?;
+    let copy = ProgramRecord {
+        id: new_id(),
+        name: format!("{} (copy)", orig.name),
+        enabled: false,
+        created_at: 0,
+        updated_at: 0,
+        ..orig
+    };
+    save(&st, copy, Some(labels)).await
+}
+
+pub async fn bin(State(st): State<AppState>) -> ApiResult {
+    let list = st.engine.store().list_deleted().await?;
+    Ok(Json(json!({"programs": list, "days": puzzlebox_storage::BIN_DAYS})))
+}
+
+pub async fn restore(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    let rec = st.engine.restore(&id).await?.ok_or_else(not_found)?;
+    Ok(Json(with_status(&st, &rec, false)))
+}
+
+pub async fn purge(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
+    if !st.engine.purge(&id).await? {
+        return Err(not_found());
+    }
     Ok(Json(json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+pub struct SwitchOverInput {
+    /// The HA automation the program replaces.
+    entity_id: String,
+}
+
+/// Turns the HA automation off and the program on, so the program takes over.
+pub async fn switch_over(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<SwitchOverInput>,
+) -> ApiResult {
+    if !input.entity_id.starts_with("automation.") {
+        return Err(ApiError(StatusCode::UNPROCESSABLE_ENTITY, "not an automation".into()));
+    }
+    st.engine.store().get_program(&id).await?.ok_or_else(not_found)?;
+    st.live
+        .call_service("automation.turn_off", None, Some(json!({"entity_id": input.entity_id})))
+        .await
+        .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, format!("couldn't turn the automation off: {e}")))?;
+    let rec = st.engine.set_enabled(&id, true).await?.ok_or_else(not_found)?;
+    Ok(Json(with_status(&st, &rec, false)))
 }
 
 #[derive(Deserialize)]

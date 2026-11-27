@@ -966,3 +966,95 @@ async fn loops_keep_records_and_nested_calls_to_broken_functions_are_caught() {
     let (_, errors) = engine.save(program("bf", ws, "single")).await.unwrap();
     assert!(errors.iter().any(|e| e.message.contains("function \"f\"")), "{errors:?}");
 }
+
+fn motion_states(ha: &MockHa) {
+    ha.states.lock().unwrap().insert(
+        "binary_sensor.motion".into(),
+        json!({"entity_id": "binary_sensor.motion", "state": "off", "attributes": {"friendly_name": "Motion"}}),
+    );
+}
+
+#[tokio::test]
+async fn active_runs_show_waits_and_steps_say_how_they_went() {
+    let (engine, ha) = setup().await;
+    motion_states(&ha);
+    let mut events = engine.subscribe();
+    let check = b(
+        "controls_if",
+        "if",
+        json!({}),
+        json!({"IF0": blk(b("logic_boolean", "yes", json!({"BOOL": "TRUE"}), json!({}))),
+               "DO0": blk(b("ha_wait", "w1", json!({}), json!({"SECONDS": blk(num("n", 0.3))})))}),
+    );
+    let ws = workspace(vec![when("w", state_trigger("t", "binary_sensor.motion"), check)], json!([]));
+    engine.save(program("p", ws, "single")).await.unwrap();
+    let status = engine.status("p").unwrap();
+    assert_eq!(status.summary, "when Motion turns on");
+    assert!(!status.does_nothing);
+
+    ha.fire(json!({"platform": "state", "entity_id": "binary_sensor.motion",
+        "from_state": {"state": "off", "attributes": {"friendly_name": "Motion"}},
+        "to_state": {"state": "on", "attributes": {"friendly_name": "Motion"}}}));
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let active = engine.active_runs("p");
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].summary, "Motion turned on");
+    assert_eq!(active[0].block_id.as_deref(), Some("w1"));
+    assert_eq!(active[0].waiting.as_ref().unwrap().text, "waiting 0.3 s");
+
+    assert_eq!(next_finished(&mut events).await.0, "ok");
+    assert!(engine.active_runs("p").is_empty());
+    let runs = engine.store().list_runs("p", 1).await.unwrap();
+    assert_eq!(runs[0].summary.as_deref(), Some("Motion turned on"));
+    let trace = engine.store().get_run(&runs[0].id).await.unwrap().unwrap().trace.unwrap();
+    let note = |block: &str| {
+        trace["steps"].as_array().unwrap().iter().find(|s| s["block"] == block).unwrap()["note"].clone()
+    };
+    assert_eq!(note("if"), "true");
+    assert_eq!(note("w1"), "waited 0.3 s");
+}
+
+#[tokio::test]
+async fn programs_without_actions_do_nothing() {
+    let (engine, _ha) = setup().await;
+    let empty_when = b("ha_when", "w", json!({}), json!({"TRIGGERS": blk(state_trigger("t", "x.y"))}));
+    engine.save(program("p", workspace(vec![empty_when], json!([])), "single")).await.unwrap();
+    assert!(engine.status("p").unwrap().does_nothing);
+    engine.save(program("q", workspace(vec![], json!([])), "single")).await.unwrap();
+    assert!(engine.status("q").unwrap().does_nothing);
+}
+
+#[tokio::test]
+async fn runs_as_if_a_trigger_fired() {
+    let (engine, ha) = setup().await;
+    motion_states(&ha);
+    let mut events = engine.subscribe();
+    let ws = workspace(
+        vec![when("w", state_trigger("t", "binary_sensor.motion"), call("c", "light.turn_on", "light.a"))],
+        json!([]),
+    );
+    engine.save(program("p", ws, "single")).await.unwrap();
+    assert_eq!(engine.triggers("p"), [("t".to_owned(), "Motion turns on".to_owned())]);
+    assert!(engine.run_as_trigger("p", "t"));
+    assert!(!engine.run_as_trigger("p", "nope"));
+    next_finished(&mut events).await;
+    let run = &engine.store().list_runs("p", 1).await.unwrap()[0];
+    let t = run.trigger.as_ref().unwrap();
+    assert_eq!((&t["from_state"]["state"], &t["to_state"]["state"]), (&json!("off"), &json!("on")));
+    assert_eq!(t["id"], "t");
+    assert_eq!(run.summary.as_deref(), Some("run as if Motion turned on"));
+}
+
+#[tokio::test]
+async fn failed_runs_are_logged_and_marked() {
+    let (engine, _ha) = setup().await;
+    let mut events = engine.subscribe();
+    let ws = workspace(vec![on_run(call("c", "fail.now", "x.y"))], json!([]));
+    engine.save(program("p", ws, "single")).await.unwrap();
+    assert!(engine.run_now("p", None, None));
+    assert_eq!(next_finished(&mut events).await.0, "error");
+    let log = engine.log("p");
+    assert!(log.last().unwrap().message.contains("boom"), "{log:?}");
+    assert_eq!(engine.status("p").unwrap().last_status.as_deref(), Some("error"));
+    assert_eq!(engine.cancel_runs("p"), 0);
+}

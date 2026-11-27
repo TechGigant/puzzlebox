@@ -2,6 +2,7 @@
 
 pub mod colour;
 mod debug;
+pub mod describe;
 mod engine;
 mod ha;
 mod interp;
@@ -10,7 +11,7 @@ mod sources;
 pub mod value;
 
 pub use debug::{Debugger, WatchGuard};
-pub use engine::{Engine, EngineEvent, ProgramStatus, RunMode};
+pub use engine::{ActiveRun, Engine, EngineEvent, LogEntry, ProgramStatus, RunMode};
 pub use ha::{ActionError, ConditionError, HaApi, LiveHa, OnError, TemplateStream, TriggerStream};
-pub use interp::{HttpClient, PluginHost, RunError};
+pub use interp::{HttpClient, PluginHost, RunError, Waiting};
 pub use sources::{CronSource, TriggerSink, TriggerSource, parse_cron};

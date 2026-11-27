@@ -1,6 +1,6 @@
 //! Program lifecycle, trigger dispatch and HA-style run modes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
@@ -17,7 +17,7 @@ use tracing::{info, warn};
 
 use crate::debug::Debugger;
 use crate::ha::HaApi;
-use crate::interp::{ErrorKind, HttpClient, PluginHost, RunCtx, RunHooks, Trace};
+use crate::interp::{ErrorKind, HttpClient, PluginHost, RunCtx, RunHooks, Trace, Waiting};
 use crate::sources::{TriggerSource, TriggerSources};
 
 const RUN_HISTORY: usize = 25;
@@ -49,8 +49,39 @@ pub struct ProgramStatus {
     pub active_runs: usize,
     pub last_run: Option<i64>,
     pub last_error: Option<String>,
+    /// How the last run ended (`ok`, `error`, `cancelled`), also after a restart.
+    pub last_status: Option<String>,
     pub errors: Vec<CompileError>,
+    /// What starts the program, in words ("when Movement turns on (+1)").
+    pub summary: String,
+    /// No entry block has both a trigger and something to do.
+    pub does_nothing: bool,
 }
+
+/// A run in progress and what it is doing.
+#[derive(Debug, Clone, Serialize)]
+pub struct ActiveRun {
+    pub run_id: String,
+    pub program_id: String,
+    pub started_at: i64,
+    /// What started it ("Movement turned on").
+    pub summary: String,
+    /// The block it is at.
+    pub block_id: Option<String>,
+    pub waiting: Option<Waiting>,
+}
+
+/// A line of a program's log: its "log" blocks, warnings and errors.
+#[derive(Debug, Clone, Serialize)]
+pub struct LogEntry {
+    pub ts: i64,
+    pub level: LogLevel,
+    pub message: String,
+    pub run_id: Option<String>,
+}
+
+/// Log lines kept per program.
+const LOG_KEPT: usize = 200;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -63,6 +94,13 @@ pub enum EngineEvent {
         program_id: String,
         run_id: String,
         trigger: Value,
+        summary: String,
+    },
+    /// A run started (`Some`) or stopped (`None`) waiting.
+    Waiting {
+        program_id: String,
+        run_id: String,
+        waiting: Option<Waiting>,
     },
     RunFinished {
         program_id: String,
@@ -133,6 +171,8 @@ pub(crate) struct Inner {
     http: RwLock<Option<Arc<dyn HttpClient>>>,
     sources: TriggerSources,
     pub(crate) debugger: Debugger,
+    active: Mutex<HashMap<String, ActiveRun>>,
+    logs: Mutex<HashMap<String, VecDeque<LogEntry>>>,
 }
 
 #[derive(Clone)]
@@ -165,6 +205,8 @@ impl Engine {
                 http: RwLock::new(None),
                 sources: TriggerSources::default(),
                 debugger: Debugger::default(),
+                active: Mutex::new(HashMap::new()),
+                logs: Mutex::new(HashMap::new()),
             }),
         })
     }
@@ -234,6 +276,11 @@ impl Engine {
     }
 
     pub async fn load_all(&self) -> anyhow::Result<()> {
+        match self.inner.store.purge_old().await {
+            Ok(0) => {}
+            Ok(n) => info!("removed {n} programs from the recycle bin or never used"),
+            Err(e) => warn!(error = %e, "failed to empty the recycle bin"),
+        }
         for p in self.inner.store.list_programs().await? {
             self.start(&p).await;
         }
@@ -270,17 +317,113 @@ impl Engine {
     /// Persists the program and (re)starts it. Compile errors are returned but the
     /// record is saved anyway so work is never lost.
     pub async fn save(&self, record: ProgramRecord) -> anyhow::Result<(ProgramRecord, Vec<CompileError>)> {
+        self.save_with_labels(record, None).await
+    }
+
+    /// Like `save`, also storing the editor's text for each block (see `Store::labels`).
+    pub async fn save_with_labels(
+        &self,
+        record: ProgramRecord,
+        labels: Option<Value>,
+    ) -> anyhow::Result<(ProgramRecord, Vec<CompileError>)> {
         let saved = self.inner.store.save_program(record).await?;
+        if let Some(l) = labels.filter(Value::is_object) {
+            self.inner.store.save_labels(&saved.id, &l).await?;
+        }
         let errors = self.start(&saved).await;
         Ok((saved, errors))
     }
 
+    /// Deletes a program in the recycle bin for good.
+    pub async fn purge(&self, id: &str) -> anyhow::Result<bool> {
+        lock(&self.inner.logs).remove(id);
+        self.inner.store.purge_program(id).await
+    }
+
+    /// Stops the program and moves it to the recycle bin.
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
         self.stop_program(id);
         lock(&self.inner.status).remove(id);
         let existed = self.inner.store.delete_program(id).await?;
         let _ = self.inner.events.send(EngineEvent::Removed { program_id: id.to_owned() });
         Ok(existed)
+    }
+
+    /// Takes a program out of the recycle bin and starts it again.
+    pub async fn restore(&self, id: &str) -> anyhow::Result<Option<ProgramRecord>> {
+        let Some(rec) = self.inner.store.restore_program(id).await? else { return Ok(None) };
+        self.start(&rec).await;
+        Ok(Some(rec))
+    }
+
+    /// Runs in progress for a program, oldest first.
+    pub fn active_runs(&self, program_id: &str) -> Vec<ActiveRun> {
+        let mut runs: Vec<ActiveRun> =
+            lock(&self.inner.active).values().filter(|r| r.program_id == program_id).cloned().collect();
+        runs.sort_by_key(|r| r.started_at);
+        runs
+    }
+
+    /// The program's recent log lines, oldest first.
+    pub fn log(&self, program_id: &str) -> Vec<LogEntry> {
+        lock(&self.inner.logs).get(program_id).map(|l| l.iter().cloned().collect()).unwrap_or_default()
+    }
+
+    fn push_log(&self, program_id: &str, run_id: Option<&str>, level: LogLevel, message: &str) {
+        let ts = now_ms();
+        {
+            let mut logs = lock(&self.inner.logs);
+            let log = logs.entry(program_id.to_owned()).or_default();
+            if log.len() >= LOG_KEPT {
+                log.pop_front();
+            }
+            log.push_back(LogEntry {
+                ts,
+                level,
+                message: message.to_owned(),
+                run_id: run_id.map(str::to_owned),
+            });
+        }
+        let _ = self.inner.events.send(EngineEvent::Log {
+            program_id: program_id.to_owned(),
+            run_id: run_id.unwrap_or_default().to_owned(),
+            level,
+            message: message.to_owned(),
+            ts,
+        });
+    }
+
+    /// The running program's triggers, in words, by block id.
+    pub fn triggers(&self, id: &str) -> Vec<(String, String)> {
+        let running = lock(&self.inner.running);
+        let Some(rp) = running.get(id) else { return vec![] };
+        let ha = self.inner.ha.as_ref();
+        rp.program
+            .handlers
+            .iter()
+            .filter_map(|h| match &h.kind {
+                HandlerKind::Triggers { triggers } => Some(triggers),
+                _ => None,
+            })
+            .flatten()
+            .map(|t| (t.block_id().to_owned(), crate::describe::trigger(t, ha)))
+            .collect()
+    }
+
+    /// Runs the handler of the trigger block `trigger_block` as if that trigger fired, with
+    /// made-up but plausible trigger data.
+    pub fn run_as_trigger(&self, id: &str, trigger_block: &str) -> bool {
+        let running = lock(&self.inner.running);
+        let Some(rp) = running.get(id) else { return false };
+        let found = rp.program.handlers.iter().enumerate().find_map(|(idx, h)| match &h.kind {
+            HandlerKind::Triggers { triggers } => {
+                triggers.iter().find(|t| t.block_id() == trigger_block).map(|t| (idx, t))
+            }
+            _ => None,
+        });
+        let Some((handler, t)) = found else { return false };
+        let trigger = crate::describe::simulate(t, self.inner.ha.as_ref());
+        rp.tx.send(Dispatch { handler, trigger }).is_ok()
     }
 
     pub async fn set_enabled(&self, id: &str, enabled: bool) -> anyhow::Result<Option<ProgramRecord>> {
@@ -329,13 +472,14 @@ impl Engine {
         Ok(json!({"global": Value::Object(lock(&self.inner.globals).clone()), "programs": programs}))
     }
 
-    /// Cancels all active runs of a program without disabling it.
-    pub fn cancel_runs(&self, id: &str) {
-        if let Some(rp) = lock(&self.inner.running).get(id) {
-            for tok in lock(&rp.runs).values() {
-                tok.cancel();
-            }
+    /// Cancels all active runs of a program without disabling it; returns how many.
+    pub fn cancel_runs(&self, id: &str) -> usize {
+        let Some(rp) = lock(&self.inner.running).get(id).map(|rp| rp.runs.clone()) else { return 0 };
+        let runs = lock(&rp);
+        for tok in runs.values() {
+            tok.cancel();
         }
+        runs.len()
     }
 
     /// Index of the handler whose entry (or loose stack) is the block `block_id`.
@@ -377,14 +521,23 @@ impl Engine {
             && let Ok(runs) = self.inner.store.list_runs(&rec.id, 1).await
             && let Some(last) = runs.first()
         {
-            let (at, error) = (last.started_at, last.error.clone());
-            lock(&self.inner.status).entry(rec.id.clone()).or_default().last_run = Some(at);
-            if let Some(e) = error {
-                lock(&self.inner.status).entry(rec.id.clone()).or_default().last_error = Some(e);
+            let mut all = lock(&self.inner.status);
+            let st = all.entry(rec.id.clone()).or_default();
+            st.last_run = Some(last.started_at);
+            st.last_status = Some(last.status.clone());
+            if let Some(e) = &last.error {
+                st.last_error = Some(e.clone());
             }
         }
         // Stacks with problems are left out; the rest runs. Nothing to run at all = invalid.
         let (program, compile_errors) = self.compile_partial(&rec.workspace);
+        {
+            let mut all = lock(&self.inner.status);
+            let st = all.entry(rec.id.clone()).or_default();
+            st.summary = crate::describe::program(&program, self.inner.ha.as_ref());
+            st.does_nothing = compile_errors.is_empty() && crate::describe::does_nothing(&program);
+        }
+        let labels = Arc::new(self.inner.store.labels(&rec.id).await.unwrap_or_default());
         if !compile_errors.is_empty() && program.handlers.is_empty() {
             self.update_status(&rec.id, |s| {
                 s.state = "invalid".into();
@@ -464,6 +617,7 @@ impl Engine {
             runs: runs.clone(),
             mode: RunMode::parse(&rec.mode),
             max: rec.max_runs.max(1) as usize,
+            labels,
         };
         tasks.push(tokio::spawn(ctx.dispatch(rx)));
 
@@ -507,6 +661,8 @@ struct DispatchCtx {
     runs: Arc<Mutex<HashMap<String, CancellationToken>>>,
     mode: RunMode,
     max: usize,
+    /// The editor's text for each block when the program was saved.
+    labels: Arc<Value>,
 }
 
 impl DispatchCtx {
@@ -526,7 +682,7 @@ impl DispatchCtx {
                     continue;
                 }
                 if qtx.try_send(d).is_err() {
-                    self.skipped("queue is full");
+                    self.skipped("too many runs waiting (if already running: run after)");
                 }
             }
             w.abort();
@@ -541,7 +697,7 @@ impl DispatchCtx {
             let active = lock(&self.runs).len();
             match self.mode {
                 RunMode::Single if active > 0 => {
-                    self.skipped("already running (mode: single)");
+                    self.skipped("it was still running (if already running: ignore)");
                     continue;
                 }
                 RunMode::Restart => {
@@ -550,7 +706,7 @@ impl DispatchCtx {
                     }
                 }
                 RunMode::Parallel if active >= self.max => {
-                    self.skipped("maximum parallel runs reached");
+                    self.skipped("too many runs at once (if already running: run both)");
                     continue;
                 }
                 _ => {}
@@ -565,6 +721,12 @@ impl DispatchCtx {
 
     fn skipped(&self, why: &str) {
         warn!(program = %self.program_id, "trigger skipped: {why}");
+        self.engine.push_log(
+            &self.program_id,
+            None,
+            LogLevel::Warning,
+            &format!("a trigger was ignored: {why}"),
+        );
     }
 
     fn spawn_run(&self, d: Dispatch) -> JoinHandle<()> {
@@ -602,10 +764,23 @@ impl DispatchCtx {
                 trace: Mutex::new(Trace::default()),
                 started: Instant::now(),
             };
+            let summary = crate::describe::fired(&d.trigger, inner.ha.as_ref());
+            lock(&inner.active).insert(
+                run_id.clone(),
+                ActiveRun {
+                    run_id: run_id.clone(),
+                    program_id: this.program_id.clone(),
+                    started_at,
+                    summary: summary.clone(),
+                    block_id: None,
+                    waiting: None,
+                },
+            );
             let _ = inner.events.send(EngineEvent::RunStarted {
                 program_id: this.program_id.clone(),
                 run_id: run_id.clone(),
                 trigger: d.trigger.clone(),
+                summary: summary.clone(),
             });
             let result = tokio::select! {
                 r = ctx.run_body(&handler.body) => r,
@@ -620,10 +795,23 @@ impl DispatchCtx {
                 Err(e) if e.kind == ErrorKind::Cancelled => ("cancelled", None, None),
                 Err(e) => ("error", Some(e.message.clone()), e.block_id.clone()),
             };
+            lock(&inner.active).remove(&run_id);
             if let Some(err) = &error {
                 warn!(program = %this.program_id, block = ?block_id, "run failed: {err}");
+                engine.push_log(
+                    &this.program_id,
+                    Some(&run_id),
+                    LogLevel::Error,
+                    &format!("the run failed: {err}"),
+                );
             }
             let trace = std::mem::take(&mut *lock(&ctx.trace));
+            // The blocks as they read when this run ran, for describing it after later edits.
+            let labels: Map<String, Value> = trace
+                .steps
+                .iter()
+                .filter_map(|s| Some((s.block.clone(), this.labels.get(&s.block)?.clone())))
+                .collect();
             let record = RunRecord {
                 id: run_id.clone(),
                 program_id: this.program_id.clone(),
@@ -637,7 +825,9 @@ impl DispatchCtx {
                     "truncated": trace.truncated,
                     "variables": ctx.variables_snapshot(),
                     "error_block": block_id,
+                    "labels": labels,
                 })),
+                summary: Some(summary),
             };
             if let Err(e) = inner.store.save_run(record, RUN_HISTORY).await {
                 warn!(error = %e, "failed to store run");
@@ -645,6 +835,7 @@ impl DispatchCtx {
             lock(&this.runs).remove(&run_id);
             engine.update_status(&this.program_id, |s| {
                 s.active_runs = s.active_runs.saturating_sub(1);
+                s.last_status = Some(status.into());
                 if let Some(e) = &error {
                     s.last_error = Some(e.clone());
                 }
@@ -737,8 +928,23 @@ impl RunHooks for EngineHooks {
         .unwrap_or(true)
     }
 
+    fn on_wait(&self, ctx: &RunCtx, waiting: Option<Waiting>) {
+        let inner = &self.engine.inner;
+        if let Some(r) = lock(&inner.active).get_mut(&ctx.run_id) {
+            r.waiting = waiting.clone();
+        }
+        let _ = inner.events.send(EngineEvent::Waiting {
+            program_id: ctx.program_id.clone(),
+            run_id: ctx.run_id.clone(),
+            waiting,
+        });
+    }
+
     async fn on_step(&self, ctx: &RunCtx, block: &str) {
         let inner = &self.engine.inner;
+        if let Some(r) = lock(&inner.active).get_mut(&ctx.run_id) {
+            r.block_id = Some(block.to_owned());
+        }
         if inner.debugger.is_watched(&ctx.program_id) {
             let _ = inner.events.send(EngineEvent::Step {
                 program_id: ctx.program_id.clone(),
@@ -764,12 +970,6 @@ impl RunHooks for EngineHooks {
             LogLevel::Debug => tracing::debug!(program = %ctx.program_id, "{message}"),
             LogLevel::Info => tracing::info!(program = %ctx.program_id, "{message}"),
         }
-        let _ = self.engine.inner.events.send(EngineEvent::Log {
-            program_id: ctx.program_id.clone(),
-            run_id: ctx.run_id.clone(),
-            level,
-            message: message.to_owned(),
-            ts: now_ms(),
-        });
+        self.engine.push_log(&ctx.program_id, Some(&ctx.run_id), level, message);
     }
 }

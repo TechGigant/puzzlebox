@@ -80,6 +80,9 @@ pub struct TraceEntry {
     pub t: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// How the step went: which way an "if" went, how a wait ended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -88,10 +91,22 @@ pub struct Trace {
     pub truncated: bool,
 }
 
+/// What a run is waiting for right now.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct Waiting {
+    pub block_id: String,
+    /// "waiting 30 s", "waiting until Movement turns off".
+    pub text: String,
+    /// When the wait ends at the latest (ms since the epoch).
+    pub until: Option<i64>,
+}
+
 /// Engine callbacks: live events and the debugger's pause point.
 #[async_trait]
 pub trait RunHooks: Send + Sync {
     async fn on_step(&self, _ctx: &RunCtx, _block: &str) {}
+    /// A wait started (`Some`) or ended (`None`).
+    fn on_wait(&self, _ctx: &RunCtx, _waiting: Option<Waiting>) {}
     fn on_log(&self, _ctx: &RunCtx, _level: LogLevel, _message: &str) {}
     fn on_global(&self, _name: &str, _value: &Value) {}
     /// Starts (or restarts/keeps) a program timer that runs the handler `handler` later.
@@ -201,7 +216,12 @@ impl RunCtx {
                 let mut trace = lock(&self.trace);
                 if let Some(b) = &e.block_id {
                     let t = self.started.elapsed().as_millis() as u64;
-                    trace.steps.push(TraceEntry { block: b.clone(), t, error: Some(e.message.clone()) });
+                    trace.steps.push(TraceEntry {
+                        note: None,
+                        block: b.clone(),
+                        t,
+                        error: Some(e.message.clone()),
+                    });
                 }
                 Err(e)
             }
@@ -274,11 +294,29 @@ impl RunCtx {
         let mut trace = lock(&self.trace);
         if trace.steps.len() < MAX_TRACE {
             let t = self.started.elapsed().as_millis() as u64;
-            trace.steps.push(TraceEntry { block: block.to_owned(), t, error: None });
+            trace.steps.push(TraceEntry { note: None, block: block.to_owned(), t, error: None });
         } else {
             trace.truncated = true;
         }
         Ok(())
+    }
+
+    /// Notes how the latest step of `block` went.
+    fn note(&self, block: &str, note: impl Into<String>) {
+        let mut trace = lock(&self.trace);
+        if let Some(s) = trace.steps.iter_mut().rev().find(|s| s.block == block && s.error.is_none()) {
+            s.note = Some(note.into());
+        }
+    }
+
+    fn waiting(&self, block: &str, text: String, timeout: Option<f64>) {
+        let until = timeout.map(|t| puzzlebox_storage::now_ms() + (t * 1000.0) as i64);
+        self.hooks.on_wait(self, Some(Waiting { block_id: block.to_owned(), text, until }));
+    }
+
+    fn waited(&self, block: &str, note: String) {
+        self.hooks.on_wait(self, None);
+        self.note(block, note);
     }
 
     /// Like HA's scripts: a condition that raised counts as false, with a warning.
@@ -292,7 +330,12 @@ impl RunCtx {
             }
             if trace.steps.len() < MAX_TRACE {
                 let t = self.started.elapsed().as_millis() as u64;
-                trace.steps.push(TraceEntry { block: block.to_owned(), t, error: Some(message.clone()) });
+                trace.steps.push(TraceEntry {
+                    note: None,
+                    block: block.to_owned(),
+                    t,
+                    error: Some(message.clone()),
+                });
             }
         }
         self.hooks.on_log(self, LogLevel::Warning, &message);
@@ -333,14 +376,24 @@ impl RunCtx {
                 self.set_var(frame, name, *scope, container).await;
             }
             StmtKind::If { branches, otherwise } => {
-                for (cond, body) in branches {
+                for (i, (cond, body)) in branches.iter().enumerate() {
                     if truthy(&self.eval(frame, cond).await?) {
+                        self.note(
+                            id,
+                            match i {
+                                0 => "true".to_owned(),
+                                n => format!("“else if” number {n} was true"),
+                            },
+                        );
                         return self.exec_block(frame, body).await;
                     }
                 }
+                let all = if branches.len() > 1 { "all false" } else { "false" };
                 if let Some(body) = otherwise {
+                    self.note(id, format!("{all} → else"));
                     return self.exec_block(frame, body).await;
                 }
+                self.note(id, format!("{all}, skipped"));
             }
             StmtKind::While { cond, body, until } => {
                 for i in 1.. {
@@ -485,7 +538,10 @@ impl RunCtx {
             StmtKind::Wait { seconds } => {
                 let s = to_num(&self.eval(frame, seconds).await?).at(id)?;
                 if s > 0.0 {
+                    let d = crate::describe::seconds(s);
+                    self.waiting(id, format!("waiting {d}"), Some(s));
                     tokio::time::sleep(Duration::from_secs_f64(s)).await;
+                    self.waited(id, format!("waited {d}"));
                 }
             }
             StmtKind::WaitForTrigger { triggers, timeout, result_var, zero_is_no_limit } => {
@@ -505,8 +561,13 @@ impl RunCtx {
                     [one] => one.clone(),
                     many => Value::Array(many.to_vec()),
                 };
+                let what = match triggers.as_slice() {
+                    [one] => crate::describe::trigger_config(one, self.ha.as_ref()),
+                    many => format!("one of {} triggers", many.len()),
+                };
                 let mut fired_by =
                     self.ha.subscribe_trigger_with(config, self.ha_vars(frame)).await.at(id)?;
+                self.waiting(id, format!("waiting until {what}"), timeout);
                 let fired = match timeout {
                     Some(t) => {
                         tokio::time::timeout(Duration::from_secs_f64(t), fired_by.next()).await.ok().flatten()
@@ -514,6 +575,15 @@ impl RunCtx {
                     None => fired_by.next().await,
                 };
                 let completed = fired.is_some();
+                let took = crate::describe::seconds(started.elapsed().as_secs_f64());
+                self.waited(
+                    id,
+                    if completed {
+                        format!("happened after {took}")
+                    } else {
+                        format!("gave up after {took}")
+                    },
+                );
                 let wait = json!({
                     "remaining": remaining(timeout, started, completed),
                     "completed": completed,
@@ -566,10 +636,25 @@ impl RunCtx {
                     }
                     _ => None,
                 };
+                let hold_text = if hold > 0.0 {
+                    format!(" for {}", crate::describe::seconds(hold))
+                } else {
+                    String::new()
+                };
+                self.waiting(id, format!("waiting until the condition is true{hold_text}"), timeout);
                 let (completed, at_once) = match subscribed {
                     Some(results) => self.wait_template(&cond.id, results.at(&cond.id)?, &until).await?,
                     None => self.poll_until(frame, cond, &until).await?,
                 };
+                let took = crate::describe::seconds(started.elapsed().as_secs_f64());
+                self.waited(
+                    id,
+                    match (completed, at_once) {
+                        (true, true) => "was already true".to_owned(),
+                        (true, false) => format!("became true after {took}"),
+                        _ => format!("gave up after {took}"),
+                    },
+                );
                 // HA leaves `remaining` at the whole timeout when the condition holds right away.
                 let remaining = match (at_once, timeout) {
                     (true, Some(t)) => json!(t),
@@ -616,7 +701,12 @@ impl RunCtx {
             let mut trace = lock(&self.trace);
             if trace.steps.len() < MAX_TRACE {
                 let t = self.started.elapsed().as_millis() as u64;
-                trace.steps.push(TraceEntry { block: b.clone(), t, error: Some(message.clone()) });
+                trace.steps.push(TraceEntry {
+                    note: None,
+                    block: b.clone(),
+                    t,
+                    error: Some(message.clone()),
+                });
             }
         }
         self.hooks.on_log(self, LogLevel::Warning, &message);

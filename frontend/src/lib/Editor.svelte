@@ -598,7 +598,10 @@
       min-width: 0;
     }
     .bar .btn {
-      padding: 6px 12px;
+      padding: 6px 9px;
+    }
+    .bar .icon {
+      padding-inline: 4px;
     }
     .count {
       display: none;

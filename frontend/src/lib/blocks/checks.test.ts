@@ -38,6 +38,23 @@ const load = (state: Blockly.serialization.blocks.State) =>
 const settle = () => new Promise((r) => setTimeout(r, 10));
 
 describe('block text', () => {
+  it('leaves out buttons and menus', () => {
+    class Menu extends Blockly.FieldDropdown {
+      override isSerializable() {
+        return false;
+      }
+    }
+    Blockly.Blocks['test_controls'] = {
+      init(this: Blockly.Block) {
+        this.appendDummyInput()
+          .appendField(new Blockly.FieldImage('data:,', 10, 10, 'Add else if'))
+          .appendField('if it rains')
+          .appendField(new Menu([['＋ option', 'x']]));
+      },
+    };
+    expect(load({ type: 'test_controls' }).toString()).toBe('if it rains');
+  });
+
   it('leaves out hidden fields and inputs', async () => {
     const b = load({ type: 'ha_trigger_numeric', fields: { ENTITY: 'sensor.power', ABOVE: '25' } });
     expect(b.toString()).not.toContain('state.state');

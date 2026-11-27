@@ -190,7 +190,8 @@ pub fn trigger(t: &Trigger, ha: &dyn HaApi) -> String {
 pub fn program(p: &Program, ha: &dyn HaApi) -> String {
     let mut parts = p.handlers.iter().filter_map(|h| match &h.kind {
         HandlerKind::Triggers { triggers } => Some(match triggers.as_slice() {
-            [] => "when (no trigger)".to_owned(),
+            // "when run manually" blocks have no triggers.
+            [] => "when run manually".to_owned(),
             [one] => format!("when {}", trigger(one, ha)),
             [first, rest @ ..] => format!("when {} (+{})", trigger(first, ha), rest.len()),
         }),

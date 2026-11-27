@@ -1,6 +1,7 @@
 //! Index of every block the toolbox offers, for "type to add a block".
 
 import * as Blockly from 'blockly/core';
+import { isControl } from '../blocks/block_text';
 
 type State = Blockly.serialization.blocks.State;
 type Item = Blockly.utils.toolbox.ToolboxItemInfo;
@@ -74,7 +75,7 @@ export function blockWords(b: Blockly.Block, opts: { header?: boolean } = {}): s
     if (!input.isVisible()) continue;
     if (opts.header && input.type === Blockly.inputs.inputTypes.STATEMENT) break;
     for (const f of input.fieldRow) {
-      if (!f.isVisible()) continue;
+      if (!f.isVisible() || isControl(f)) continue;
       const t = (f.getText() ?? '').trim();
       if (t && !hidden(t)) out.push(t === 'choose…' ? '…' : t);
     }

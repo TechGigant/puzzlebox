@@ -392,8 +392,9 @@ impl Store {
         .await
     }
 
-    /// Empties the bin of programs deleted more than `BIN_DAYS` ago, and drops programs that
-    /// were created and never touched (no blocks, never saved again, never run).
+    /// Empties the bin of programs deleted more than `BIN_DAYS` ago, and drops the stray
+    /// "New program"s older versions created on every click (still named so, no blocks, never
+    /// saved again, never run).
     pub async fn purge_old(&self) -> Result<usize> {
         self.with(|c| {
             let cutoff = now_ms() - BIN_DAYS * 24 * 3600 * 1000;
@@ -405,12 +406,14 @@ impl Store {
             {
                 let mut st = c.prepare(
                     "SELECT id, workspace FROM programs p WHERE created_at = updated_at AND description = ''
+                     AND name = 'New program' AND deleted_at IS NULL
                      AND NOT EXISTS (SELECT 1 FROM runs WHERE program_id = p.id)",
                 )?;
                 let rows = st.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
                 for row in rows {
                     let (id, ws) = row?;
-                    if block_map(&from_str_deep(&ws).unwrap_or(Value::Null)).is_empty() {
+                    // A workspace that doesn't parse isn't known to be empty.
+                    if from_str_deep::<Value>(&ws).is_ok_and(|w| block_map(&w).is_empty()) {
                         ids.push(id);
                     }
                 }
@@ -716,13 +719,20 @@ mod tests {
     #[tokio::test]
     async fn untouched_empty_programs_are_dropped() {
         let s = Store::open_in_memory().unwrap();
-        s.save_program(program("empty")).await.unwrap();
+        let mut empty = program("empty");
+        empty.name = "New program".into();
+        s.save_program(empty).await.unwrap();
+        // Named, so the user meant to keep it even without blocks.
+        let mut named = program("named");
+        named.name = "Kitchen".into();
+        s.save_program(named).await.unwrap();
         let mut used = program("used");
         used.workspace = json!({"blocks": {"blocks": [{"type": "ha_when", "id": "w"}]}});
         s.save_program(used).await.unwrap();
         assert_eq!(s.purge_old().await.unwrap(), 1);
         let left: Vec<_> = s.list_programs().await.unwrap().into_iter().map(|p| p.id).collect();
-        assert_eq!(left, ["used"]);
+        assert_eq!(left.len(), 2);
+        assert!(left.contains(&"named".to_owned()) && left.contains(&"used".to_owned()));
     }
 
     #[test]

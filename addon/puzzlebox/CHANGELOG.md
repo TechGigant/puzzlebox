@@ -2,12 +2,72 @@
 
 ## Unreleased
 
+### Editing
+
+- Type to add (Ctrl+Space) puts the block where you'd expect: a trigger into
+  the selected or an empty "when", an action at the end of its "do", a value
+  into the first empty socket. Everyday blocks come first in the results, and
+  "motion", "notify", "lamp" and similar words find them.
+- Leaving the editor by any link or the browser's Back button asks before
+  throwing away unsaved changes.
+- Problems also warn about a "when" with nothing to do and blocks outside any
+  "when", name the block they're about, and list entities that don't exist
+  ("hall" isn't an entity).
+- Generated action blocks without a target are caught when saving, and Home
+  Assistant's errors are shown in plain words (the original under "details").
 - Device triggers, conditions and actions show which device they belong to
   ("⚡ Bedroom remote · action double click"), with the name from Home
-  Assistant, so renames show up. Click the name to move the block to another
-  device with the same trigger, condition or action; its settings stay. A
-  device that was removed from Home Assistant gets a warning, and imported
-  device blocks get Home Assistant's own label.
+  Assistant. Click the name to move the block to another device with the same
+  trigger; its settings stay.
+- The entity picker searches area and device names, sorts by name, says when
+  there are more results, and offers "All lights in Bedroom" where a block
+  accepts an area.
+- Blocks generated from Home Assistant read like the others (lower-case
+  labels, "5 minutes" durations), and their categories list the easier
+  Puzzlebox blocks first.
+- Clearer labels: "set target temperature of …", "set mode of …", "set helper
+  …", and notifications "to 📱 Pixel 7". The time trigger only offers a shift
+  for a helper or sensor time. "Say" starts with your first voice.
+- Big programs open at their first stack, and the minimap is smaller and
+  see-through.
+
+### New blocks
+
+- "⚡ the first person arrives at / the last person leaves [zone]".
+- "remember the state of … as …" and "restore …".
+- Alarm panels: arm, disarm and "alarm is armed / disarmed / triggered".
+- "press [button]".
+- "send notification … with buttons … and wait for a reply" and "the reply".
+- Each kind of variable explains itself: only during this run, kept between
+  runs, or shared by all programs.
+
+### Programs and runs
+
+- The Runs tab shows runs in progress and what they're doing ("waiting 30 s,
+  12 s left"), and the editor marks the block.
+- Run details start with what started the run ("Movement Backyard turned
+  on"), show how each step went ("false → else", "waited 2 s"), and keep the
+  text the blocks had at the time.
+- "Run as if ⚡ … fired" (Run ▾ or right-click a trigger) tests a program with
+  trigger data.
+- The program list shows each program's trigger, marks failed runs and
+  programs that do nothing, and uses the editor's words for run modes. The
+  editor's on/off switch works straight away.
+- New programs are created when first saved. "Duplicate" copies a program,
+  and deleting moves it to a recycle bin for 30 days.
+- The Log tab keeps the last 200 lines per program, warnings and errors
+  included. History says what changed. Stop is only active while something
+  runs. Settings explains what needs the integration.
+- After importing from Home Assistant, "Switch over" turns off the original
+  automation and turns the program on.
+
+### Look
+
+- Readable block colours in light and dark mode (all text at least 4.5:1
+  contrast).
+- Works on phones: the program list fits, and the side panel opens as a sheet.
+- The entity list updates with only what changed, which is lighter on big
+  installations.
 
 ## 0.5.0
 

@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Fixes
+
+- Opening a program while Home Assistant (or Zigbee2MQTT, a pack or a
+  plugin) wasn't available and then saving could delete the blocks it
+  provides. Such blocks now stay as "‹…› isn't available right now", the
+  editor waits read-only until they're back, and the server refuses a save
+  that would drop them. Home Assistant's blocks are also kept on disk, so
+  they're there at start-up without Home Assistant.
+- Programs started twice when Puzzlebox started, so "when program starts"
+  ran twice.
+- "21,5" typed into a number became 215. A decimal comma now works, and
+  unclear input is refused.
+- Saving a program no longer stops its waiting runs and timers when the
+  blocks didn't change; when they did, the editor says what will be stopped
+  first. Timers survive a restart. Stopped runs say why.
+- A run paused at a breakpoint carries on after 10 minutes, closing one
+  program's editor no longer releases another's paused runs, and the
+  debugger says where it's paused.
+- Puzzlebox shows "Waiting for Home Assistant…" instead of an error page
+  while Home Assistant starts.
+- All times use Home Assistant's time zone.
+- "every 7 minutes" really runs every 7 minutes (from when the program
+  starts); for "on the hour" use "the clock shows". "every 90 minutes" works.
+- Zigbee2MQTT: "changes" triggers no longer fire on routine reports after a
+  restart or save, both gangs of a switch have their own name, and values
+  are asked for at start-up.
+
 ### Editing
 
 - Type to add (Ctrl+Space) puts the block where you'd expect: a trigger into
@@ -30,6 +57,17 @@
   for a helper or sensor time. "Say" starts with your first voice.
 - Big programs open at their first stack, and the minimap is smaller and
   see-through.
+- Copy and paste works between programs and tabs. Type to add follows the
+  keyboard cursor, matches part of what you type ("door open", "wait 10"),
+  and fills in numbers.
+- Menus in plain words ("Delete this and the 2 blocks inside"), a keyboard
+  shortcuts help ("?"), and dialogs, tabs and messages that work with the
+  keyboard and screen readers.
+- Starters for a first program (motion light, door left open, vacation
+  lights, good night), and hints in empty "when" and "do" slots. New
+  programs say "Not saved yet".
+- History shows a version before you restore it, and restoring brings back
+  the name and run mode too.
 
 ### New blocks
 
@@ -40,6 +78,14 @@
 - "send notification … with buttons … and wait for a reply" and "the reply".
 - Each kind of variable explains itself: only during this run, kept between
   runs, or shared by all programs.
+- "add … to list", "remove … from list", "list … contains …".
+- "run program …" and "run program … and wait until it finishes".
+- "fade … from 1 % to 100 % over 15 minutes", which stops if someone changes
+  the light in between.
+- "carry on if this fails", "try" and "run in parallel" are in Control.
+- Zigbee2MQTT blocks read like the others: "⚡ Front door contact becomes
+  open", white temperature in kelvin and brightness in % (saved programs are
+  converted), devices grouped as lights, switches, sensors and remotes.
 
 ### Programs and runs
 
@@ -61,13 +107,22 @@
 - After importing from Home Assistant, "Switch over" turns off the original
   automation and turns the program on.
 
+### Home Assistant
+
+- Each program has a status sensor (idle, running, waiting, paused, error).
+- `puzzlebox.run_program` takes the program's switch or button.
+- Repairs report programs with problems or that keep failing.
+- Settings: stored variables by program name with delete, folder paths as
+  seen over Samba, Zigbee2MQTT status, and a note if time zones differ.
+
 ### Look
 
 - Readable block colours in light and dark mode (all text at least 4.5:1
   contrast).
 - Works on phones: the program list fits, and the side panel opens as a sheet.
 - The entity list updates with only what changed, which is lighter on big
-  installations.
+  installations, and responses are compressed.
+- Dates and times follow your Home Assistant profile (12/24 h).
 
 ## 0.5.0
 

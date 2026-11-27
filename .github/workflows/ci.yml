@@ -117,5 +117,5 @@ jobs:
           context: .
           file: addon/puzzlebox/Dockerfile
           push: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Reuses the release's layer cache; writes none, to leave the Actions cache to the Rust jobs.
+          cache-from: type=registry,ref=ghcr.io/techgigant/puzzlebox-amd64:buildcache

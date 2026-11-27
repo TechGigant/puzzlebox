@@ -64,8 +64,10 @@ jobs:
             io.hass.type=addon
             io.hass.arch=${{ matrix.arch }}
             io.hass.version=${{ env.VERSION }}
-          cache-from: type=gha,scope=${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+          # In the registry rather than the Actions cache: it's kept between releases and
+          # isn't evicted by CI's own caches (the Actions cache is capped at 10 GB).
+          cache-from: type=registry,ref=ghcr.io/${{ env.OWNER }}/puzzlebox-${{ matrix.arch }}:buildcache
+          cache-to: type=registry,ref=ghcr.io/${{ env.OWNER }}/puzzlebox-${{ matrix.arch }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
   github-release:
     runs-on: ubuntu-latest

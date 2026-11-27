@@ -7,8 +7,10 @@ RUN npm ci
 COPY frontend/ ./
 RUN npm run build
 
-FROM rust:1-alpine AS chef
-RUN apk add --no-cache musl-dev && cargo install cargo-chef --locked
+# Pinned (Rust and cargo-chef versions) so the dependency layers below stay cached between
+# releases; a floating tag like rust:1-alpine changes often and invalidates all of them.
+FROM lukemathwalker/cargo-chef:0.1.78-rust-1.100.0-alpine3.22 AS chef
+RUN apk add --no-cache musl-dev
 WORKDIR /src
 
 FROM chef AS planner

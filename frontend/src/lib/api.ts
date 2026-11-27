@@ -60,6 +60,8 @@ export interface Program {
   updated_at: number;
   status: ProgramStatus | null;
   errors?: CompileError[];
+  /** No "when" (with a trigger), start or run block has anything to do. */
+  does_nothing?: boolean;
 }
 
 export interface ProgramVersion {

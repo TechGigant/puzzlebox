@@ -7,6 +7,7 @@
   import { events, updateNotice, type Status } from './lib/api';
   import { applyCssTokens, readHaTokens, watchTheme } from './lib/theme';
   import { loadRegistry, registry } from './lib/registry.svelte';
+  import { mayLeave } from './lib/leave';
 
   function refreshRegistry() {
     loadRegistry().catch((e) => {
@@ -28,8 +29,19 @@
   let importing = $state(false);
   let listKey = $state(0);
 
+  // The hash the current view belongs to; a change to anything else may need confirming.
+  let shown = location.hash;
+
   function go(hash: string) {
+    if (hash !== shown && !mayLeave()) return;
+    shown = hash;
     location.hash = hash;
+  }
+
+  function link(e: MouseEvent) {
+    if (e.button !== 0 || e.ctrlKey || e.metaKey || e.shiftKey) return;
+    e.preventDefault();
+    go(new URL((e.currentTarget as HTMLAnchorElement).href).hash);
   }
 
   onMount(() => {
@@ -41,7 +53,15 @@
       if (ev.type === 'status' && !('program_id' in ev)) status = ev.status;
       if (ev.type === 'registry_changed') refreshRegistry();
     });
-    const onhash = () => (route = parse());
+    // Back/forward and typed URLs: if the user stays, put the editor's URL back.
+    const onhash = () => {
+      if (location.hash !== shown && !mayLeave()) {
+        history.pushState(null, '', shown || location.pathname + location.search);
+        return;
+      }
+      shown = location.hash;
+      route = parse();
+    };
     window.addEventListener('hashchange', onhash);
     return () => {
       off();
@@ -65,8 +85,8 @@
     <span>Puzzlebox</span>
   </button>
   <nav>
-    <a href="#/" class:active={route.view === 'list'}>Programs</a>
-    <a href="#/settings" class:active={route.view === 'settings'}>Settings</a>
+    <a href="#/" class:active={route.view === 'list'} onclick={link}>Programs</a>
+    <a href="#/settings" class:active={route.view === 'settings'} onclick={link}>Settings</a>
   </nav>
   <span class="spacer"></span>
   <span class="chip" class:ok={status?.ha_connected} title="Connection to Home Assistant">

@@ -108,12 +108,20 @@
   import { Backpack } from '@blockly/workspace-backpack';
   import { api, type CompileError } from './api';
   import QuickAdd from './editor/QuickAdd.svelte';
-  import { insert, toolboxEntries, workspaceEntries, type Entry } from './editor/quickadd';
+  import { blockWords, insert, isTrigger, selectedBlock, toolboxEntries, wantFor, workspaceEntries, type Entry, type Want } from './editor/quickadd';
   import { applyZebra, loadPrefs, markLoose, rendererName } from './editor/appearance';
   import { installDragTricks } from './editor/drag';
   import { installSummaries } from './editor/summaries';
   import { migrateWorkspace } from './editor/migrate';
   import { FieldEntity, knownEntities, loadEntities, loadRegistry as loadHaNames, refreshNameFields } from './blocks/field_entity';
+
+  /** The plugin's minimap is a fifth of the editor wide and covers the blocks under it. */
+  class SmallMinimap extends PositionedMinimap {
+    override setSize() {
+      this.width = 160;
+      this.height = 100;
+    }
+  }
 
   let {
     initial,
@@ -133,9 +141,25 @@
   } = $props();
 
   const prefs = loadPrefs();
-  let quick = $state<{ entries: Entry[]; x: number; y: number; at: Blockly.utils.Coordinate } | null>(null);
+  let quick = $state<{
+    entries: Entry[];
+    x: number;
+    y: number;
+    at: Blockly.utils.Coordinate;
+    target: Blockly.BlockSvg | null;
+    want: Want | null;
+    hint: string;
+  } | null>(null);
   let mouse = { x: 80, y: 80, clientX: 0, clientY: 0 };
   let toolboxDef: Blockly.utils.toolbox.ToolboxInfo | null = null;
+
+  function quickHint(target: Blockly.BlockSvg | null, want: Want | null): string {
+    if (!target) return 'Enter adds the block where you clicked (a trigger goes into an empty “when”).';
+    if (want?.shape === 'trigger' || target.type === 'ha_when')
+      return 'Triggers go into the selected “when”, actions at the end of its “do”.';
+    if (want?.shape === 'value') return 'Values go into the first empty slot of the selected block.';
+    return 'Enter adds the block after the selected one.';
+  }
 
   function openQuickAdd() {
     if (!workspace || !toolboxDef) return;
@@ -147,13 +171,32 @@
     const at = mouse.clientX
       ? Blockly.utils.svgMath.screenToWsCoordinates(workspace, new Blockly.utils.Coordinate(mouse.clientX, mouse.clientY))
       : new Blockly.utils.Coordinate(40, 40);
-    quick = { entries: [...workspaceEntries(workspace), ...toolboxEntries(toolboxDef)], x, y, at };
+    // Read now: once the search box has focus, Blockly no longer reports a selection.
+    const target = selectedBlock(workspace);
+    const want = wantFor(target);
+    quick = {
+      entries: [...workspaceEntries(workspace), ...toolboxEntries(toolboxDef)],
+      x,
+      y,
+      at,
+      target,
+      want,
+      hint: quickHint(target, want),
+    };
+  }
+
+  /** Gives the keyboard back to the blocks, so Ctrl+Space and shortcuts keep working. */
+  function closeQuick() {
+    const target = quick?.target;
+    quick = null;
+    if (target && !target.isDeadOrDying()) Blockly.getFocusManager().focusNode(target);
+    else if (workspace) Blockly.getFocusManager().focusTree(workspace);
   }
 
   function pick(e: Entry) {
-    if (workspace && quick) noteUsed(insert(workspace, e.state, quick.at));
+    const q = quick;
     quick = null;
-    host.querySelector<HTMLElement>('.blocklySvg')?.focus();
+    if (workspace && q) noteUsed(insert(workspace, e.state, q.at, q.target));
   }
 
   let host: HTMLDivElement;
@@ -189,7 +232,23 @@
     breakpoints.clear();
     // Blockly fires change events on a timer, so keep ignoring them until that has run.
     setTimeout(() => (loading = false), 0);
-    workspace.scrollCenter();
+    showStart();
+  }
+
+  /** Centres a program that fits on screen; a bigger one opens at its first (top-left) stack. */
+  function showStart() {
+    if (!workspace) return;
+    const m = workspace.getMetrics();
+    const scale = workspace.scale;
+    const bounds = workspace.getBlocksBoundingBox();
+    const first = workspace.getTopBlocks(true)[0];
+    if (!first || ((bounds.right - bounds.left) * scale <= m.viewWidth && (bounds.bottom - bounds.top) * scale <= m.viewHeight)) {
+      workspace.scrollCenter();
+      return;
+    }
+    const xy = first.getRelativeToSurfaceXY();
+    const margin = 24;
+    workspace.scroll(-(xy.x * scale - margin), -(xy.y * scale - margin));
   }
 
   export function save(): object {
@@ -224,8 +283,37 @@
   export function friendlyErrors(errors: CompileError[]): CompileError[] {
     return errors.map((e) => {
       const where = e.block_id ? describe(e.block_id) : null;
-      return { ...e, message: where ? `${where}: ${friendly(e)}` : friendly(e) };
+      const text = where ? `${where}: ${friendly(e)}` : friendly(e);
+      return { ...e, message: text.charAt(0).toUpperCase() + text.slice(1) };
     });
+  }
+
+  /** Parts that compile but never run by themselves: empty entry blocks and loose blocks. */
+  export function hints(): CompileError[] {
+    if (!workspace) return [];
+    const out: CompileError[] = [];
+    const quote = (b: Blockly.Block) => {
+      const t = blockWords(b, { header: true });
+      return `“${t.length > 40 ? t.slice(0, 39) + '…' : t || b.type}”`;
+    };
+    for (const top of workspace.getTopBlocks(true)) {
+      if (!top.isEnabled() || top.type.startsWith('procedures_def')) continue;
+      if (ENTRY_BLOCKS.has(top.type)) {
+        let b = top.getInputTargetBlock('DO');
+        while (b && !b.isEnabled()) b = b.getNextBlock();
+        if (!b) out.push({ block_id: top.id, message: `The ${quote(top)} block has nothing to do yet: put blocks in its “do”.` });
+      } else if (top.outputConnection) {
+        out.push({ block_id: top.id, message: `${quote(top)} isn't plugged into another block, so it isn't used.` });
+      } else if (isTrigger(top)) {
+        out.push({ block_id: top.id, message: `The trigger ${quote(top)} isn't in a “when”, so it never fires.` });
+      } else if (top.previousConnection || top.nextConnection) {
+        const n = top.getDescendants(false).filter((b) => !b.isShadow()).length;
+        const what = n > 2 ? `${quote(top)} and the ${n - 1} blocks under it aren't` : n > 1 ? `${quote(top)} and the block under it aren't` : `${quote(top)} isn't`;
+        const runs = n > 1 ? 'they only run' : 'it only runs';
+        out.push({ block_id: top.id, message: `${what} in a “when”, so ${runs} when you right-click › Run this stack.` });
+      }
+    }
+    return out;
   }
 
   export function setErrors(errors: CompileError[]) {
@@ -290,10 +378,14 @@
 
   /** Short human-readable label for a block (used in run traces). */
   export function describe(id: string): string | null {
-    const b = workspace?.getBlockById(id);
+    let b = workspace?.getBlockById(id);
     if (!b) return null;
-    const text = b.toString(48).replace(/\s+/g, ' ').trim();
-    return text || b.type;
+    // A shadow is the default value in a socket ("choose…"); name the block it belongs to.
+    while (b.isShadow() && b.getParent()) b = b.getParent()!;
+    if (ENTRY_BLOCKS.has(b.type)) return `the “${blockWords(b, { header: true }) || 'when'}” block`;
+    // C-shaped blocks: just the part above their first slot of blocks ("if … do").
+    const text = blockWords(b, { header: true });
+    return text.length > 48 ? text.slice(0, 47) + '…' : text || b.type;
   }
 
   export function reveal(id: string) {
@@ -333,23 +425,32 @@
     });
     registerStoredVariablesCategory(workspace);
     registerDeviceCallbacks(workspace, registry.ha);
-    // The minimap copies the theme once at creation, so rebuild it when the theme changes.
-    let minimap = new PositionedMinimap(workspace);
-    minimap.init();
-    const rebuildMinimap = () => {
+    // The minimap copies the theme once at creation, so it is rebuilt when the theme changes.
+    // Narrow screens get none: there it would cover the blocks (and the plugin fails to start).
+    let minimap: SmallMinimap | null = null;
+    const syncMinimap = (rebuild = false) => {
       if (!workspace) return;
-      minimap.dispose();
-      // dispose() leaves the plugin registered as a positionable component.
-      workspace.getComponentManager().removeComponent('minimap');
-      minimap = new PositionedMinimap(workspace);
+      const want = host.clientWidth >= 700;
+      if (minimap && (rebuild || !want)) {
+        // The plugin's window resize listener outlives dispose() and then throws on every resize.
+        const region = (minimap as unknown as { focusRegion: { update: () => void } | null }).focusRegion;
+        if (region) region.update = () => {};
+        minimap.dispose();
+        // dispose() leaves the plugin registered as a positionable component.
+        workspace.getComponentManager().removeComponent('minimap');
+        minimap = null;
+      }
+      if (!want || minimap) return;
+      minimap = new SmallMinimap(workspace);
       minimap.init();
       // A new minimap only mirrors future events; seed it with the current blocks.
       const mini = (minimap as unknown as { minimapWorkspace: Blockly.WorkspaceSvg | null }).minimapWorkspace;
-      if (mini) {
+      if (mini && workspace.getTopBlocks(false).length) {
         Blockly.serialization.workspaces.load(Blockly.serialization.workspaces.save(workspace), mini);
         mini.zoomToFit();
       }
     };
+    syncMinimap();
     new WorkspaceSearch(workspace).init();
 
     const backpack = new Backpack(workspace, {
@@ -417,7 +518,7 @@
       tokens = t;
       applyCssTokens(t);
       workspace?.setTheme(buildTheme(t, extraStyles));
-      rebuildMinimap();
+      syncMinimap(true);
     });
 
     workspace.addChangeListener((e) => {
@@ -441,7 +542,11 @@
     // Pickers show names, which need the entity and area lists.
     Promise.all([loadEntities(), loadHaNames()]).then(() => workspace && refreshNameFields(workspace));
 
-    const resize = new ResizeObserver(() => workspace && Blockly.svgResize(workspace));
+    const resize = new ResizeObserver(() => {
+      if (!workspace) return;
+      syncMinimap();
+      Blockly.svgResize(workspace);
+    });
     resize.observe(host);
 
     return () => {
@@ -466,7 +571,15 @@
 
 <div class="workspace" bind:this={host}></div>
 {#if quick}
-  <QuickAdd entries={quick.entries} x={quick.x} y={quick.y} onpick={pick} onclose={() => (quick = null)} />
+  <QuickAdd
+    entries={quick.entries}
+    x={quick.x}
+    y={quick.y}
+    want={quick.want}
+    hint={quick.hint}
+    onpick={pick}
+    onclose={closeQuick}
+  />
 {/if}
 
 <style>
@@ -496,10 +609,22 @@
   .workspace :global(.blocklyMainBackground) {
     stroke: none;
   }
-  .workspace :global(.blocklyMinimap) {
+  .workspace :global(.blockly-minimap) {
     border-radius: 12px;
     overflow: hidden;
     box-shadow: 0 2px 8px rgb(0 0 0 / 0.2);
+    opacity: 0.45;
+    transition: opacity 0.15s;
+  }
+  .workspace :global(.blockly-minimap:hover) {
+    opacity: 0.95;
+  }
+  /* The app's text box style (padding, tinted background) would let the field's own text show through. */
+  :global(.blocklyWidgetDiv input.blocklyHtmlInput) {
+    padding: 0;
+    border: 0;
+    background: #fff;
+    color: #000;
   }
   .workspace :global(.pb-breakpoint > .blocklyPath) {
     stroke: #e53935;

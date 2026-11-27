@@ -107,6 +107,15 @@ pub enum OnError {
     SkipIfCall,
 }
 
+/// Whether `scene.<scene_id>` (its state) is a scene `scene.create` won't replace: one from the
+/// user's configuration or another integration. A scene `scene.create` made has an entity list,
+/// no `id` and its scene id as its name; a YAML scene without an id named exactly like its
+/// entity id can't be told apart from one.
+pub fn scene_taken(state: &Value, scene_id: &str) -> bool {
+    let a = &state["attributes"];
+    a.get("id").is_some() || !a["entity_id"].is_array() || a["friendly_name"].as_str() != Some(scene_id)
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActionError {
     pub message: String,

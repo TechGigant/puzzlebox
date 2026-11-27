@@ -1107,3 +1107,42 @@ async fn periodic_purge_spares_fresh_strays_and_unloads_old_ones() {
         }
     }
 }
+
+#[tokio::test]
+async fn remembering_under_a_configured_scenes_name_fails() {
+    let (engine, ha) = setup().await;
+    let mut events = engine.subscribe();
+    // As HA shows them: a scene from scenes.yaml (with and without an id) and one scene.create made.
+    ha.states.lock().unwrap().extend([
+        (
+            "scene.evening".to_owned(),
+            json!({"state": "unknown", "attributes": {"entity_id": ["light.a"], "id": "17", "friendly_name": "Evening"}}),
+        ),
+        (
+            "scene.movie".to_owned(),
+            json!({"state": "unknown", "attributes": {"entity_id": ["light.a"], "friendly_name": "Movie"}}),
+        ),
+        (
+            "scene.before".to_owned(),
+            json!({"state": "unknown", "attributes": {"entity_id": ["light.a"], "friendly_name": "before"}}),
+        ),
+    ]);
+    let remember = |name: &str| {
+        b("scene_remember", "m", json!({"NAME": name}), json!({"TARGET": blk(text("e", "light.a"))}))
+    };
+    for (name, taken) in [("Evening", true), ("movie", true), ("before", false), ("new one", false)] {
+        engine
+            .save(program("p", workspace(vec![on_run(remember(name))], json!([])), "single"))
+            .await
+            .unwrap();
+        assert!(engine.run_now("p", None, None));
+        let (status, error) = next_finished(&mut events).await;
+        if taken {
+            assert_eq!(status, "error", "{name}");
+            assert!(error.unwrap().contains("already exists"), "{name}");
+        } else {
+            assert_eq!(status, "ok", "{name}: {error:?}");
+        }
+    }
+    assert_eq!(ha.calls(), ["scene.create", "scene.create"]);
+}

@@ -522,6 +522,17 @@ impl RunCtx {
                     },
                     None => None,
                 };
+                // HA only logs a warning and keeps the user's scene, so restoring would
+                // silently turn that one on instead.
+                if service == "scene.create"
+                    && let Some(scene_id) = data.as_ref().and_then(|d| d["scene_id"].as_str())
+                    && self
+                        .ha
+                        .state(&format!("scene.{scene_id}"))
+                        .is_some_and(|s| crate::ha::scene_taken(&s, scene_id))
+                {
+                    return Err(RunError::at(id, format!("The scene scene.{scene_id} already exists")));
+                }
                 let resp = self
                     .ha
                     .call_service_checked(service, data, target, response_var.is_some())

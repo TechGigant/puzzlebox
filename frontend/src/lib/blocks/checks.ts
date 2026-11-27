@@ -2,7 +2,7 @@
 //! warnings, not errors, so the program still saves.
 
 import * as Blockly from 'blockly/core';
-import { FieldEntity, knownEntities } from './field_entity';
+import { FieldEntity, entityState, knownEntities } from './field_entity';
 
 export interface BlockWarning {
   /** The block to show it on: a shadow's parent, since shadows can't be selected. */
@@ -35,6 +35,35 @@ export function entityWarnings(ws: Blockly.Workspace): BlockWarning[] {
           out.push({ block_id: holder.id, message });
         }
       }
+    }
+  }
+  return [...out, ...sceneWarnings(ws)];
+}
+
+/** The scene id "remember … as" uses for a name, as the compiler makes it (`scene_slug`). */
+export function sceneSlug(name: string): string {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '');
+}
+
+/** "remember … as" names whose scene is the user's own: HA keeps that one and ignores the
+ * snapshot. Mirrors the engine's `scene_taken`. */
+function sceneWarnings(ws: Blockly.Workspace): BlockWarning[] {
+  const out: BlockWarning[] = [];
+  for (const b of ws.getBlocksByType('scene_remember', false)) {
+    if (!b.isEnabled()) continue;
+    const id = sceneSlug(String(b.getFieldValue('NAME') ?? ''));
+    const s = id && entityState(`scene.${id}`);
+    if (!s) continue;
+    const a = s.attributes;
+    if ('id' in a || !Array.isArray(a.entity_id) || a.friendly_name !== id) {
+      out.push({
+        block_id: b.id,
+        message: `There's already a scene called scene.${id} in your configuration: choose another name`,
+      });
     }
   }
   return out;

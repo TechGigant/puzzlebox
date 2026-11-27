@@ -8,6 +8,9 @@ vi.mock('../api', () => ({
       const changed = [
         { entity_id: 'binary_sensor.hall_motion', state: 'off', attributes: {} },
         { entity_id: 'tts.google', state: 'unknown', attributes: {} },
+        // As HA shows them: from scenes.yaml, and made by scene.create.
+        { entity_id: 'scene.evening', state: 'unknown', attributes: { entity_id: ['light.a'], id: '17', friendly_name: 'Evening' } },
+        { entity_id: 'scene.before', state: 'unknown', attributes: { entity_id: ['light.a'], friendly_name: 'before' } },
       ];
       return { full: true, version: 1, changed, removed: [] };
     }
@@ -20,7 +23,7 @@ vi.mock('../api', () => ({
 
 import { registerCoreBlocks } from './core';
 import { notifyLabel, registerHelperBlocks } from './helpers';
-import { entityWarnings } from './checks';
+import { entityWarnings, sceneSlug } from './checks';
 import { loadEntities, loadRegistry } from './field_entity';
 import { plainError } from '../ha_errors';
 
@@ -90,6 +93,18 @@ describe('entity warnings', () => {
   });
 });
 
+describe('scene warnings', () => {
+  it("flag remembering under the name of the user's own scene", () => {
+    const own = load({ type: 'scene_remember', fields: { NAME: ' Evening!' } });
+    const ours = load({ type: 'scene_remember', fields: { NAME: 'before' } });
+    const found = entityWarnings(ws).filter((w) => [own.id, ours.id].includes(w.block_id));
+    expect(found).toEqual([
+      { block_id: own.id, message: "There's already a scene called scene.evening in your configuration: choose another name" },
+    ]);
+    expect(sceneSlug(' Before the Movie! ')).toBe('before_the_movie');
+  });
+});
+
 describe('say', () => {
   it('starts with the first voice when added, not when loaded', async () => {
     const added = load({ type: 'media_say' });
@@ -107,6 +122,9 @@ describe('Home Assistant errors', () => {
     expect(plainError('Home Assistant returned an error (not_found): Service light.nope not found.')).toContain('no action light.nope');
     expect(plainError("value must be at most 100 for dictionary value @ data['brightness_pct']")).toBe('"brightness_pct" can be at most 100.');
     expect(plainError("In 'state' condition: unknown entity light.x")).toContain("doesn't know light.x");
+    expect(plainError('The scene scene.evening already exists')).toBe(
+      "There's already a scene called scene.evening in your configuration: choose another name to remember the state as.",
+    );
     expect(plainError('something else')).toBeNull();
   });
 });

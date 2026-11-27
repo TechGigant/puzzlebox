@@ -240,7 +240,7 @@ async fn timers_go_off_after_a_restart() {
     let timer =
         |due: i64| json!({"due": due, "handler": "tm", "trigger": {"platform": "timer", "timer": "later"}});
     store.kv_set("timers:p", "late", &timer(now_ms() - 60_000)).await.unwrap();
-    store.kv_set("timers:p", "ancient", &timer(now_ms() - 3 * 3600_000)).await.unwrap();
+    store.kv_set("timers:p", "ancient", &timer(now_ms() - 3 * 3_600_000)).await.unwrap();
     let (engine, ha) = engine_on(store.clone()).await;
     engine.load_all().await.unwrap();
     until("the late timer went off", || ha.calls() == ["light.turn_off"]).await;

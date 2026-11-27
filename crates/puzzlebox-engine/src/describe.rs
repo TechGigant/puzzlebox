@@ -312,8 +312,8 @@ fn fired_inner(t: &Value, ha: &dyn HaApi) -> String {
 fn every(seconds: f64) -> String {
     let s = seconds.round() as u64;
     let (n, unit) = match s {
-        _ if s >= 3600 && s % 3600 == 0 => (s / 3600, "hour"),
-        _ if s >= 60 && s % 60 == 0 => (s / 60, "minute"),
+        _ if s >= 3600 && s.is_multiple_of(3600) => (s / 3600, "hour"),
+        _ if s >= 60 && s.is_multiple_of(60) => (s / 60, "minute"),
         _ => (s, "second"),
     };
     if n == 1 { unit.to_owned() } else { format!("{n} {unit}s") }

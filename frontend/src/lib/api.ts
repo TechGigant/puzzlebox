@@ -227,11 +227,21 @@ export interface ImportedProgram {
   error?: string;
 }
 
+export interface Zigbee2MqttStatus {
+  base: string;
+  state: 'ok' | 'waiting' | 'not_found' | 'disconnected';
+  devices: number | null;
+  groups: number | null;
+}
+
 export interface Settings {
   bridge_token: string;
   bridge_connected: boolean;
   bridge: BridgeStatus;
   mqtt_enabled: boolean;
+  mqtt_connected: boolean;
+  /** One entry per Zigbee2MQTT base topic. */
+  zigbee2mqtt: Zigbee2MqttStatus[];
   supervised: boolean;
   webhooks: string[];
 }

@@ -33,6 +33,7 @@ pub struct AppState {
     pub webhooks: Arc<Webhooks>,
     pub wasm: Arc<WasmHost>,
     pub mqtt: Arc<Mqtt>,
+    pub z2m: Arc<crate::z2m::Z2m>,
     pub devices: Arc<devices::DeviceCache>,
     pub cfg: Config,
 }
@@ -314,6 +315,8 @@ async fn settings(State(st): State<AppState>) -> Json<Value> {
         "bridge_connected": st.bridge.connected().await,
         "bridge": st.bridge.status(),
         "mqtt_enabled": st.mqtt.enabled(),
+        "mqtt_connected": st.mqtt.connected_at().is_some(),
+        "zigbee2mqtt": st.z2m.status(),
         "supervised": st.cfg.supervisor_token.is_some(),
         "webhooks": st.webhooks.ids(),
     }))

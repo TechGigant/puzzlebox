@@ -3,6 +3,7 @@
   import { api, apiUrl, type PluginsInfo, type Settings } from './api';
   import { loadRegistry, registry } from './registry.svelte';
   import { loadPrefs, savePrefs } from './editor/appearance';
+  import { z2mStatusText } from './z2m_status';
 
   let prefs = $state(loadPrefs());
   $effect(() => savePrefs({ ...prefs }));
@@ -99,7 +100,12 @@
         <button class="btn" onclick={() => (showToken = !showToken)}>{showToken ? 'Hide' : 'Show'}</button>
         <button class="btn" onclick={() => copy(settings!.bridge_token)}>Copy token</button>
       </div>
-      <p>MQTT: <b class:ok={settings.mqtt_enabled}>{settings.mqtt_enabled ? 'connected to broker' : 'not configured'}</b></p>
+      <p>MQTT: <b class:ok={settings.mqtt_connected} class:bad={settings.mqtt_enabled && !settings.mqtt_connected}>
+        {settings.mqtt_connected ? 'connected to broker' : settings.mqtt_enabled ? "can't reach the broker" : 'not configured'}</b></p>
+      {#each settings.zigbee2mqtt ?? [] as z (z.base)}
+        {@const s = z2mStatusText(z)}
+        <p>Zigbee2MQTT on <code>{z.base}</code>: <b class:ok={s.ok} class:bad={s.bad}>{s.text}</b></p>
+      {/each}
       {#if settings.webhooks.length}
         <h3>Webhooks</h3>
         <ul>

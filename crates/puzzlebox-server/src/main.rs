@@ -68,7 +68,8 @@ async fn run() -> Result<()> {
 
     let plugins = plugins::PluginRouter::new();
     let _ = plugins.mqtt.set(mqtt.clone());
-    let _ = plugins.z2m.set(z2m::Z2m::start(&mqtt, registry.clone(), cfg.z2m_bases.clone()));
+    let z2m = z2m::Z2m::start(&mqtt, registry.clone(), cfg.z2m_bases.clone());
+    let _ = plugins.z2m.set(z2m.clone());
     let wasm = wasm::WasmHost::new(live.clone(), engine.store().clone());
     let _ = plugins.wasm.set(wasm.clone());
     let bridge =
@@ -101,6 +102,7 @@ async fn run() -> Result<()> {
         webhooks,
         wasm,
         mqtt,
+        z2m,
         devices: Arc::new(devices::DeviceCache::default()),
         cfg: cfg.clone(),
     };

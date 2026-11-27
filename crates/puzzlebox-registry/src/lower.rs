@@ -430,8 +430,11 @@ impl BlockLowerer for RegistryLowerer {
                     c.err(&b, "choose what to watch");
                     return None;
                 };
-                let equals =
-                    equals_param.as_ref().and_then(|p| options.get(p)).cloned().filter(|v| !v.is_null());
+                let equals = equals_param
+                    .as_ref()
+                    .and_then(|p| options.get(p))
+                    .cloned()
+                    .filter(|v| !v.is_null() && v != "");
                 return Some(Trigger::Mqtt {
                     id: b.id().into(),
                     topic: topic.clone(),

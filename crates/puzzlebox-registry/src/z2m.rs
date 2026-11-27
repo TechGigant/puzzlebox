@@ -201,6 +201,20 @@ pub fn get_requests(base: &str, devices: &Value) -> Vec<(String, Value)> {
     out
 }
 
+fn is_raw_brightness(f: &Feature) -> bool {
+    f.property == "brightness" && matches!(f.input, ParamInput::Number { max: Some(m), .. } if m == 254.0)
+}
+
+/// Value blocks and "changes" triggers give Zigbee2MQTT's raw numbers, so say which.
+fn watch_label(f: &Feature) -> String {
+    match &f.input {
+        _ if is_raw_brightness(f) => format!("{} (0–254)", f.label),
+        _ if f.property == "color_temp" => "white temperature (mired)".into(),
+        ParamInput::Number { unit: Some(u), .. } if u == "mired" => format!("{} (mired)", f.label),
+        _ => f.label.clone(),
+    }
+}
+
 fn param(f: &Feature, required: bool) -> Param {
     // White temperature is set in kelvin like everywhere else in the app; the lowering turns
     // `color_temp_kelvin` back into mired for Zigbee2MQTT.
@@ -218,6 +232,22 @@ fn param(f: &Feature, required: bool) -> Param {
                 max: kelvin(*min).or(Some(6500.0)),
                 step: Some(1.0),
                 unit: Some("K".into()),
+            },
+            default: None,
+        };
+    }
+    // Brightness is set in % like groups; the lowering scales `brightness_percent` to 0–254.
+    if is_raw_brightness(f) {
+        return Param {
+            name: "brightness_percent".into(),
+            label: "brightness".into(),
+            description: String::new(),
+            required,
+            input: ParamInput::Number {
+                min: Some(0.0),
+                max: Some(100.0),
+                step: Some(1.0),
+                unit: Some("%".into()),
             },
             default: None,
         };
@@ -335,7 +365,7 @@ pub fn generate(base: &str, devices: &Value, groups: &Value) -> Vec<BlockDef> {
         }
         let props: Vec<SelectOption> = published
             .iter()
-            .map(|f| SelectOption { label: f.label.clone(), value: f.property.clone() })
+            .map(|f| SelectOption { label: watch_label(f), value: f.property.clone() })
             .collect();
         if !props.is_empty() {
             let to = Param {
@@ -522,7 +552,14 @@ mod tests {
         let names: Vec<&str> = set.params.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(
             names,
-            ["state", "brightness", "color_temp_kelvin", "color_temp_startup", "effect", "power_on_behavior"]
+            [
+                "state",
+                "brightness_percent",
+                "color_temp_kelvin",
+                "color_temp_startup",
+                "effect",
+                "power_on_behavior"
+            ]
         );
         assert!(set.params[0].required);
         assert_eq!(options(&set.params[0]), [("on", "ON"), ("off", "OFF"), ("toggle", "TOGGLE")]);
@@ -548,6 +585,23 @@ mod tests {
             p.input,
             ParamInput::Number { min: Some(2203.0), max: Some(4000.0), unit: Some(ref u), .. } if u == "K"
         ));
+        let b = set.params.iter().find(|p| p.name == "brightness_percent").unwrap();
+        assert!(
+            matches!(b.input, ParamInput::Number { max: Some(100.0), unit: Some(ref u), .. } if u == "%")
+        );
+    }
+
+    #[test]
+    fn watched_values_say_their_raw_unit() {
+        let blocks = generate("zigbee2mqtt", &fixture(), &json!([]));
+        let value = find(&blocks, "0x000d6ffffe112233__value");
+        let labels: Vec<&str> = options(&value.params[0]).into_iter().map(|(l, _)| l).collect();
+        assert_eq!(
+            labels[..4],
+            ["state", "brightness (0–254)", "white temperature (mired)", "color temp startup (mired)"]
+        );
+        let changed = find(&blocks, "0x000d6ffffe112233__changed");
+        assert_eq!(options(&changed.params[0])[1], ("brightness (0–254)", "brightness"));
     }
 
     #[test]

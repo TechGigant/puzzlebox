@@ -176,18 +176,20 @@ function migrateBlock(b: State) {
       held.shadow = durationShadow(Number(held.shadow.fields?.NUM ?? 0)) as State;
     }
   }
-  // Zigbee2MQTT group brightness (0–254) and white (mired) became % and kelvin; device white too.
+  // Zigbee2MQTT brightness (0–254) and white (mired) became % and kelvin, for groups and then
+  // for devices (those whose generated block now takes the new setting).
   const group = /^z2m__.+__group\d+__set$/.test(b.type);
   if (group || /^z2m__.+__set$/.test(b.type)) {
-    // [old name, new name, convert a number, block that converts a calculation]
+    // [old name, new name, convert a number, block that converts a calculation]; the % keeps two
+    // decimals so it scales back to the same 0–254 value.
     const convert: [string, string, (n: number) => number, (e: State) => State][] = [
-      ['brightness', 'brightness_percent', (n) => Math.round(n / 2.54), (e) => divide({ block: e }, num(2.54))],
+      ['brightness', 'brightness_percent', (n) => Math.round((n / 2.54) * 100) / 100, (e) => divide({ block: e }, num(2.54))],
       ['color_temp', 'color_temp_kelvin', (n) => Math.round(1_000_000 / Math.max(n, 1)), (e) => divide(num(1_000_000), { block: e })],
     ];
     const extra = b.extraState as { optional?: string[] } | undefined;
-    for (const [from, to, fn, wrap] of group ? convert : convert.slice(1)) {
+    for (const [from, to, fn, wrap] of convert) {
       const slot = b.inputs[`P_${from}`];
-      if (!slot) continue;
+      if (!slot || (!group && !def?.params.some((p) => p.name === to))) continue;
       if (slot.block) {
         b.inputs[`P_${to}`] = { block: wrap(slot.block) };
       } else {

@@ -12,6 +12,7 @@
   import { registerUsageMenu } from './editor/usages';
   import { noteUsed, registerFavourites, registerFavouritesMenu } from './editor/favourites';
   import { installDropdownSearch } from './editor/dropdown_search';
+  import { registerUnavailableBlock } from './editor/unavailable';
 
   Blockly.setLocale(En as unknown as Record<string, string>);
   registerCoreBlocks();
@@ -22,6 +23,7 @@
   registerUsageMenu();
   registerFavouritesMenu();
   installDropdownSearch();
+  registerUnavailableBlock();
 
   /** Per-workspace callbacks for the editor that owns it (menus are registered globally). */
   const runStackHandlers = new Map<string, (topBlockId: string) => void>();
@@ -113,6 +115,7 @@
   import { installDragTricks } from './editor/drag';
   import { installSummaries } from './editor/summaries';
   import { migrateWorkspace } from './editor/migrate';
+  import { placeholderInfo, typeLabel, unwrapUnavailable, wrapUnavailable, type Missing, type Why } from './editor/unavailable';
   import { entityWarnings } from './blocks/checks';
   import { knownEntities, loadEntities, loadRegistry as loadHaNames, refreshNameFields } from './blocks/field_entity';
 
@@ -131,6 +134,9 @@
     onchange,
     onbreakpoints,
     onrunstack,
+    why = () => ({ reason: "This block isn't part of this version of Puzzlebox.", pending: false }),
+    labels = {},
+    readOnly = false,
   }: {
     initial?: object;
     extraCategories?: ExtraCategory[];
@@ -139,6 +145,11 @@
     onbreakpoints?: (ids: string[]) => void;
     /** "Run this stack": the id of the stack's top block. */
     onrunstack?: (topBlockId: string) => void;
+    /** Why blocks of a type the editor doesn't have are missing. */
+    why?: (type: string) => Why;
+    /** The blocks' text when last saved, for naming blocks that are missing. */
+    labels?: Record<string, string>;
+    readOnly?: boolean;
   } = $props();
 
   const prefs = loadPrefs();
@@ -207,6 +218,12 @@
   const breakpoints = new Set<string>();
   const marked = new Map<string, string>();
   let errorIds = new Set<string>();
+  let missingBlocks: Missing[] = [];
+
+  /** Blocks shown as placeholders when the program was loaded. */
+  export function missing(): Missing[] {
+    return missingBlocks;
+  }
 
   function blockEl(id: string): SVGElement | null {
     const b = workspace?.getBlockById(id) as Blockly.BlockSvg | null;
@@ -221,9 +238,12 @@
     if (!workspace) return;
     loading = true;
     workspace.clear();
+    missingBlocks = [];
     if (state && Object.keys(state).length) {
       // A plain copy: the state may be a Svelte proxy, and the caller keeps the original.
-      Blockly.serialization.workspaces.load(migrateWorkspace(JSON.parse(JSON.stringify(state))), workspace);
+      const plain = migrateWorkspace(JSON.parse(JSON.stringify(state)));
+      missingBlocks = wrapUnavailable(plain, (t) => !!Blockly.Blocks[t], why, (n) => labels[n.id ?? ''] ?? typeLabel(n.type));
+      Blockly.serialization.workspaces.load(plain, workspace);
     } else {
       const when = workspace.newBlock('ha_when');
       when.initSvg();
@@ -253,7 +273,7 @@
   }
 
   export function save(): object {
-    return workspace ? Blockly.serialization.workspaces.save(workspace) : {};
+    return workspace ? unwrapUnavailable(Blockly.serialization.workspaces.save(workspace)) : {};
   }
 
   /** Visible labels next to an input or field, e.g. "if" or "brightness". */
@@ -274,6 +294,9 @@
   function friendly(e: CompileError): string {
     const b = e.block_id ? workspace?.getBlockById(e.block_id) : null;
     if (!b) return e.message;
+    // The engine can only say the block is unknown; the editor knows why.
+    const ph = placeholderInfo(b);
+    if (ph) return ph.reason;
     return e.message.replace(/\u201c([^\u201d]+)\u201d/g, (all, name: string) => {
       const label = labelFor(b, name.toLowerCase());
       return label ? `\u201c${label}\u201d` : name.match(/^[a-z]+\d*$/) ? 'empty' : all;
@@ -370,6 +393,8 @@
     if (!b) return null;
     // A shadow is the default value in a socket ("choose…"); name the block it belongs to.
     while (b.isShadow() && b.getParent()) b = b.getParent()!;
+    const ph = placeholderInfo(b);
+    if (ph) return ph.label;
     if (ENTRY_BLOCKS.has(b.type)) return `the “${blockWords(b, { header: true }) || 'when'}” block`;
     // C-shaped blocks: just the part above their first slot of blocks ("if … do").
     const text = blockWords(b, { header: true });
@@ -387,6 +412,10 @@
     mark(id, 'pb-breakpoint', breakpoints.has(id));
     onbreakpoints?.([...breakpoints]);
   }
+
+  $effect(() => {
+    workspace?.setIsReadOnly(readOnly);
+  });
 
   $effect(() => {
     if (!workspace) return;
@@ -523,7 +552,7 @@
       if (e.type === Blockly.Events.BLOCK_DELETE) {
         for (const id of (e as Blockly.Events.BlockDelete).ids ?? []) breakpoints.delete(id);
       }
-      onchange(Blockly.serialization.workspaces.save(workspace));
+      onchange(unwrapUnavailable(Blockly.serialization.workspaces.save(workspace)));
     });
 
     load(initial);

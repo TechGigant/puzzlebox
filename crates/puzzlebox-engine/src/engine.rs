@@ -10,12 +10,12 @@ use puzzlebox_ir::{BlockLowerer, CompileError, HandlerKind, LogLevel, NoExternal
 use puzzlebox_storage::{ProgramRecord, RunRecord, Store, now_ms};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
-use crate::debug::Debugger;
+use crate::debug::{Debugger, Unpaused};
 use crate::ha::HaApi;
 use crate::interp::{ErrorKind, HttpClient, PluginHost, RunCtx, RunHooks, Trace, Waiting};
 use crate::sources::{TriggerSource, TriggerSources};
@@ -54,6 +54,66 @@ pub struct ProgramStatus {
     pub errors: Vec<CompileError>,
     /// What starts the program, in words ("when Movement turns on (+1)").
     pub summary: String,
+    /// Runs paused at a breakpoint.
+    pub paused: usize,
+}
+
+/// Why runs were stopped, kept with the stopped run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    Saved,
+    TurnedOff,
+    Deleted,
+    /// The blocks it uses changed (HA or a plugin changed them).
+    BlocksChanged,
+    StopButton,
+    /// Restart mode: triggered again.
+    TriggeredAgain,
+    Shutdown,
+    /// Loaded at startup: nothing was running.
+    Startup,
+}
+
+impl StopReason {
+    pub fn text(self) -> &'static str {
+        match self {
+            StopReason::Saved => "stopped because the program was saved",
+            StopReason::TurnedOff => "stopped because the program was turned off",
+            StopReason::Deleted => "stopped because the program was deleted",
+            StopReason::BlocksChanged => {
+                "stopped because blocks it uses changed (Home Assistant or a plugin changed them)"
+            }
+            StopReason::StopButton => "stopped with the Stop button",
+            StopReason::TriggeredAgain => {
+                "stopped because it was triggered again (if already running: start over)"
+            }
+            StopReason::Shutdown => "stopped because Puzzlebox stopped or restarted",
+            StopReason::Startup => "stopped",
+        }
+    }
+
+    /// Timers belong to the program the user changed; a restart Puzzlebox did by itself keeps them.
+    fn clears_timers(self) -> bool {
+        matches!(self, StopReason::Saved | StopReason::TurnedOff | StopReason::Deleted)
+    }
+}
+
+/// A timer counting down.
+#[derive(Debug, Clone, Serialize)]
+pub struct TimerInfo {
+    pub name: String,
+    /// When it goes off (ms since the epoch).
+    pub due: i64,
+}
+
+/// What saving a program would do to it.
+#[derive(Debug, Clone, Serialize)]
+pub struct SaveImpact {
+    /// The saved program differs from the running one, so it starts again.
+    pub restarts: bool,
+    /// Runs and timers the restart would stop.
+    pub runs: Vec<ActiveRun>,
+    pub timers: Vec<TimerInfo>,
 }
 
 /// A run in progress and what it is doing.
@@ -124,6 +184,8 @@ pub enum EngineEvent {
         run_id: String,
         block_id: String,
         variables: Value,
+        /// What started the run.
+        summary: String,
     },
     Resumed {
         program_id: String,
@@ -140,10 +202,22 @@ pub enum EngineEvent {
     },
 }
 
+struct TimerEntry {
+    task: JoinHandle<()>,
+    due: i64,
+}
+
+type Timers = Arc<Mutex<HashMap<String, TimerEntry>>>;
+
 struct RunningProgram {
     program: Arc<Program>,
+    mode: String,
+    max_runs: u32,
+    /// A trigger couldn't be set up; saving again retries.
+    trigger_errors: bool,
+    labels: Arc<Mutex<Arc<Value>>>,
     /// Named timers: name → task that dispatches the timer's handler when it fires.
-    timers: Arc<Mutex<HashMap<String, JoinHandle<()>>>>,
+    timers: Timers,
     /// Throttle keys → when they last let a run through.
     throttles: Mutex<HashMap<String, Instant>>,
     program_vars: Arc<Mutex<Map<String, Value>>>,
@@ -156,6 +230,59 @@ struct Dispatch {
     handler: usize,
     trigger: Value,
 }
+
+/// Timers are kept in the store so they still go off after a restart. One worker applies the
+/// changes in order, since timers start and stop from code that can't wait for the store.
+enum TimerOp {
+    Set { program: String, name: String, value: Value },
+    Delete { program: String, name: String },
+    Clear { program: String },
+    Load { program: String, reply: oneshot::Sender<Map<String, Value>> },
+    Flush { reply: oneshot::Sender<()> },
+}
+
+fn timer_scope(program: &str) -> String {
+    format!("timers:{program}")
+}
+
+async fn timer_worker(store: Store, mut rx: mpsc::UnboundedReceiver<TimerOp>) {
+    while let Some(op) = rx.recv().await {
+        let res = match op {
+            TimerOp::Set { program, name, value } => {
+                store.kv_set(&timer_scope(&program), &name, &value).await
+            }
+            TimerOp::Delete { program, name } => store.kv_delete(&timer_scope(&program), &name).await,
+            TimerOp::Clear { program } => {
+                let scope = timer_scope(&program);
+                match store.kv_all(&scope).await {
+                    Ok(all) => {
+                        for name in all.keys() {
+                            if let Err(e) = store.kv_delete(&scope, name).await {
+                                warn!(error = %e, "failed to forget a timer");
+                            }
+                        }
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            TimerOp::Load { program, reply } => {
+                let _ = reply.send(store.kv_all(&timer_scope(&program)).await.unwrap_or_default());
+                Ok(())
+            }
+            TimerOp::Flush { reply } => {
+                let _ = reply.send(());
+                Ok(())
+            }
+        };
+        if let Err(e) = res {
+            warn!(error = %e, "failed to store a timer");
+        }
+    }
+}
+
+/// Timers that went off while Puzzlebox was stopped still go off, up to this late.
+const TIMER_GRACE_MS: i64 = 60 * 60 * 1000;
 
 pub(crate) struct Inner {
     pub(crate) ha: Arc<dyn HaApi>,
@@ -171,6 +298,9 @@ pub(crate) struct Inner {
     pub(crate) debugger: Debugger,
     active: Mutex<HashMap<String, ActiveRun>>,
     logs: Mutex<HashMap<String, VecDeque<LogEntry>>>,
+    /// Run id → why it was stopped, until the run has finished.
+    stop_reasons: Mutex<HashMap<String, StopReason>>,
+    timer_store: mpsc::UnboundedSender<TimerOp>,
 }
 
 #[derive(Clone)]
@@ -190,6 +320,8 @@ impl Engine {
     pub async fn new(ha: Arc<dyn HaApi>, store: Store) -> anyhow::Result<Self> {
         let globals = store.kv_all("global").await?;
         let (events, _) = broadcast::channel(1024);
+        let (timer_store, timer_rx) = mpsc::unbounded_channel();
+        tokio::spawn(timer_worker(store.clone(), timer_rx));
         Ok(Self {
             inner: Arc::new(Inner {
                 ha,
@@ -205,6 +337,8 @@ impl Engine {
                 debugger: Debugger::default(),
                 active: Mutex::new(HashMap::new()),
                 logs: Mutex::new(HashMap::new()),
+                stop_reasons: Mutex::new(HashMap::new()),
+                timer_store,
             }),
         })
     }
@@ -280,7 +414,11 @@ impl Engine {
             Err(e) => warn!(error = %e, "failed to empty the recycle bin"),
         }
         for p in self.inner.store.list_programs().await? {
-            self.start(&p).await;
+            // Saved (and so started) while Puzzlebox was starting up.
+            if self.status(&p.id).is_some() {
+                continue;
+            }
+            self.start(&p, StopReason::Startup).await;
         }
         Ok(())
     }
@@ -291,7 +429,8 @@ impl Engine {
         self.set_lowerer(lowerer);
         let _ = self.inner.events.send(EngineEvent::RegistryChanged);
         for rec in self.inner.store.list_programs().await? {
-            let state = self.status(&rec.id).map(|s| s.state).unwrap_or_default();
+            // Not loaded yet (the registry is built before `load_all` at startup).
+            let Some(state) = self.status(&rec.id).map(|s| s.state) else { continue };
             // Failing programs may compile now; running ones restart only if the change
             // affects them (e.g. a renamed device changed a trigger's config).
             let restart = match state.as_str() {
@@ -306,7 +445,7 @@ impl Engine {
                 }
             };
             if restart {
-                self.start(&rec).await;
+                self.start(&rec, StopReason::BlocksChanged).await;
             }
         }
         Ok(())
@@ -324,11 +463,13 @@ impl Engine {
         record: ProgramRecord,
         labels: Option<Value>,
     ) -> anyhow::Result<(ProgramRecord, Vec<CompileError>)> {
+        let was_on = self.inner.store.get_program(&record.id).await?.is_some_and(|p| p.enabled);
         let saved = self.inner.store.save_program(record).await?;
         if let Some(l) = labels.filter(Value::is_object) {
             self.inner.store.save_labels(&saved.id, &l).await?;
         }
-        let errors = self.start(&saved).await;
+        let reason = if was_on && !saved.enabled { StopReason::TurnedOff } else { StopReason::Saved };
+        let errors = self.start(&saved, reason).await;
         Ok((saved, errors))
     }
 
@@ -340,7 +481,7 @@ impl Engine {
 
     /// Stops the program and moves it to the recycle bin.
     pub async fn delete(&self, id: &str) -> anyhow::Result<bool> {
-        self.stop_program(id);
+        self.stop_program(id, StopReason::Deleted);
         lock(&self.inner.status).remove(id);
         let existed = self.inner.store.delete_program(id).await?;
         let _ = self.inner.events.send(EngineEvent::Removed { program_id: id.to_owned() });
@@ -350,7 +491,7 @@ impl Engine {
     /// Takes a program out of the recycle bin and starts it again.
     pub async fn restore(&self, id: &str) -> anyhow::Result<Option<ProgramRecord>> {
         let Some(rec) = self.inner.store.restore_program(id).await? else { return Ok(None) };
-        self.start(&rec).await;
+        self.start(&rec, StopReason::Saved).await;
         Ok(Some(rec))
     }
 
@@ -474,10 +615,75 @@ impl Engine {
     pub fn cancel_runs(&self, id: &str) -> usize {
         let Some(rp) = lock(&self.inner.running).get(id).map(|rp| rp.runs.clone()) else { return 0 };
         let runs = lock(&rp);
-        for tok in runs.values() {
+        self.cancel_with(&runs, StopReason::StopButton);
+        runs.len()
+    }
+
+    fn cancel_with(&self, runs: &HashMap<String, CancellationToken>, reason: StopReason) {
+        let mut reasons = lock(&self.inner.stop_reasons);
+        for (run_id, tok) in runs {
+            reasons.entry(run_id.clone()).or_insert(reason);
             tok.cancel();
         }
-        runs.len()
+    }
+
+    /// Timers counting down, soonest first.
+    pub fn timers(&self, id: &str) -> Vec<TimerInfo> {
+        let Some(timers) = lock(&self.inner.running).get(id).map(|rp| rp.timers.clone()) else {
+            return vec![];
+        };
+        let mut out: Vec<TimerInfo> = lock(&timers)
+            .iter()
+            .filter(|(_, t)| !t.task.is_finished())
+            .map(|(name, t)| TimerInfo { name: name.clone(), due: t.due })
+            .collect();
+        out.sort_by_key(|t| t.due);
+        out
+    }
+
+    /// Whether saving `rec` would restart the program, and what that would stop.
+    pub fn save_impact(&self, rec: &ProgramRecord) -> SaveImpact {
+        let (program, _) = self.compile_partial(&rec.workspace);
+        let running = lock(&self.inner.running).contains_key(&rec.id);
+        let restarts = running && !self.keeps_running(rec, &program);
+        let (runs, timers) =
+            if restarts { (self.active_runs(&rec.id), self.timers(&rec.id)) } else { (vec![], vec![]) };
+        SaveImpact { restarts, runs, timers }
+    }
+
+    /// The running program is the same as `rec` would be, so saving needn't restart it.
+    fn keeps_running(&self, rec: &ProgramRecord, program: &Program) -> bool {
+        rec.enabled
+            && lock(&self.inner.running).get(&rec.id).is_some_and(|rp| {
+                !rp.trigger_errors
+                    && rp.mode == rec.mode
+                    && rp.max_runs == rec.max_runs
+                    && *rp.program == *program
+            })
+    }
+
+    /// Stops every run (recording why) before Puzzlebox exits; timers are kept for next time.
+    pub async fn shutdown(&self) {
+        {
+            let running = lock(&self.inner.running);
+            for rp in running.values() {
+                for (_, t) in lock(&rp.timers).drain() {
+                    t.task.abort();
+                }
+                self.cancel_with(&lock(&rp.runs), StopReason::Shutdown);
+            }
+        }
+        // Give the stopped runs a moment to store their records.
+        for _ in 0..60 {
+            if lock(&self.inner.active).is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let (reply, done) = oneshot::channel();
+        if self.inner.timer_store.send(TimerOp::Flush { reply }).is_ok() {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), done).await;
+        }
     }
 
     /// Index of the handler whose entry (or loose stack) is the block `block_id`.
@@ -497,23 +703,115 @@ impl Engine {
             .is_ok()
     }
 
-    fn stop_program(&self, id: &str) {
+    fn stop_program(&self, id: &str, reason: StopReason) {
         if let Some(rp) = lock(&self.inner.running).remove(id) {
             for t in rp.tasks {
                 t.abort();
             }
             for (_, t) in lock(&rp.timers).drain() {
-                t.abort();
+                t.task.abort();
             }
-            for tok in lock(&rp.runs).values() {
-                tok.cancel();
-            }
+            self.cancel_with(&lock(&rp.runs), reason);
+        }
+        if reason.clears_timers() {
+            let _ = self.inner.timer_store.send(TimerOp::Clear { program: id.to_owned() });
         }
         self.inner.sources.unregister_program(id);
     }
 
-    async fn start(&self, rec: &ProgramRecord) -> Vec<CompileError> {
-        self.stop_program(&rec.id);
+    /// Starts a timer: dispatches handler `idx` at `due` (ms since the epoch).
+    #[allow(clippy::too_many_arguments)]
+    fn arm_timer(
+        &self,
+        program_id: &str,
+        timers: &Timers,
+        tx: &mpsc::UnboundedSender<Dispatch>,
+        name: &str,
+        idx: usize,
+        trigger: Value,
+        due: i64,
+    ) {
+        let (tx, timers_ref, key) = (tx.clone(), timers.clone(), name.to_owned());
+        let (store, program) = (self.inner.timer_store.clone(), program_id.to_owned());
+        let wait = std::time::Duration::from_millis(due.saturating_sub(now_ms()).max(0) as u64);
+        let task = tokio::spawn(async move {
+            tokio::time::sleep(wait).await;
+            lock(&timers_ref).remove(&key);
+            let _ = store.send(TimerOp::Delete { program, name: key });
+            let _ = tx.send(Dispatch { handler: idx, trigger });
+        });
+        if let Some(old) = lock(timers).insert(name.to_owned(), TimerEntry { task, due }) {
+            old.task.abort();
+        }
+    }
+
+    /// Starts the timers that were counting down when the program last stopped.
+    async fn rearm_timers(
+        &self,
+        rec: &ProgramRecord,
+        program: &Program,
+        timers: &Timers,
+        tx: &mpsc::UnboundedSender<Dispatch>,
+    ) {
+        let (reply, stored) = oneshot::channel();
+        if self.inner.timer_store.send(TimerOp::Load { program: rec.id.clone(), reply }).is_err() {
+            return;
+        }
+        let Ok(stored) = stored.await else { return };
+        let now = now_ms();
+        for (name, v) in stored {
+            let handler = v["handler"].as_str().unwrap_or("");
+            let due = v["due"].as_i64().unwrap_or(0);
+            let idx = program
+                .handlers
+                .iter()
+                .position(|h| h.id == handler && matches!(h.kind, HandlerKind::Timer { .. }));
+            match idx {
+                Some(idx) if due >= now - TIMER_GRACE_MS => {
+                    self.arm_timer(&rec.id, timers, tx, &name, idx, v["trigger"].clone(), due);
+                }
+                _ => {
+                    let _ = self
+                        .inner
+                        .timer_store
+                        .send(TimerOp::Delete { program: rec.id.clone(), name: name.clone() });
+                    if idx.is_some() {
+                        let at = crate::clock::local(
+                            chrono::DateTime::from_timestamp_millis(due).unwrap_or_default(),
+                        );
+                        self.push_log(
+                            &rec.id,
+                            None,
+                            LogLevel::Warning,
+                            &format!(
+                                "timer “{name}” was due at {} while Puzzlebox was stopped; that's too long ago to run it now",
+                                at.format("%Y-%m-%d %H:%M")
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    async fn start(&self, rec: &ProgramRecord, reason: StopReason) -> Vec<CompileError> {
+        // Stacks with problems are left out; the rest runs. Nothing to run at all = invalid.
+        let (program, compile_errors) = self.compile_partial(&rec.workspace);
+        if self.keeps_running(rec, &program) {
+            // Only the name, description, folder or block positions changed: runs and timers go on.
+            let labels = Arc::new(self.inner.store.labels(&rec.id).await.unwrap_or_default());
+            if let Some(rp) = lock(&self.inner.running).get(&rec.id) {
+                *lock(&rp.labels) = labels;
+            }
+            let msg = compile_errors.iter().map(|e| e.message.as_str()).collect::<Vec<_>>().join("; ");
+            self.update_status(&rec.id, |s| {
+                s.state = if compile_errors.is_empty() { "idle".into() } else { "error".into() };
+                s.last_error = (!compile_errors.is_empty()).then_some(msg);
+                s.errors = compile_errors.clone();
+            });
+            return compile_errors;
+        }
+        self.stop_program(&rec.id, reason);
         // Status is in memory; after a restart, take "last run" from the stored history.
         if self.status(&rec.id).is_none_or(|s| s.last_run.is_none())
             && let Ok(runs) = self.inner.store.list_runs(&rec.id, 1).await
@@ -527,14 +825,13 @@ impl Engine {
                 st.last_error = Some(e.clone());
             }
         }
-        // Stacks with problems are left out; the rest runs. Nothing to run at all = invalid.
-        let (program, compile_errors) = self.compile_partial(&rec.workspace);
         {
             let mut all = lock(&self.inner.status);
             let st = all.entry(rec.id.clone()).or_default();
             st.summary = crate::describe::program(&program, self.inner.ha.as_ref());
         }
-        let labels = Arc::new(self.inner.store.labels(&rec.id).await.unwrap_or_default());
+        let labels =
+            Arc::new(Mutex::new(Arc::new(self.inner.store.labels(&rec.id).await.unwrap_or_default())));
         if !compile_errors.is_empty() && program.handlers.is_empty() {
             self.update_status(&rec.id, |s| {
                 s.state = "invalid".into();
@@ -569,6 +866,7 @@ impl Engine {
         let runs = Arc::new(Mutex::new(HashMap::new()));
         let mut tasks = Vec::new();
         let mut errors = compile_errors;
+        let compile_problems = errors.len();
 
         for (idx, h) in program.handlers.iter().enumerate() {
             let HandlerKind::Triggers { triggers } = &h.kind else { continue };
@@ -614,7 +912,7 @@ impl Engine {
             runs: runs.clone(),
             mode: RunMode::parse(&rec.mode),
             max: rec.max_runs.max(1) as usize,
-            labels,
+            labels: labels.clone(),
         };
         tasks.push(tokio::spawn(ctx.dispatch(rx)));
 
@@ -624,11 +922,19 @@ impl Engine {
             }
         }
 
+        let timers: Timers = Arc::new(Mutex::new(HashMap::new()));
+        if !reason.clears_timers() {
+            self.rearm_timers(rec, &program, &timers, &tx).await;
+        }
         lock(&self.inner.running).insert(
             rec.id.clone(),
             RunningProgram {
                 program: program.clone(),
-                timers: Arc::new(Mutex::new(HashMap::new())),
+                mode: rec.mode.clone(),
+                max_runs: rec.max_runs,
+                trigger_errors: errors.len() > compile_problems,
+                labels,
+                timers,
                 throttles: Mutex::new(HashMap::new()),
                 program_vars,
                 tasks,
@@ -659,7 +965,7 @@ struct DispatchCtx {
     mode: RunMode,
     max: usize,
     /// The editor's text for each block when the program was saved.
-    labels: Arc<Value>,
+    labels: Arc<Mutex<Arc<Value>>>,
 }
 
 impl DispatchCtx {
@@ -697,11 +1003,7 @@ impl DispatchCtx {
                     self.skipped("it was still running (if already running: ignore)");
                     continue;
                 }
-                RunMode::Restart => {
-                    for tok in lock(&self.runs).values() {
-                        tok.cancel();
-                    }
-                }
+                RunMode::Restart => self.engine.cancel_with(&lock(&self.runs), StopReason::TriggeredAgain),
                 RunMode::Parallel if active >= self.max => {
                     self.skipped("too many runs at once (if already running: run both)");
                     continue;
@@ -787,13 +1089,18 @@ impl DispatchCtx {
                 }),
             };
             inner.debugger.run_finished(&run_id);
+            let stopped = lock(&inner.stop_reasons).remove(&run_id);
             let (status, error, block_id) = match &result {
                 Ok(()) => ("ok", None, None),
-                Err(e) if e.kind == ErrorKind::Cancelled => ("cancelled", None, None),
+                Err(e) if e.kind == ErrorKind::Cancelled => {
+                    ("cancelled", stopped.map(|r| r.text().to_owned()), None)
+                }
                 Err(e) => ("error", Some(e.message.clone()), e.block_id.clone()),
             };
             lock(&inner.active).remove(&run_id);
-            if let Some(err) = &error {
+            if let (Some(why), "cancelled") = (&error, status) {
+                engine.push_log(&this.program_id, Some(&run_id), LogLevel::Info, &format!("a run was {why}"));
+            } else if let Some(err) = &error {
                 warn!(program = %this.program_id, block = ?block_id, "run failed: {err}");
                 engine.push_log(
                     &this.program_id,
@@ -804,10 +1111,11 @@ impl DispatchCtx {
             }
             let trace = std::mem::take(&mut *lock(&ctx.trace));
             // The blocks as they read when this run ran, for describing it after later edits.
+            let all_labels = lock(&this.labels).clone();
             let labels: Map<String, Value> = trace
                 .steps
                 .iter()
-                .filter_map(|s| Some((s.block.clone(), this.labels.get(&s.block)?.clone())))
+                .filter_map(|s| Some((s.block.clone(), all_labels.get(&s.block)?.clone())))
                 .collect();
             let record = RunRecord {
                 id: run_id.clone(),
@@ -833,7 +1141,7 @@ impl DispatchCtx {
             engine.update_status(&this.program_id, |s| {
                 s.active_runs = s.active_runs.saturating_sub(1);
                 s.last_status = Some(status.into());
-                if let Some(e) = &error {
+                if let (Some(e), "error") = (&error, status) {
                     s.last_error = Some(e.clone());
                 }
             });
@@ -877,21 +1185,22 @@ impl RunHooks for EngineHooks {
                 .iter()
                 .position(|h| h.id == handler && matches!(h.kind, HandlerKind::Timer { .. }))
                 .ok_or("timer body not found")?;
-            let mut timers = lock(&rp.timers);
-            if let Some(t) = timers.get(name) {
-                if !t.is_finished() && mode == puzzlebox_ir::TimerMode::Keep {
-                    return Ok(());
-                }
-                t.abort();
+            if let Some(t) = lock(&rp.timers).get(name)
+                && !t.task.is_finished()
+                && mode == puzzlebox_ir::TimerMode::Keep
+            {
+                return Ok(());
             }
-            let (tx, timers_ref, key) = (rp.tx.clone(), rp.timers.clone(), name.to_owned());
             let trigger = json!({"platform": "timer", "timer": name, "id": handler, "started_by": ctx.trigger.clone(), "data": data});
-            let task = tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs_f64(seconds)).await;
-                lock(&timers_ref).remove(&key);
-                let _ = tx.send(Dispatch { handler: idx, trigger });
+            let due = now_ms() + (seconds.max(0.0) * 1000.0) as i64;
+            let engine = &self.engine;
+            engine.arm_timer(&ctx.program_id, &rp.timers, &rp.tx, name, idx, trigger.clone(), due);
+            let value = json!({"due": due, "handler": handler, "trigger": trigger});
+            let _ = engine.inner.timer_store.send(TimerOp::Set {
+                program: ctx.program_id.clone(),
+                name: name.to_owned(),
+                value,
             });
-            timers.insert(name.to_owned(), task);
             Ok(())
         });
         started.unwrap_or(Err("the program is not running".into()))
@@ -900,13 +1209,18 @@ impl RunHooks for EngineHooks {
     fn timer_cancel(&self, ctx: &RunCtx, name: &str) {
         self.with_program(ctx, |rp| {
             if let Some(t) = lock(&rp.timers).remove(name) {
-                t.abort();
+                t.task.abort();
             }
         });
+        let _ = self
+            .engine
+            .inner
+            .timer_store
+            .send(TimerOp::Delete { program: ctx.program_id.clone(), name: name.to_owned() });
     }
 
     fn timer_running(&self, ctx: &RunCtx, name: &str) -> bool {
-        self.with_program(ctx, |rp| lock(&rp.timers).get(name).is_some_and(|t| !t.is_finished()))
+        self.with_program(ctx, |rp| lock(&rp.timers).get(name).is_some_and(|t| !t.task.is_finished()))
             .unwrap_or(false)
     }
 
@@ -949,7 +1263,36 @@ impl RunHooks for EngineHooks {
                 block_id: block.to_owned(),
             });
         }
-        inner.debugger.maybe_pause(ctx, block, &inner.events).await;
+        let Some(resume) = inner.debugger.should_pause(ctx, block) else { return };
+        let summary = lock(&inner.active).get(&ctx.run_id).map(|r| r.summary.clone()).unwrap_or_default();
+        // Also counts down when the run is stopped while paused.
+        struct Paused<'a>(&'a Engine, &'a str);
+        impl Drop for Paused<'_> {
+            fn drop(&mut self) {
+                self.0.update_status(self.1, |s| s.paused = s.paused.saturating_sub(1));
+            }
+        }
+        self.engine.update_status(&ctx.program_id, |s| s.paused += 1);
+        let _paused = Paused(&self.engine, &ctx.program_id);
+        let _ = inner.events.send(EngineEvent::Paused {
+            program_id: ctx.program_id.clone(),
+            run_id: ctx.run_id.clone(),
+            block_id: block.to_owned(),
+            variables: ctx.variables_snapshot(),
+            summary,
+        });
+        if let Unpaused::TimedOut = inner.debugger.wait(&ctx.run_id, resume).await {
+            let mins = inner.debugger.pause_limit().as_secs().div_ceil(60);
+            self.engine.push_log(
+                &ctx.program_id,
+                Some(&ctx.run_id),
+                LogLevel::Warning,
+                &format!("a run was paused at a breakpoint for {mins} min without being continued, so it carried on by itself"),
+            );
+        }
+        let _ = inner
+            .events
+            .send(EngineEvent::Resumed { program_id: ctx.program_id.clone(), run_id: ctx.run_id.clone() });
     }
 
     fn on_global(&self, name: &str, value: &Value) {

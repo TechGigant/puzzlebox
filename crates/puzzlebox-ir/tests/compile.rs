@@ -136,9 +136,7 @@ fn every_trigger_and_area_targets() {
     }]}});
     let p = compile(&ws, &NoExternals).unwrap();
     let HandlerKind::Triggers { triggers } = &p.handlers[0].kind else { panic!() };
-    let Trigger::Ha { config, .. } = &triggers[0] else { panic!() };
-    assert_eq!(config["minutes"], "/10");
-    assert_eq!(config["trigger"], "time_pattern");
+    assert_eq!(triggers[0], Trigger::Interval { id: "e".into(), seconds: 600.0 });
     let StmtKind::CallService { target: Some(t), .. } = &p.handlers[0].body[0].kind else { panic!() };
     assert_eq!(t.kind, ExprKind::Lit { value: json!({"area_id": ["kitchen", "hall"]}) });
 }
@@ -162,17 +160,17 @@ fn trigger_durations_are_sockets_and_every_is_checked() {
 
     let every =
         |n: u32, unit: &str| json!({"type": "ha_trigger_every", "id": "e", "fields": {"N": n, "UNIT": unit}});
-    let config = |t: serde_json::Value| {
+    let seconds = |t: serde_json::Value| {
         let p = compile(&ws(t), &NoExternals).unwrap();
         let HandlerKind::Triggers { triggers } = &p.handlers[0].kind else { panic!() };
-        let Trigger::Ha { config, .. } = &triggers[0] else { panic!() };
-        config.clone()
+        let Trigger::Interval { seconds, .. } = &triggers[0] else { panic!() };
+        *seconds
     };
-    assert_eq!(config(every(60, "minutes"))["hours"], "/1");
-    assert_eq!(config(every(24, "hours"))["at"], "00:00:00");
-    assert_eq!(config(every(7, "minutes"))["minutes"], "/7");
-    let errors = compile(&ws(every(90, "minutes")), &NoExternals).unwrap_err();
-    assert!(errors[0].message.contains("can't repeat"), "{}", errors[0].message);
+    // Exact intervals: nothing restarts at the top of the hour, and any length works.
+    assert_eq!(seconds(every(7, "minutes")), 420.0);
+    assert_eq!(seconds(every(90, "minutes")), 5400.0);
+    assert_eq!(seconds(every(36, "hours")), 129600.0);
+    assert_eq!(seconds(every(0, "seconds")), 1.0);
 }
 
 /// The HA config a single trigger block compiles to, without the `id` the compiler adds.

@@ -562,33 +562,15 @@ impl<'a> Compiler<'a> {
                 ha(cfg)
             }
             "ha_trigger_every" => {
-                let n = b.field_f64("N").unwrap_or(5.0).max(1.0) as u64;
-                let (unit, max) = match b.field_str("UNIT") {
-                    Some("seconds") => ("seconds", 60),
-                    Some("hours") => ("hours", 24),
-                    _ => ("minutes", 60),
+                let n = b.field_f64("N").unwrap_or(5.0).max(1.0).round();
+                let unit = match b.field_str("UNIT") {
+                    Some("seconds") => 1.0,
+                    Some("hours") => 3600.0,
+                    _ => 60.0,
                 };
-                // HA's time pattern counts from the top of the minute/hour/day, so a whole number
-                // of the next unit becomes that unit (60 minutes = every hour).
-                if n >= max && n.is_multiple_of(max) {
-                    let m = n / max;
-                    return match unit {
-                        "seconds" => ha(json!({"trigger": "time_pattern", "minutes": format!("/{m}")})),
-                        "minutes" if m < 24 && 24u64.is_multiple_of(m) => {
-                            ha(json!({"trigger": "time_pattern", "hours": format!("/{m}"), "minutes": 0}))
-                        }
-                        "hours" if m == 1 => ha(json!({"trigger": "time", "at": "00:00:00"})),
-                        _ => {
-                            self.err(&b, format!("Home Assistant can't repeat every {n} {unit}; use a timer that starts itself again"));
-                            None
-                        }
-                    };
-                }
-                if n >= max {
-                    self.err(&b, format!("Home Assistant can't repeat every {n} {unit}; use a timer that starts itself again"));
-                }
-                // Values that don't divide evenly (e.g. 7 minutes) restart at the top of the hour.
-                ha(json!({"trigger": "time_pattern", unit: format!("/{n}")}))
+                // An exact interval kept by the engine, counted from when the program starts
+                // (HA's time pattern would restart at the top of each hour or day).
+                Some(Trigger::Interval { id, seconds: n * unit })
             }
             "ha_trigger_raw" => match parse_config(b.field_str("CONFIG").unwrap_or("")) {
                 Ok(v) => ha(v),

@@ -15,10 +15,11 @@ mod z2m;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
-use puzzlebox_engine::{CronSource, Engine, LiveHa};
+use puzzlebox_engine::{CronSource, Engine, IntervalSource, LiveHa};
 use puzzlebox_ha_client::{ClientConfig, HaClient};
 use puzzlebox_storage::Store;
 use tracing::{info, warn};
@@ -46,6 +47,7 @@ async fn run() -> Result<()> {
     let store = Store::open(&cfg.data_dir.join("puzzlebox.db"))?;
     let engine = Engine::new(live.clone(), store).await?;
     engine.add_trigger_source("cron", Arc::new(CronSource::default()));
+    engine.add_trigger_source("interval", Arc::new(IntervalSource::default()));
     engine.set_http_client(Arc::new(http::ReqwestClient::new()));
 
     let webhooks = Arc::new(webhooks::Webhooks::default());
@@ -65,6 +67,9 @@ async fn run() -> Result<()> {
     let mut packs_dirs = vec![cfg.data_dir.join("packs")];
     packs_dirs.extend(cfg.extra_packs_dirs.iter().cloned());
     let registry = registry::RegistryService::new(engine.clone(), ha.clone(), packs_dirs);
+    // Blocks from the last run, so programs compile even if Home Assistant takes a while.
+    registry.load_cache().await;
+    engine.set_lowerer(registry.registry.lowerer());
 
     let plugins = plugins::PluginRouter::new();
     let _ = plugins.mqtt.set(mqtt.clone());
@@ -81,16 +86,24 @@ async fn run() -> Result<()> {
         bridge.spawn_discovery(token.clone(), cfg.bind.port());
     }
 
-    // Programs subscribe through the client queue either way, but on-start handlers
-    // need HA, so give it a moment before starting them.
-
-    if tokio::time::timeout(Duration::from_secs(30), ha.wait_connected()).await.is_err() {
-        warn!("Home Assistant not reachable yet; starting programs anyway");
-    } else if let Err(e) = registry.refresh_now().await {
-        warn!(error = %e, "initial block registry build failed");
+    // The UI is served right away; programs start in the background. They subscribe through
+    // the client queue either way, but on-start handlers need HA, so give it a moment first.
+    let started = Arc::new(AtomicBool::new(false));
+    {
+        let (ha, registry, engine, started) = (ha.clone(), registry.clone(), engine.clone(), started.clone());
+        tokio::spawn(async move {
+            if tokio::time::timeout(Duration::from_secs(30), ha.wait_connected()).await.is_err() {
+                warn!("Home Assistant not reachable yet; starting programs anyway");
+            } else if let Err(e) = registry.refresh_now().await {
+                warn!(error = %e, "initial block registry build failed");
+            }
+            engine.set_lowerer(registry.registry.lowerer());
+            if let Err(e) = engine.load_all().await {
+                warn!(error = %e, "failed to start programs");
+            }
+            started.store(true, Ordering::Relaxed);
+        });
     }
-    engine.set_lowerer(registry.registry.lowerer());
-    engine.load_all().await?;
 
     let state = routes::AppState {
         ha,
@@ -103,13 +116,16 @@ async fn run() -> Result<()> {
         mqtt,
         devices: Arc::new(devices::DeviceCache::default()),
         cfg: cfg.clone(),
+        started,
     };
 
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     info!(addr = %cfg.bind, ha = %cfg.ha_ws_url, "puzzlebox listening");
+    let engine = state.engine.clone();
     axum::serve(listener, routes::router(state).into_make_service_with_connect_info::<SocketAddr>())
         .with_graceful_shutdown(shutdown())
         .await?;
+    engine.shutdown().await;
     Ok(())
 }
 

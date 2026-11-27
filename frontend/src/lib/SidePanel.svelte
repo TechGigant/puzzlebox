@@ -7,6 +7,9 @@
     programId,
     errors,
     paused,
+    stepping = null,
+    pauseOnStart = false,
+    onpauseonstart = () => {},
     onresume,
     onreveal,
     ontrace,
@@ -16,7 +19,11 @@
     /** null for a program that hasn't been saved yet. */
     programId: string | null;
     errors: CompileError[];
-    paused: { run_id: string; block_id: string; variables: Record<string, unknown> } | null;
+    paused: { run_id: string; block_id: string; variables: Record<string, unknown>; summary?: string } | null;
+    /** After "Step": on the way to the next block, perhaps waiting first ("waiting 30 s"). */
+    stepping?: { run_id: string; waiting: string | null } | null;
+    pauseOnStart?: boolean;
+    onpauseonstart?: (on: boolean) => void;
     onresume: (step: boolean) => void;
     onreveal: (blockId: string) => void;
     ontrace: (steps: string[], errorBlock: string | null) => void;
@@ -32,7 +39,6 @@
   let selected = $state<RunRecord | null>(null);
   let showRaw = $state(false);
   let logs = $state<LogEntry[]>([]);
-  let pauseOnStart = $state(false);
   let now = $state(Date.now());
 
   $effect(() => {
@@ -76,10 +82,6 @@
 
   const STATUS: Record<string, string> = { ok: 'done', error: 'failed', cancelled: 'stopped', running: 'running' };
 
-  function togglePauseOnStart() {
-    if (programId) events.send({ type: 'pause_on_start', program_id: programId, enabled: pauseOnStart }, `pos:${programId}`);
-  }
-
   function fmtTime(ms: number) {
     return new Date(ms).toLocaleTimeString();
   }
@@ -108,10 +110,7 @@
       if (ev.type === 'step') active = active.map((r) => (r.run_id === ev.run_id ? { ...r, block_id: ev.block_id } : r));
       if (ev.type === 'log') logs = [...logs.slice(-199), { ts: ev.ts, level: ev.level, message: ev.message, run_id: ev.run_id }];
     });
-    return () => {
-      off();
-      events.unstick(`pos:${id}`);
-    };
+    return () => off();
   });
 
 </script>
@@ -211,10 +210,12 @@
       {/each}
     {:else}
       <p class="muted">Right-click a block → <b>Add breakpoint</b>. Runs pause there while this editor is open.</p>
-      <label class="check"><input type="checkbox" bind:checked={pauseOnStart} onchange={togglePauseOnStart} /> Pause every run at its first block</label>
+      <label class="check"><input type="checkbox" checked={pauseOnStart} onchange={(e) => onpauseonstart(e.currentTarget.checked)} /> Pause every run at its first block</label>
       {#if paused}
         <div class="paused">
-          <p><b>Paused</b> <button class="link" onclick={() => onreveal(paused!.block_id)}>show block</button></p>
+          <p><b>Paused before:</b> {describe(paused.block_id) ?? 'a block'} <button class="link" onclick={() => onreveal(paused!.block_id)}>show block</button></p>
+          {#if paused.summary}<p class="muted">Started by: {paused.summary}</p>{/if}
+          <p class="muted">If nobody continues it, it carries on by itself after 10 minutes.</p>
           <div class="row">
             <button class="btn primary" onclick={() => onresume(false)}>Continue</button>
             <button class="btn" onclick={() => onresume(true)}>Step</button>
@@ -230,6 +231,8 @@
             </tbody>
           </table>
         </div>
+      {:else if stepping}
+        <p>Running to the next block{stepping.waiting ? ` (${stepping.waiting})` : ''}…</p>
       {:else}
         <p class="muted">Not paused.</p>
       {/if}

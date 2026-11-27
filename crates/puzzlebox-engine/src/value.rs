@@ -3,7 +3,9 @@
 
 use std::cmp::Ordering;
 
-use chrono::{Datelike, Local, Timelike};
+use chrono::{DateTime, Datelike, FixedOffset, Timelike};
+
+use crate::clock;
 use puzzlebox_ir::BinOp;
 use rand::Rng;
 use serde_json::{Map, Value, json};
@@ -399,8 +401,8 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
         "dict_has" => json!(a(0).as_object().is_some_and(|o| o.contains_key(&to_text(a(1))))),
         "json_parse" => serde_json::from_str(&to_text(a(0))).map_err(|e| format!("invalid JSON: {e}"))?,
         "json_stringify" => json!(a(0).to_string()),
-        "now" => json!(Local::now().to_rfc3339()),
-        "time_of_day" => json!(Local::now().format("%H:%M:%S").to_string()),
+        "now" => json!(clock::now().to_rfc3339()),
+        "time_of_day" => json!(clock::now().format("%H:%M:%S").to_string()),
         "is_on" => json!(match a(0) {
             Value::String(s) =>
                 matches!(s.trim().to_lowercase().as_str(), "on" | "true" | "yes" | "1" | "home" | "open"),
@@ -419,13 +421,13 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
             };
             json!({ key: t })
         }
-        "time_hour" => json!(Local::now().hour()),
-        "time_minute" => json!(Local::now().minute()),
-        "time_second" => json!(Local::now().second()),
-        "time_weekday" => json!(Local::now().weekday().number_from_monday()),
-        "time_day" => json!(Local::now().day()),
-        "time_month" => json!(Local::now().month()),
-        "time_year" => json!(Local::now().year()),
+        "time_hour" => json!(clock::now().hour()),
+        "time_minute" => json!(clock::now().minute()),
+        "time_second" => json!(clock::now().second()),
+        "time_weekday" => json!(clock::now().weekday().number_from_monday()),
+        "time_day" => json!(clock::now().day()),
+        "time_month" => json!(clock::now().month()),
+        "time_year" => json!(clock::now().year()),
         "today_at" => json!(today_at(&to_text(a(0)))?.to_rfc3339()),
         "datetime_add" => {
             let t = parse_time(a(0)).ok_or_else(|| format!("not a date/time: {}", short(a(0))))?;
@@ -490,13 +492,13 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
             let total = n(0)?.max(0.0) as u64;
             json!({"hours": total / 3600, "minutes": (total / 60) % 60, "seconds": total % 60})
         }
-        "time_timestamp" => num(Local::now().timestamp_millis() as f64 / 1000.0),
+        "time_timestamp" => num(clock::now().timestamp_millis() as f64 / 1000.0),
         _ => return Err(format!("unknown function '{name}'")),
     })
 }
 
 /// `"HH:MM"`/`"HH:MM:SS"` today in local time.
-pub fn today_at(t: &str) -> Result<chrono::DateTime<Local>, String> {
+pub fn today_at(t: &str) -> Result<DateTime<FixedOffset>, String> {
     let parts: Vec<u32> = t
         .trim()
         .split(':')
@@ -509,27 +511,27 @@ pub fn today_at(t: &str) -> Result<chrono::DateTime<Local>, String> {
         parts.get(2).copied().unwrap_or(0),
     );
     let naive =
-        Local::now().date_naive().and_hms_opt(h, m, sec).ok_or_else(|| format!("invalid time '{t}'"))?;
-    naive.and_local_timezone(Local).earliest().ok_or_else(|| format!("'{t}' does not exist today"))
+        clock::now().date_naive().and_hms_opt(h, m, sec).ok_or_else(|| format!("invalid time '{t}'"))?;
+    clock::from_local(naive).ok_or_else(|| format!("'{t}' does not exist today"))
 }
 
 /// RFC 3339 / ISO date-time, or `HH:MM` meaning today.
-pub fn parse_time(v: &Value) -> Option<chrono::DateTime<Local>> {
+pub fn parse_time(v: &Value) -> Option<DateTime<FixedOffset>> {
     let s = to_text(v);
     if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s.trim()) {
-        return Some(t.with_timezone(&Local));
+        return Some(clock::local(t));
     }
     if let Some(f) = v.as_f64().filter(|_| v.is_number()) {
-        return chrono::DateTime::from_timestamp_millis((f * 1000.0) as i64).map(|t| t.with_timezone(&Local));
+        return chrono::DateTime::from_timestamp_millis((f * 1000.0) as i64).map(clock::local);
     }
     // input_datetime states: "2026-11-26 07:30:00" or "2026-11-26" in local time.
     for fmt in ["%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M"] {
         if let Ok(n) = chrono::NaiveDateTime::parse_from_str(s.trim(), fmt) {
-            return n.and_local_timezone(Local).earliest();
+            return clock::from_local(n);
         }
     }
     if let Ok(d) = chrono::NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d") {
-        return d.and_hms_opt(0, 0, 0)?.and_local_timezone(Local).earliest();
+        return clock::from_local(d.and_hms_opt(0, 0, 0)?);
     }
     today_at(&s).ok()
 }

@@ -35,6 +35,8 @@ pub struct AppState {
     pub mqtt: Arc<Mqtt>,
     pub devices: Arc<devices::DeviceCache>,
     pub cfg: Config,
+    /// Programs have been loaded (they start once Home Assistant is there, or after 30 s).
+    pub started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub fn wasm_dirs(cfg: &Config) -> Vec<std::path::PathBuf> {
@@ -91,6 +93,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/programs/{id}/enabled", post(programs::set_enabled))
         .route("/api/programs/{id}/runs", get(programs::runs))
         .route("/api/programs/{id}/active", get(programs::active))
+        .route("/api/programs/{id}/impact", post(programs::impact))
         .route("/api/programs/{id}/log", get(programs::log))
         .route("/api/programs/{id}/triggers", get(programs::triggers))
         .route("/api/programs/{id}/duplicate", post(programs::duplicate))
@@ -139,6 +142,7 @@ pub fn status_json(st: &AppState) -> Value {
         "ha_connected": st.ha.state() == ConnectionState::Connected,
         "ha_version": st.ha.ha_version(),
         "bridge": st.bridge.status(),
+        "starting": !st.started.load(std::sync::atomic::Ordering::Relaxed),
     })
 }
 
@@ -222,7 +226,15 @@ async fn registry_blocks(State(st): State<AppState>) -> Json<Value> {
         .into_iter()
         .map(|(path, error)| json!({"path": path, "error": error}))
         .collect();
-    Json(json!({"blocks": st.registry.registry.all(), "packs": packs, "pack_errors": errors}))
+    Json(json!({
+        "blocks": st.registry.registry.all(),
+        "packs": packs,
+        "pack_errors": errors,
+        // Shown from the store: their integration hasn't confirmed them since Puzzlebox started.
+        "cached": st.registry.cached_sources(),
+        "ha_current": st.registry.ha_current(),
+        "ha_connected": st.ha.state() == ConnectionState::Connected,
+    }))
 }
 
 async fn registry_reload(State(st): State<AppState>) -> Json<Value> {
@@ -316,6 +328,10 @@ async fn settings(State(st): State<AppState>) -> Json<Value> {
         "mqtt_enabled": st.mqtt.enabled(),
         "supervised": st.cfg.supervisor_token.is_some(),
         "webhooks": st.webhooks.ids(),
+        "time_zone": {
+            "ha": puzzlebox_engine::clock::zone().map(|z| z.name().to_owned()),
+            "container": puzzlebox_engine::clock::container_zone(),
+        },
     }))
 }
 

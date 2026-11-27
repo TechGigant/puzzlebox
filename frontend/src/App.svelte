@@ -50,7 +50,10 @@
     events.start();
     refreshRegistry();
     const off = events.on((ev) => {
-      if (ev.type === 'status' && !('program_id' in ev)) status = ev.status;
+      if (ev.type === 'status' && !('program_id' in ev)) {
+        status = ev.status;
+        registry.status = ev.status;
+      }
       if (ev.type === 'registry_changed') refreshRegistry();
     });
     // Back/forward and typed URLs: if the user stays, put the editor's URL back.
@@ -95,6 +98,13 @@
 </header>
 {#if notice}
   <div class="notice" class:error={status?.bridge?.compatible === false} role="status">{notice}</div>
+{/if}
+{#if status && !status.ha_connected}
+  <div class="notice" role="status">
+    Waiting for Home Assistant… {status.starting
+      ? 'Programs start once it is connected (or in half a minute at the latest).'
+      : "Programs that need it pause until it's back."} You can look at and edit programs meanwhile.
+  </div>
 {/if}
 <main>
   {#if route.view === 'program'}

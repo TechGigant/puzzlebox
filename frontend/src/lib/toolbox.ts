@@ -85,6 +85,10 @@ export function buildToolbox(extra: ExtraCategory[] = []): Blockly.utils.toolbox
         block('ha_trigger_time', { OFFSET: dur(0, 'minutes') }),
         block('ha_trigger_every'),
         block('ha_trigger_time_pattern'),
+        // Every hour, on the hour.
+        block('ha_trigger_time_pattern', undefined, {
+          fields: { HOURS_MODE: 'any', HOURS: 1, MINUTES_MODE: 'at', MINUTES: 0, SECONDS_MODE: 'at', SECONDS: 0 },
+        }),
         block('ha_trigger_sun', { OFFSET: dur(0, 'minutes') }),
         block('ha_trigger_calendar', { OFFSET: dur(0, 'minutes') }),
         block('ha_trigger_zone'),

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
@@ -31,7 +33,10 @@ pub async fn list(State(st): State<AppState>) -> ApiResult {
 
 pub async fn get(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
     let p = st.engine.store().get_program(&id).await?.ok_or_else(not_found)?;
-    Ok(Json(with_status(&st, &p, true)))
+    let mut out = with_status(&st, &p, true);
+    // The editor names blocks it can't show (their integration isn't connected) by these.
+    out["labels"] = st.engine.store().labels(&id).await?;
+    Ok(Json(out))
 }
 
 #[derive(Deserialize)]
@@ -45,6 +50,9 @@ pub struct ProgramInput {
     folder: Option<String>,
     /// Block id → the block's text in the editor (see `Store::labels`).
     labels: Option<Value>,
+    /// The user removed blocks that aren't available (see `unavailable_lost`).
+    #[serde(default)]
+    remove_unavailable: bool,
 }
 
 const MODES: [&str; 4] = ["single", "restart", "queued", "parallel"];
@@ -113,8 +121,63 @@ pub async fn update(
     DeepJson(input): DeepJson<ProgramInput>,
 ) -> ApiResult {
     let mut rec = st.engine.store().get_program(&id).await?.ok_or_else(not_found)?;
+    let before = rec.workspace.clone();
+    let remove_unavailable = input.remove_unavailable;
     let labels = apply(&mut rec, input)?;
+    let lost = unavailable_lost(&before, &rec.workspace, &st.registry.registry);
+    if !lost.is_empty() && !remove_unavailable {
+        return Err(ApiError(
+            StatusCode::CONFLICT,
+            format!(
+                "not saved: this would remove blocks that aren't available right now ({}). Reopen the program once Home Assistant and its integrations are connected, or remove them on purpose.",
+                lost.join(", ")
+            ),
+        ));
+    }
     save(&st, rec, labels).await
+}
+
+/// Generated block types (`ha_svc__…`, `z2m__…`, pack and plugin blocks), with how often each
+/// appears.
+fn generated_types(v: &Value, out: &mut BTreeMap<String, usize>) {
+    match v {
+        Value::Object(o) => {
+            if let Some(t) = o.get("type").and_then(Value::as_str).filter(|t| t.contains("__")) {
+                *out.entry(t.to_owned()).or_default() += 1;
+            }
+            o.values().for_each(|x| generated_types(x, out));
+        }
+        Value::Array(a) => a.iter().for_each(|x| generated_types(x, out)),
+        _ => {}
+    }
+}
+
+/// Blocks the registry doesn't know that `before` has and `after` lacks. An editor can't show
+/// such blocks, so losing them on a save is most likely an editor that couldn't load them
+/// (Home Assistant not connected) rather than the user deleting them.
+pub fn unavailable_lost(
+    before: &Value,
+    after: &Value,
+    registry: &puzzlebox_registry::Registry,
+) -> Vec<String> {
+    let (mut old, mut new) = (BTreeMap::new(), BTreeMap::new());
+    generated_types(before, &mut old);
+    generated_types(after, &mut new);
+    old.into_iter()
+        .filter(|(t, n)| new.get(t).copied().unwrap_or(0) < *n && !registry.contains(t))
+        .map(|(t, _)| t)
+        .collect()
+}
+
+/// What saving these changes would do: restart the program, stopping these runs and timers?
+pub async fn impact(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    DeepJson(input): DeepJson<ProgramInput>,
+) -> ApiResult {
+    let mut rec = st.engine.store().get_program(&id).await?.ok_or_else(not_found)?;
+    apply(&mut rec, input)?;
+    Ok(Json(serde_json::to_value(st.engine.save_impact(&rec)).unwrap_or_default()))
 }
 
 pub async fn delete(State(st): State<AppState>, Path(id): Path<String>) -> ApiResult {
@@ -263,6 +326,53 @@ pub async fn set_enabled(
 #[derive(Deserialize)]
 pub struct Limit {
     limit: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use puzzlebox_registry::{BlockDef, Registry};
+    use serde_json::json;
+
+    use super::unavailable_lost;
+
+    fn ws(blocks: &[&str]) -> serde_json::Value {
+        // A "when" whose "do" holds the blocks in order.
+        let mut next = serde_json::Value::Null;
+        for (i, t) in blocks.iter().enumerate().rev() {
+            let mut b = json!({"type": t, "id": format!("b{i}")});
+            if !next.is_null() {
+                b["next"] = json!({"block": next});
+            }
+            next = b;
+        }
+        json!({"blocks": {"blocks": [{"type": "ha_when", "id": "w", "inputs": {"DO": {"block": next}}}]},
+               "variables": [{"name": "x", "id": "v", "type": "Program"}]})
+    }
+
+    #[test]
+    fn saves_that_lose_unavailable_blocks_are_caught() {
+        let empty = Registry::default();
+        let before = ws(&["ha_svc__light__turn_on", "ha_wait", "z2m__z__dev__set"]);
+        // An editor that couldn't show the generated blocks saved only what came before them.
+        assert_eq!(
+            unavailable_lost(&before, &ws(&[]), &empty),
+            ["ha_svc__light__turn_on", "z2m__z__dev__set"]
+        );
+        assert!(unavailable_lost(&before, &before, &empty).is_empty());
+        // Moving or deleting built-in blocks is fine.
+        let moved = ws(&["z2m__z__dev__set", "ha_svc__light__turn_on"]);
+        assert!(unavailable_lost(&before, &moved, &empty).is_empty());
+        // Blocks the registry knows can be deleted: the editor showed them.
+        let known = Registry::default();
+        let def: BlockDef = serde_json::from_value(json!({
+            "type": "ha_svc__light__turn_on", "kind": "action", "category": ["Light"], "style": "action",
+            "title": "Turn on", "params": [], "source": "ha",
+            "lowering": {"type": "service", "service": "light.turn_on"}
+        }))
+        .unwrap();
+        known.set_source("ha", vec![def]);
+        assert_eq!(unavailable_lost(&before, &ws(&["ha_wait"]), &known), ["z2m__z__dev__set"]);
+    }
 }
 
 pub async fn runs(State(st): State<AppState>, Path(id): Path<String>, Query(q): Query<Limit>) -> ApiResult {

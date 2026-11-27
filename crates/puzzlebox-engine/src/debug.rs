@@ -3,14 +3,18 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::Notify;
 
-use crate::engine::EngineEvent;
 use crate::interp::RunCtx;
+
+/// How long a run stays paused before it carries on by itself.
+pub const PAUSE_LIMIT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Default)]
 struct RunDebug {
+    program_id: String,
     /// Pause before the next statement (single-step).
     step: bool,
     paused_at: Option<String>,
@@ -26,9 +30,15 @@ struct State {
     runs: HashMap<String, RunDebug>,
 }
 
-#[derive(Default)]
 pub struct Debugger {
     state: Mutex<State>,
+    limit: Mutex<Duration>,
+}
+
+impl Default for Debugger {
+    fn default() -> Self {
+        Self { state: Mutex::default(), limit: Mutex::new(PAUSE_LIMIT) }
+    }
 }
 
 /// Drops the watch when the debug session ends.
@@ -41,6 +51,12 @@ impl Drop for WatchGuard<'_> {
     fn drop(&mut self) {
         self.dbg.unwatch(&self.program_id);
     }
+}
+
+/// How a pause ended.
+pub(crate) enum Unpaused {
+    Released,
+    TimedOut,
 }
 
 impl Debugger {
@@ -64,10 +80,10 @@ impl Debugger {
         };
         if remaining == 0 {
             st.watchers.remove(program_id);
-            // Nobody is left to resume paused runs: clear debugging state and release them.
+            // Nobody is left to resume this program's paused runs: clear its debugging state.
             st.breakpoints.remove(program_id);
             st.pause_on_start.remove(program_id);
-            for r in st.runs.values_mut() {
+            for r in st.runs.values_mut().filter(|r| r.program_id == program_id) {
                 r.step = false;
                 if r.paused_at.take().is_some() {
                     r.resume.notify_one();
@@ -91,6 +107,15 @@ impl Debugger {
         } else {
             st.pause_on_start.remove(program_id);
         }
+    }
+
+    /// How long a run may stay paused (default `PAUSE_LIMIT`).
+    pub fn set_pause_limit(&self, limit: Duration) {
+        *self.limit.lock().unwrap_or_else(|p| p.into_inner()) = limit;
+    }
+
+    pub fn pause_limit(&self) -> Duration {
+        *self.limit.lock().unwrap_or_else(|p| p.into_inner())
     }
 
     pub fn resume(&self, run_id: &str) -> bool {
@@ -121,36 +146,39 @@ impl Debugger {
         self.st().runs.remove(run_id);
     }
 
-    pub(crate) async fn maybe_pause(
-        &self,
-        ctx: &RunCtx,
-        block: &str,
-        events: &broadcast::Sender<EngineEvent>,
-    ) {
-        let notify = {
-            let mut st = self.st();
-            if !st.watchers.contains_key(&ctx.program_id) {
-                return;
-            }
-            let first = !st.runs.contains_key(&ctx.run_id);
-            let on_start = first && st.pause_on_start.contains(&ctx.program_id);
-            let bp = st.breakpoints.get(&ctx.program_id).is_some_and(|b| b.contains(block));
-            let run = st.runs.entry(ctx.run_id.clone()).or_default();
-            if !(run.step || bp || on_start) {
-                return;
-            }
-            run.step = false;
-            run.paused_at = Some(block.to_owned());
-            run.resume.clone()
-        };
-        let _ = events.send(EngineEvent::Paused {
-            program_id: ctx.program_id.clone(),
-            run_id: ctx.run_id.clone(),
-            block_id: block.to_owned(),
-            variables: ctx.variables_snapshot(),
-        });
-        notify.notified().await;
-        let _ = events
-            .send(EngineEvent::Resumed { program_id: ctx.program_id.clone(), run_id: ctx.run_id.clone() });
+    /// Marks the run paused at `block` if a breakpoint, step or pause-on-start says so.
+    pub(crate) fn should_pause(&self, ctx: &RunCtx, block: &str) -> Option<Arc<Notify>> {
+        let mut st = self.st();
+        if !st.watchers.contains_key(&ctx.program_id) {
+            return None;
+        }
+        let first = !st.runs.contains_key(&ctx.run_id);
+        let on_start = first && st.pause_on_start.contains(&ctx.program_id);
+        let bp = st.breakpoints.get(&ctx.program_id).is_some_and(|b| b.contains(block));
+        let run = st
+            .runs
+            .entry(ctx.run_id.clone())
+            .or_insert_with(|| RunDebug { program_id: ctx.program_id.clone(), ..Default::default() });
+        if !(run.step || bp || on_start) {
+            return None;
+        }
+        run.step = false;
+        run.paused_at = Some(block.to_owned());
+        Some(run.resume.clone())
+    }
+
+    /// Waits until the run is resumed, or carries on by itself after the pause limit.
+    pub(crate) async fn wait(&self, run_id: &str, resume: Arc<Notify>) -> Unpaused {
+        let limit = *self.limit.lock().unwrap_or_else(|p| p.into_inner());
+        if tokio::time::timeout(limit, resume.notified()).await.is_ok() {
+            return Unpaused::Released;
+        }
+        if let Some(r) = self.st().runs.get_mut(run_id) {
+            r.step = false;
+            r.paused_at = None;
+            // A resume that raced the timeout must not release the next pause straight away.
+            r.resume = Arc::new(Notify::new());
+        }
+        Unpaused::TimedOut
     }
 }

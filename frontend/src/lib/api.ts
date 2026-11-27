@@ -14,6 +14,8 @@ export interface Status {
   ha_connected: boolean;
   ha_version: string | null;
   bridge?: BridgeStatus;
+  /** Programs haven't been started yet (they wait up to 30 s for Home Assistant). */
+  starting?: boolean;
 }
 
 /** A sentence asking to update the older side, or null when versions match. */
@@ -48,6 +50,8 @@ export interface ProgramStatus {
   errors: CompileError[];
   /** What starts the program, in words ("when Motion turns on (+1)"). */
   summary?: string;
+  /** Runs paused at a breakpoint. */
+  paused?: number;
 }
 
 export type RunMode = 'single' | 'restart' | 'queued' | 'parallel';
@@ -106,6 +110,16 @@ export interface Program {
   errors?: CompileError[];
   /** No "when" (with a trigger), start or run block has anything to do. */
   does_nothing?: boolean;
+  /** Block id → the block's text when last saved (only when one program is fetched). */
+  labels?: Record<string, string>;
+}
+
+/** What saving would do to a running program. */
+export interface SaveImpact {
+  /** The blocks changed, so the program starts again, stopping these runs and timers. */
+  restarts: boolean;
+  runs: ActiveRun[];
+  timers: { name: string; due: number }[];
 }
 
 export interface ProgramVersion {
@@ -147,7 +161,7 @@ export type EngineEvent =
   | { type: 'run_finished'; program_id: string; run_id: string; status: string; error: string | null; block_id: string | null }
   | { type: 'log'; program_id: string; run_id: string; level: string; message: string; ts: number }
   | { type: 'step'; program_id: string; run_id: string; block_id: string }
-  | { type: 'paused'; program_id: string; run_id: string; block_id: string; variables: Record<string, unknown> }
+  | { type: 'paused'; program_id: string; run_id: string; block_id: string; variables: Record<string, unknown>; summary?: string }
   | { type: 'resumed'; program_id: string; run_id: string }
   | { type: 'removed'; program_id: string }
   | { type: 'registry_changed' }
@@ -177,8 +191,9 @@ export const api = {
   programs: () => request<Program[]>('GET', 'api/programs'),
   program: (id: string) => request<Program>('GET', `api/programs/${id}`),
   create: (p: Partial<Program> & { labels?: Record<string, string> }) => request<Program>('POST', 'api/programs', p),
-  update: (id: string, p: Partial<Program> & { labels?: Record<string, string> }) =>
+  update: (id: string, p: Partial<Program> & { labels?: Record<string, string>; remove_unavailable?: boolean }) =>
     request<Program>('PUT', `api/programs/${id}`, p),
+  impact: (id: string, p: Partial<Program>) => request<SaveImpact>('POST', `api/programs/${id}/impact`, p),
   remove: (id: string) => request<{ ok: boolean }>('DELETE', `api/programs/${id}`),
   run: (id: string, handler?: number) => request<{ ok: boolean }>('POST', `api/programs/${id}/run`, { handler }),
   versions: (id: string) => request<ProgramVersion[]>('GET', `api/programs/${id}/versions`),
@@ -234,6 +249,8 @@ export interface Settings {
   mqtt_enabled: boolean;
   supervised: boolean;
   webhooks: string[];
+  /** Home Assistant's time zone (used for all local times) and the app container's. */
+  time_zone?: { ha: string | null; container: string | null };
 }
 
 export interface PluginsInfo {

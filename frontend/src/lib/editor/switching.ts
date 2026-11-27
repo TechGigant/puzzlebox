@@ -38,7 +38,7 @@ const GROUPS: [string, string][][] = [
   ],
   [
     ['ha_trigger_time', 'time is'],
-    ['ha_trigger_every', 'every N minutes'],
+    ['ha_trigger_every', 'every N minutes (from the start)'],
     ['ha_trigger_time_pattern', 'clock shows'],
     ['ha_trigger_sun', 'sunrise / sunset'],
     ['engine_trigger_cron', 'schedule (cron)'],

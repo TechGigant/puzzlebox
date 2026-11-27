@@ -257,26 +257,19 @@ impl Builder {
         if s.is_none() && min.is_some() {
             s = Some(Pattern::At(0));
         }
-        let any = |p: &Option<Pattern>| matches!(p, None | Some(Pattern::Any));
-        let (n, unit) = match (h, min, s) {
-            (h, m, Some(Pattern::Every(n))) if any(&h) && any(&m) => (n, "seconds"),
-            (h, Some(Pattern::Every(n)), Some(Pattern::At(0))) if any(&h) => (n, "minutes"),
-            (Some(Pattern::Every(n)), Some(Pattern::At(0)), Some(Pattern::At(0))) => (n, "hours"),
-            _ => {
-                let mut fields = Map::new();
-                for (key, p) in [("HOURS", h), ("MINUTES", min), ("SECONDS", s)] {
-                    let (mode, n) = match p {
-                        None | Some(Pattern::Any) => ("any", 0),
-                        Some(Pattern::At(n)) => ("at", n),
-                        Some(Pattern::Every(n)) => ("every", n),
-                    };
-                    fields.insert(format!("{key}_MODE"), json!(mode));
-                    fields.insert(key.into(), json!(n));
-                }
-                return Some(self.block("ha_trigger_time_pattern", Value::Object(fields), vec![], None));
-            }
-        };
-        Some(self.block("ha_trigger_every", json!({"N": n, "UNIT": unit}), vec![], None))
+        // "every" blocks are exact intervals from when the program starts; HA's "/n" counts
+        // from the top of the hour (or minute, or day), which only the clock block does.
+        let mut fields = Map::new();
+        for (key, p) in [("HOURS", h), ("MINUTES", min), ("SECONDS", s)] {
+            let (mode, n) = match p {
+                None | Some(Pattern::Any) => ("any", 0),
+                Some(Pattern::At(n)) => ("at", n),
+                Some(Pattern::Every(n)) => ("every", n),
+            };
+            fields.insert(format!("{key}_MODE"), json!(mode));
+            fields.insert(key.into(), json!(n));
+        }
+        Some(self.block("ha_trigger_time_pattern", Value::Object(fields), vec![], None))
     }
 
     fn template(&mut self, m: &Map<String, Value>) -> Option<Value> {

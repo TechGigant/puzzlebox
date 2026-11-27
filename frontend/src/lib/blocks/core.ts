@@ -276,7 +276,7 @@ export const CORE_BLOCKS: Json[] = [
     'ha_trigger_every',
     'every %1 %2',
     [number('N', 5, { min: 1, precision: 1 }), dropdown('UNIT', [['minutes', 'minutes'], ['hours', 'hours'], ['seconds', 'seconds']])],
-    'Fires repeatedly, e.g. every 5 minutes (at :00, :05, :10…).',
+    'Fires again and again at an exact interval, counted from when the program starts: the first time one interval after it starts (or is saved with changed blocks), then each interval after the last. To follow the clock instead, like every hour on the hour or at :00, :15, :30 and :45, use “clock shows”.',
   ),
   trigger('engine_trigger_cron', 'schedule (cron) %1', [text('CRON', '0 */5 * * * *')], 'Cron schedule in local time. 5 or 6 fields; the optional first field is seconds.'),
   trigger(

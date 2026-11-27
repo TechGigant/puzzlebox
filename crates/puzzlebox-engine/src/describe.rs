@@ -181,6 +181,7 @@ pub fn trigger(t: &Trigger, ha: &dyn HaApi) -> String {
     match t {
         Trigger::Ha { config, .. } => trigger_config(config, ha),
         Trigger::Cron { expr, .. } => format!("the schedule “{expr}” comes round"),
+        Trigger::Interval { seconds, .. } => format!("every {}", every(*seconds)),
         Trigger::Webhook { webhook_id, .. } => format!("webhook {webhook_id} is called"),
         Trigger::Mqtt { topic, .. } => format!("an MQTT message arrives on {topic}"),
     }
@@ -270,6 +271,9 @@ fn fired_inner(t: &Value, ha: &dyn HaApi) -> String {
         },
         "time_pattern" => "the time pattern matched".into(),
         "cron" => "the schedule came round".into(),
+        "interval" => {
+            format!("every {} came round", every(t.get("seconds").and_then(Value::as_f64).unwrap_or(0.0)))
+        }
         "homeassistant" => match s("event") {
             "shutdown" => "Home Assistant is shutting down".into(),
             _ => "Home Assistant started".into(),
@@ -302,6 +306,17 @@ fn fired_inner(t: &Value, ha: &dyn HaApi) -> String {
             _ => platform.replace(['.', '_'], " "),
         },
     }
+}
+
+/// "7 minutes", "90 minutes", "hour", "2 hours".
+fn every(seconds: f64) -> String {
+    let s = seconds.round() as u64;
+    let (n, unit) = match s {
+        _ if s >= 3600 && s % 3600 == 0 => (s / 3600, "hour"),
+        _ if s >= 60 && s % 60 == 0 => (s / 60, "minute"),
+        _ => (s, "second"),
+    };
+    if n == 1 { unit.to_owned() } else { format!("{n} {unit}s") }
 }
 
 fn with_state(current: Option<Value>, entity_id: &str, state: Option<&str>) -> Value {
@@ -361,7 +376,7 @@ pub fn simulate(t: &Trigger, ha: &dyn HaApi) -> Value {
                     d["below"] = config.get("below").cloned().unwrap_or(Value::Null);
                 }
                 "time" | "time_pattern" => {
-                    d["now"] = json!(chrono::Local::now().to_rfc3339());
+                    d["now"] = json!(crate::clock::now().to_rfc3339());
                 }
                 "homeassistant" | "sun" | "zone" => {
                     d["event"] = config.get("event").cloned().unwrap_or(Value::Null);
@@ -386,6 +401,9 @@ pub fn simulate(t: &Trigger, ha: &dyn HaApi) -> Value {
             d
         }
         Trigger::Cron { .. } => json!({"platform": "cron", "id": id}),
+        Trigger::Interval { seconds, .. } => {
+            json!({"platform": "interval", "seconds": seconds, "now": crate::clock::now().to_rfc3339(), "id": id})
+        }
         Trigger::Webhook { webhook_id, .. } => {
             json!({"platform": "webhook", "webhook_id": webhook_id, "id": id, "json": {}, "query": {}, "data": {}})
         }

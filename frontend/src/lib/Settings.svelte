@@ -64,6 +64,12 @@
 
   <section>
     <h2>Home Assistant integration</h2>
+    {#if settings?.time_zone?.ha && settings.time_zone.container && settings.time_zone.ha !== settings.time_zone.container}
+      <p class="muted">
+        Times use Home Assistant's time zone, {settings.time_zone.ha}, like its own automations do. (This app's
+        container is set to {settings.time_zone.container}; that doesn't matter for your programs.)
+      </p>
+    {/if}
     {#if settings}
       <p>
         Bridge:

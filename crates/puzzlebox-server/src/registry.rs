@@ -1,13 +1,19 @@
 //! Keeps the block registry in sync with Home Assistant and installed packs.
+//!
+//! Blocks generated from Home Assistant, Zigbee2MQTT and Python plugins are also kept in the
+//! store, so programs compile and the editor can show them while those aren't connected yet.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use puzzlebox_engine::Engine;
 use puzzlebox_ha_client::{ConnectionState, HaClient};
 use puzzlebox_registry::autogen::{HaDescriptions, generate};
-use puzzlebox_registry::{Pack, Registry, parse_pack};
+use puzzlebox_registry::{BlockDef, Pack, Registry, parse_pack};
+use puzzlebox_storage::now_ms;
 use serde_json::{Map, Value, json};
 use tokio::sync::{Mutex, Notify};
 use tracing::{info, warn};
@@ -20,6 +26,19 @@ pub struct RegistryService {
     packs: Mutex<Vec<Pack>>,
     pack_errors: Mutex<Vec<(String, String)>>,
     dirty: Notify,
+    /// Sources loaded from the store that haven't been confirmed since Puzzlebox started.
+    cached: std::sync::Mutex<HashSet<String>>,
+    /// The Home Assistant blocks were built from HA since it last (re)connected.
+    ha_current: AtomicBool,
+}
+
+const CACHE_SCOPE: &str = "registry_cache";
+/// Stored blocks of a source that hasn't been seen for this long are forgotten.
+const CACHE_DAYS: i64 = 30;
+
+/// Sources that come from something that may not be connected at startup.
+fn cacheable(source: &str) -> bool {
+    source == "ha" || source.starts_with("z2m:") || source.starts_with("py:")
 }
 
 const TRANSLATION_CATEGORIES: [&str; 5] = ["title", "services", "triggers", "conditions", "selector"];
@@ -34,6 +53,8 @@ impl RegistryService {
             packs: Mutex::new(Vec::new()),
             pack_errors: Mutex::new(Vec::new()),
             dirty: Notify::new(),
+            cached: std::sync::Mutex::new(HashSet::new()),
+            ha_current: AtomicBool::new(false),
         });
         tokio::spawn(svc.clone().run());
         svc
@@ -50,6 +71,60 @@ impl RegistryService {
 
     pub async fn pack_errors(&self) -> Vec<(String, String)> {
         self.pack_errors.lock().await.clone()
+    }
+
+    /// Sources shown from the store, not yet confirmed by their integration.
+    pub fn cached_sources(&self) -> Vec<String> {
+        let mut v: Vec<String> =
+            self.cached.lock().unwrap_or_else(|p| p.into_inner()).iter().cloned().collect();
+        v.sort();
+        v
+    }
+
+    pub fn ha_current(&self) -> bool {
+        self.ha_current.load(Ordering::Relaxed)
+    }
+
+    /// Loads the blocks stored by an earlier run (before programs start).
+    pub async fn load_cache(&self) {
+        let stored = match self.engine.store().kv_all(CACHE_SCOPE).await {
+            Ok(s) => s,
+            Err(e) => return warn!(error = %e, "failed to read the stored blocks"),
+        };
+        let oldest = now_ms() - CACHE_DAYS * 24 * 3600 * 1000;
+        let mut n = 0;
+        for (source, v) in stored {
+            let fresh = v["saved_at"].as_i64().is_some_and(|t| t >= oldest);
+            match serde_json::from_value::<Vec<BlockDef>>(v["blocks"].clone()) {
+                Ok(blocks) if fresh && cacheable(&source) => {
+                    n += blocks.len();
+                    self.registry.set_source(&source, blocks);
+                    self.cached.lock().unwrap_or_else(|p| p.into_inner()).insert(source);
+                }
+                _ => {
+                    let _ = self.engine.store().kv_delete(CACHE_SCOPE, &source).await;
+                }
+            }
+        }
+        if n > 0 {
+            info!(blocks = n, "loaded stored blocks");
+        }
+    }
+
+    /// Stores a source's current blocks (None: forgets them).
+    async fn remember(&self, source: &str, blocks: Option<&[BlockDef]>) {
+        if !cacheable(source) {
+            return;
+        }
+        self.cached.lock().unwrap_or_else(|p| p.into_inner()).remove(source);
+        let store = self.engine.store();
+        let res = match blocks {
+            Some(b) => store.kv_set(CACHE_SCOPE, source, &json!({"saved_at": now_ms(), "blocks": b})).await,
+            None => store.kv_delete(CACHE_SCOPE, source).await,
+        };
+        if let Err(e) = res {
+            warn!(error = %e, "failed to store blocks");
+        }
     }
 
     async fn run(self: Arc<Self>) {
@@ -72,6 +147,8 @@ impl RegistryService {
         loop {
             if *conn.borrow_and_update() == ConnectionState::Connected {
                 self.invalidate();
+            } else {
+                self.ha_current.store(false, Ordering::Relaxed);
             }
             tokio::select! {
                 changed = conn.changed() => if changed.is_err() { return },
@@ -104,11 +181,14 @@ impl RegistryService {
         // Older HA versions lack these; services alone still work.
         let triggers = self.first_event("trigger_platforms/subscribe").await.unwrap_or(Value::Null);
         let conditions = self.first_event("condition_platforms/subscribe").await.unwrap_or(Value::Null);
-        let language = self
-            .ha
-            .get_config()
-            .await
-            .ok()
+        let config = self.ha.get_config().await.ok();
+        if let Some(tz) = config.as_ref().and_then(|c| c.get("time_zone")).and_then(Value::as_str)
+            && !puzzlebox_engine::clock::set_zone(tz)
+        {
+            warn!(zone = tz, "unknown Home Assistant time zone; using the container's");
+        }
+        let language = config
+            .as_ref()
             .and_then(|c| c.get("language").and_then(Value::as_str).map(str::to_owned))
             .unwrap_or_else(|| "en".into());
         let mut translations = Map::new();
@@ -134,8 +214,15 @@ impl RegistryService {
             translations: &translations,
         });
         let n = defs.len();
-        if self.registry.set_source("ha", defs) {
+        let changed = self.registry.set_source("ha", defs.clone());
+        self.remember("ha", Some(&defs)).await;
+        let was_current = self.ha_current.swap(true, Ordering::Relaxed);
+        if changed {
             info!(blocks = n, "Home Assistant blocks updated");
+        }
+        // Also unchanged ones after a (re)connect: the editor waits for this to know which
+        // blocks Home Assistant really has.
+        if changed || !was_current {
             self.publish().await;
         }
         Ok(())
@@ -185,6 +272,7 @@ impl RegistryService {
 
     /// Registers blocks from a runtime plugin source (`py:<id>` / `wasm:<id>`).
     pub async fn set_plugin_source(&self, source: &str, pack: Option<Pack>) {
+        self.remember(source, pack.as_ref().map(|p| p.blocks.as_slice())).await;
         let changed = match pack {
             Some(p) => self.registry.set_source(source, p.blocks),
             None => self.registry.remove_source(source),
@@ -196,6 +284,7 @@ impl RegistryService {
 
     /// Replaces the blocks of a generated source (e.g. `z2m:<base topic>`).
     pub async fn set_generated_source(&self, source: &str, blocks: Vec<puzzlebox_registry::BlockDef>) {
+        self.remember(source, Some(&blocks)).await;
         if self.registry.set_source(source, blocks) {
             self.publish().await;
         }

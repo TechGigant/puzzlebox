@@ -283,49 +283,8 @@ fn time() {
 
 #[test]
 fn time_pattern() {
-    let every = |yaml: &str, n: u64, unit: &str, config: Value| {
-        let out = import(yaml);
-        assert_eq!(out.types, ["ha_trigger_every"], "{yaml}");
-        assert_eq!(out.blocks[0]["fields"], json!({"N": n, "UNIT": unit}));
-        assert_eq!(out.configs, [config], "{yaml}");
-    };
-    every(
-        "- {trigger: time_pattern, minutes: '/5'}",
-        5,
-        "minutes",
-        json!({"trigger": "time_pattern", "minutes": "/5"}),
-    );
-    every(
-        "- {trigger: time_pattern, hours: '*', minutes: '/15', seconds: 0}",
-        15,
-        "minutes",
-        json!({"trigger": "time_pattern", "minutes": "/15"}),
-    );
-    every(
-        "- {trigger: time_pattern, hours: '/2'}",
-        2,
-        "hours",
-        json!({"trigger": "time_pattern", "hours": "/2"}),
-    );
-    every(
-        "- {trigger: time_pattern, hours: '/3', minutes: 0, seconds: '0'}",
-        3,
-        "hours",
-        json!({"trigger": "time_pattern", "hours": "/3"}),
-    );
-    every(
-        "- {trigger: time_pattern, seconds: '/10'}",
-        10,
-        "seconds",
-        json!({"trigger": "time_pattern", "seconds": "/10"}),
-    );
-    every(
-        "- {trigger: time_pattern, minutes: '*', seconds: '/30'}",
-        30,
-        "seconds",
-        json!({"trigger": "time_pattern", "seconds": "/30"}),
-    );
-    // Other patterns use the clock block, with HA's defaults made visible.
+    // Patterns use the clock block, with HA's defaults made visible: "/5" counts from the top
+    // of the hour, which the "every" block (an exact interval) doesn't.
     let clock = |yaml: &str, fields: Value, config: Value| {
         let out = import(yaml);
         assert_eq!(out.types, ["ha_trigger_time_pattern"], "{yaml}");
@@ -333,6 +292,26 @@ fn time_pattern() {
         assert_eq!(out.configs, [config], "{yaml}");
     };
     let fields = |h: (&str, u64), m: (&str, u64), s: (&str, u64)| json!({"HOURS_MODE": h.0, "HOURS": h.1, "MINUTES_MODE": m.0, "MINUTES": m.1, "SECONDS_MODE": s.0, "SECONDS": s.1});
+    clock(
+        "- {trigger: time_pattern, minutes: '/5'}",
+        fields(("any", 0), ("every", 5), ("at", 0)),
+        json!({"trigger": "time_pattern", "minutes": "/5"}),
+    );
+    clock(
+        "- {trigger: time_pattern, hours: '*', minutes: '/15', seconds: 0}",
+        fields(("any", 0), ("every", 15), ("at", 0)),
+        json!({"trigger": "time_pattern", "minutes": "/15"}),
+    );
+    clock(
+        "- {trigger: time_pattern, hours: '/3', minutes: 0, seconds: '0'}",
+        fields(("every", 3), ("at", 0), ("at", 0)),
+        json!({"trigger": "time_pattern", "hours": "/3"}),
+    );
+    clock(
+        "- {trigger: time_pattern, seconds: '/10'}",
+        fields(("any", 0), ("any", 0), ("every", 10)),
+        json!({"trigger": "time_pattern", "seconds": "/10"}),
+    );
     clock(
         "- {trigger: time_pattern, minutes: 30}",
         fields(("any", 0), ("at", 30), ("at", 0)),

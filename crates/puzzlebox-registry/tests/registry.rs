@@ -260,3 +260,15 @@ fn thresholds_and_state_values_lower_to_ha_shapes() {
     let Trigger::Ha { config, .. } = &triggers[1] else { panic!() };
     assert_eq!(config["options"]["event_type"], json!(["double_press", "long_press"]));
 }
+
+#[test]
+fn generated_blocks_survive_being_stored() {
+    // The server keeps generated blocks in its store for startups without Home Assistant.
+    let r = registry();
+    let ha = r.source("ha").unwrap();
+    let stored = serde_json::to_value(&ha).unwrap();
+    let back: Vec<BlockDef> = serde_json::from_value(stored).unwrap();
+    assert_eq!(back, ha);
+    assert!(r.contains("ha_svc__light__turn_on"));
+    assert!(!r.contains("ha_svc__light__turn_off"));
+}

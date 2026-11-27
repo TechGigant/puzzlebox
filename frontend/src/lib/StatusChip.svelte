@@ -9,11 +9,16 @@
     error: 'Error',
     idle: 'Active',
     running: 'Running',
+    paused: 'Paused',
   };
-  const state = $derived(status?.state ?? 'idle');
+  // A run held at a breakpoint matters more than "running": it does nothing until continued.
+  const state = $derived((status?.paused ?? 0) > 0 ? 'paused' : (status?.state ?? 'idle'));
+  const title = $derived(
+    state === 'paused' ? 'A run is paused at a breakpoint; open the program to continue it (it carries on by itself after 10 minutes)' : (status?.last_error ?? ''),
+  );
 </script>
 
-<span class="chip {state}" title={status?.last_error ?? ''}>
+<span class="chip {state}" {title}>
   <span class="dot"></span>{LABELS[state] ?? state}{#if state === 'running' && (status?.active_runs ?? 0) > 1}
     ×{status?.active_runs}{/if}
 </span>
@@ -46,6 +51,9 @@
   .invalid .dot,
   .error .dot {
     background: #e53935;
+  }
+  .paused .dot {
+    background: #ffa600;
   }
   @keyframes pulse {
     50% {

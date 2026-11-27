@@ -33,6 +33,17 @@ impl Registry {
         self.sources.write().unwrap_or_else(|p| p.into_inner()).remove(source).is_some()
     }
 
+    /// The blocks `source` contributes.
+    pub fn source(&self, source: &str) -> Option<Vec<BlockDef>> {
+        self.sources.read().unwrap_or_else(|p| p.into_inner()).get(source).cloned()
+    }
+
+    /// Whether any source has a block of this type.
+    pub fn contains(&self, block_type: &str) -> bool {
+        let s = self.sources.read().unwrap_or_else(|p| p.into_inner());
+        s.values().any(|defs| defs.iter().any(|d| d.block_type == block_type))
+    }
+
     pub fn sources(&self) -> Vec<String> {
         self.sources.read().unwrap_or_else(|p| p.into_inner()).keys().cloned().collect()
     }

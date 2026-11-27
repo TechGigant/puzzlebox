@@ -44,6 +44,9 @@ pub enum Trigger {
     Ha { id: BlockId, config: Value },
     /// Engine-native cron schedule (seconds-precision cron expression).
     Cron { id: BlockId, expr: String },
+    /// Engine-native repeat: first `seconds` after the program starts, then every `seconds`
+    /// after the last time it fired.
+    Interval { id: BlockId, seconds: f64 },
     /// Inbound webhook handled by the app server.
     Webhook { id: BlockId, webhook_id: String, methods: Vec<String> },
     /// MQTT topic subscription (wildcards allowed).
@@ -72,6 +75,7 @@ impl Trigger {
         match self {
             Trigger::Ha { id, .. }
             | Trigger::Cron { id, .. }
+            | Trigger::Interval { id, .. }
             | Trigger::Webhook { id, .. }
             | Trigger::Mqtt { id, .. } => id,
         }

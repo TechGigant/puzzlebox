@@ -3,9 +3,10 @@
   import BlocklyWorkspace from './BlocklyWorkspace.svelte';
   import StatusChip from './StatusChip.svelte';
   import SidePanel from './SidePanel.svelte';
-  import { api, events, MODE_LABELS, type ActiveRun, type CompileError, type Program, type ProgramVersion, type RunMode } from './api';
-  import { registry } from './registry.svelte';
-  import { blockIds } from './runs';
+  import { api, events, MODE_LABELS, type ActiveRun, type CompileError, type Program, type ProgramVersion, type RunMode, type SaveImpact } from './api';
+  import { registry, whyMissing } from './registry.svelte';
+  import { blockIds, fmtDuration } from './runs';
+  import { countTypes, type Missing } from './editor/unavailable';
   import { setRunAsTriggerHandler } from './editor/run_as_trigger';
   import { setLeaveGuard } from './leave';
 
@@ -23,7 +24,17 @@
   let message = $state<string | null>(null);
   let errors = $state<CompileError[]>([]);
   let hints = $state<CompileError[]>([]);
-  let paused = $state<{ run_id: string; block_id: string; variables: Record<string, unknown> } | null>(null);
+  let paused = $state<{ run_id: string; block_id: string; variables: Record<string, unknown>; summary?: string } | null>(null);
+  /** After "Step": the run is on its way to the next block (maybe waiting first). */
+  let stepping = $state<{ run_id: string; waiting: string | null } | null>(null);
+  // Kept here, not in the side panel, which may close while the server keeps pausing.
+  let pauseOnStart = $state(false);
+  let breakpoints: string[] = [];
+  /** Blocks the editor can't show; while some may still turn up, editing waits for them. */
+  let missing = $state<Missing[]>([]);
+  let editAnyway = $state(false);
+  const waitingFor = $derived(missing.filter((m) => m.pending));
+  const readOnly = $derived(waitingFor.length > 0 && !editAnyway);
   // Phones have no room for the panel next to the blocks; there it opens over them.
   const narrow = () => window.matchMedia?.('(max-width: 700px)').matches ?? false;
   let panelOpen = $state(!narrow());
@@ -121,19 +132,63 @@
   /** Each block's text as the editor shows it, kept so runs read the way the blocks did. */
   function blockLabels(state: object): Record<string, string> {
     const out: Record<string, string> = {};
+    const before = program?.labels ?? {};
     for (const b of blockIds((state as { blocks?: unknown }).blocks)) {
-      const text = ws?.describe(b);
+      // Blocks kept inside a placeholder aren't on the canvas: keep what they read before.
+      const text = ws?.describe(b) ?? before[b];
       if (text) out[b] = text;
     }
     return out;
   }
 
+  /** "1 run is waiting (12 min left) and 1 timer is counting down", or null if nothing stops. */
+  function stops(i: SaveImpact): string | null {
+    if (!i.restarts || (!i.runs.length && !i.timers.length)) return null;
+    const now = Date.now();
+    const parts: string[] = [];
+    const [r] = i.runs;
+    if (i.runs.length === 1) {
+      const left = r.waiting?.until ? ` (${fmtDuration(r.waiting.until - now)} left)` : '';
+      parts.push(r.waiting ? `1 run is waiting${left}` : '1 run is in progress');
+    } else if (i.runs.length) parts.push(`${i.runs.length} runs are in progress`);
+    const [t] = i.timers;
+    if (i.timers.length === 1) parts.push(`1 timer (“${t.name.split(':')[0]}”, ${fmtDuration(t.due - now)} left) is counting down`);
+    else if (i.timers.length) parts.push(`${i.timers.length} timers are counting down`);
+    return parts.join(' and ');
+  }
+
+  /** Unavailable blocks (placeholders) that were in the program and are now gone. */
+  function removedUnavailable(workspace: object): Missing[] {
+    if (!missing.length || !baseline) return [];
+    const types = new Set(missing.map((m) => m.type));
+    const before = countTypes(JSON.parse(baseline), types);
+    const after = countTypes(workspace, types);
+    return missing.filter((m, i) => missing.findIndex((x) => x.type === m.type) === i && (after.get(m.type) ?? 0) < (before.get(m.type) ?? 0));
+  }
+
   async function save(): Promise<boolean> {
     if (!program) return false;
+    if (readOnly) {
+      flash('Not saved: waiting for blocks that aren\'t available yet (see above).');
+      return false;
+    }
     saving = true;
     try {
       const workspace = ws?.save() ?? current;
-      const body = { name, mode, enabled, workspace, labels: blockLabels(workspace) };
+      const removed = removedUnavailable(workspace);
+      if (
+        removed.length &&
+        !confirm(
+          `You removed ${removed.map((m) => `“${m.label}”`).join(', ')}, which ${removed.length === 1 ? "isn't" : "aren't"} available right now and can't be added back from the toolbox until ${removed.length === 1 ? 'it is' : 'they are'} again. Save anyway?`,
+        )
+      )
+        return false;
+      const body = { name, mode, enabled, workspace, labels: blockLabels(workspace), remove_unavailable: removed.length > 0 };
+      if (pid) {
+        const impact = await api.impact(pid, body).catch(() => null);
+        const stopped = impact && stops(impact);
+        if (stopped && !confirm(`${stopped}. Saving these changes starts the program again, which stops ${impact!.runs.length + impact!.timers.length === 1 ? 'it' : 'them'}. Save anyway?`)) return false;
+      }
       let saved: Program;
       if (pid) {
         saved = await api.update(pid, body);
@@ -141,9 +196,13 @@
         saved = await api.create(body);
         pid = saved.id;
         watch(saved.id);
+        // Debug settings made before the first save.
+        if (breakpoints.length) setBreakpoints(breakpoints);
+        if (pauseOnStart) setPauseOnStart(true);
         // Without a hashchange, so the editor (and its undo history) stays as it is.
         window.history.replaceState(null, '', `#/p/${saved.id}`);
       }
+      saved.labels = body.labels;
       program = saved;
       baseline = JSON.stringify(ws?.save() ?? current);
       meta = metaKey();
@@ -267,13 +326,42 @@
   }
 
   function setBreakpoints(blocks: string[]) {
+    breakpoints = blocks;
     if (pid) events.send({ type: 'breakpoints', program_id: pid, blocks }, `bp:${pid}`);
+  }
+
+  function setPauseOnStart(on: boolean) {
+    pauseOnStart = on;
+    if (pid) events.send({ type: 'pause_on_start', program_id: pid, enabled: on }, `pos:${pid}`);
   }
 
   function resume(step: boolean) {
     if (!paused) return;
+    stepping = step ? { run_id: paused.run_id, waiting: null } : null;
     events.send({ type: step ? 'step' : 'resume', run_id: paused.run_id });
   }
+
+  /** Shows the program again once blocks it was waiting for may be there. */
+  function reloadForMissing() {
+    if (!ws || !program || dirty || !missing.length) return;
+    ws.load(program.workspace);
+    setTimeout(() => {
+      if (!ws) return;
+      missing = ws.missing();
+      current = ws.save();
+      baseline = JSON.stringify(current);
+      onchange(current);
+      ws.setErrors(errors);
+    }, 50);
+  }
+
+  let seenVersion = registry.version;
+  $effect(() => {
+    const v = registry.version;
+    if (v === seenVersion) return;
+    seenVersion = v;
+    reloadForMissing();
+  });
 
   function guardLeave(e: BeforeUnloadEvent) {
     if (dirty) e.preventDefault();
@@ -289,6 +377,7 @@
       setTimeout(() => {
         ws?.setErrors(errors);
         current = ws?.save() ?? current;
+        missing = ws?.missing() ?? [];
         onchange(current);
         baseline = JSON.stringify(current);
         refreshDirty();
@@ -309,8 +398,12 @@
         case 'step':
           ws?.setMarker('active', ev.block_id);
           break;
+        case 'waiting':
+          if (stepping?.run_id === ev.run_id) stepping = { ...stepping, waiting: ev.waiting?.text ?? null };
+          break;
         case 'paused':
-          paused = { run_id: ev.run_id, block_id: ev.block_id, variables: ev.variables };
+          stepping = null;
+          paused = { run_id: ev.run_id, block_id: ev.block_id, variables: ev.variables, summary: ev.summary };
           ws?.setMarker('paused', ev.block_id);
           ws?.reveal(ev.block_id);
           panelOpen = true;
@@ -321,6 +414,7 @@
           break;
         case 'run_finished':
           if (paused?.run_id === ev.run_id) paused = null;
+          if (stepping?.run_id === ev.run_id) stepping = null;
           ws?.setMarker('active', null);
           ws?.setMarker('paused', null);
           if (ev.block_id) ws?.setMarker('failed', ev.block_id);
@@ -338,6 +432,7 @@
         events.send({ type: 'unwatch', program_id: pid });
         events.unstick(`watch:${pid}`);
         events.unstick(`bp:${pid}`);
+        events.unstick(`pos:${pid}`);
       }
       window.removeEventListener('keydown', onkey);
       window.removeEventListener('beforeunload', guardLeave);
@@ -376,11 +471,31 @@
       {/if}
     </span>
     <button class="btn" onclick={stop} disabled={!running} title={running ? 'Stop the runs in progress' : 'Nothing is running'}>Stop</button>
-    <button class="btn primary" onclick={save} disabled={saving}>{dirty || !pid ? 'Save*' : 'Save'}</button>
+    <button class="btn primary" onclick={save} disabled={saving || readOnly} title={readOnly ? 'Waiting for blocks that aren\'t available yet' : undefined}>{dirty || !pid ? 'Save*' : 'Save'}</button>
     <button class="icon" onclick={() => (panelOpen = !panelOpen)} title="Toggle side panel" aria-label="Toggle side panel">☰</button>
     <button class="icon danger" onclick={remove} title="Move to the recycle bin" aria-label="Delete program">🗑</button>
   </div>
   {#if runMenu}<div class="menu-backdrop" role="presentation" onclick={() => (runMenu = null)}></div>{/if}
+  {#if readOnly}
+    <div class="banner" role="status">
+      <span>
+        {waitingFor.length === 1 ? `“${waitingFor[0].label}” isn't available right now` : `${waitingFor.length} blocks aren't available right now`}:
+        {waitingFor[0].reason} Editing is paused until {waitingFor.length === 1 ? 'it shows' : 'they show'} up, so nothing is lost; the program itself keeps running.
+      </span>
+      <button class="btn" onclick={() => (editAnyway = true)} title="The missing blocks are kept exactly as they are when you save">Edit anyway</button>
+    </div>
+  {:else if missing.length}
+    <div class="banner" role="status">
+      {missing.length === 1 ? `“${missing[0].label}” isn't available` : `${missing.length} blocks aren't available`}: {missing[0].reason} {missing.length === 1 ? 'It is' : 'They are'} kept as {missing.length === 1 ? 'it was' : 'they were'} when you save.
+    </div>
+  {/if}
+  {#if paused}
+    <div class="banner paused-banner" role="status">
+      <span>⏸ A run is paused before “{ws?.describe(paused.block_id) ?? 'a block'}”{paused.summary ? ` (started by: ${paused.summary})` : ''}. It carries on by itself after 10 minutes.</span>
+      <button class="btn primary" onclick={() => resume(false)}>Continue</button>
+      <button class="btn" onclick={() => resume(true)}>Step</button>
+    </div>
+  {/if}
   <div class="body">
     <div class="canvas">
       {#if program && registry.loaded}
@@ -392,6 +507,9 @@
           {onchange}
           onbreakpoints={setBreakpoints}
           onrunstack={runStack}
+          why={whyMissing}
+          labels={program.labels ?? {}}
+          {readOnly}
         />
       {/if}
     </div>
@@ -401,6 +519,9 @@
         onactive={showActive}
         errors={[...(ws?.friendlyErrors(errors) ?? errors), ...hints]}
         {paused}
+        {stepping}
+        {pauseOnStart}
+        onpauseonstart={setPauseOnStart}
         onresume={resume}
         onreveal={(b) => ws?.reveal(b)}
         describe={(b) => ws?.describe(b) ?? null}
@@ -528,6 +649,22 @@
   }
   .changes {
     display: block;
+  }
+  .banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    font-size: 14px;
+    background: color-mix(in srgb, #ffa600 18%, var(--pb-card));
+    border-bottom: 1px solid var(--pb-divider);
+  }
+  .banner > span {
+    flex: 1 1 320px;
+  }
+  .paused-banner {
+    background: color-mix(in srgb, #e53935 14%, var(--pb-card));
   }
   .backdrop {
     position: fixed;

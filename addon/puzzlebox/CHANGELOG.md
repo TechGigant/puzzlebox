@@ -1,10 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.6.1
 
 - The backpack and the toolbox show blocks at normal size when the canvas is
   zoomed in, instead of growing wider than the canvas and running under the
   toolbox. Opening one closes the other.
+- Releases are built only after all tests pass, and reuse already compiled
+  dependencies, so updates are published much faster.
 
 ## 0.6.0
 

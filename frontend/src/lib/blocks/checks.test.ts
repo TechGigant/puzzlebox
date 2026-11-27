@@ -4,11 +4,12 @@ import { beforeAll, describe, expect, it, vi } from 'vitest';
 
 vi.mock('../api', () => ({
   getJson: vi.fn(async (path: string) => {
-    if (path === 'api/ha/states') {
-      return [
+    if (path.startsWith('api/ha/states')) {
+      const changed = [
         { entity_id: 'binary_sensor.hall_motion', state: 'off', attributes: {} },
         { entity_id: 'tts.google', state: 'unknown', attributes: {} },
       ];
+      return { full: true, version: 1, changed, removed: [] };
     }
     if (path === 'api/ha/registry') {
       return { areas: [], floors: [], labels: [], devices: [{ id: 'p', name: 'Pixel 7', area_id: null }], entities: [] };

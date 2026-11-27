@@ -30,6 +30,10 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Failed runs in a row before Repairs says a program keeps failing.
+FAILING_RUNS = 3
+PROGRAM_ISSUES = ("program_invalid", "program_failing")
+
 Handler = Callable[[HomeAssistant, dict[str, Any], dict[str, Any]], Any | Awaitable[Any]]
 
 
@@ -58,6 +62,7 @@ class BridgeClient:
 
     async def async_stop(self) -> None:
         self._update_issues(None)
+        self._clear_program_issues(set())
         if self._task:
             self._task.cancel()
         for wid in list(self._webhooks):
@@ -143,6 +148,54 @@ class BridgeClient:
             )
 
     @callback
+    def _update_program_issues(self) -> None:
+        """Repairs entries for programs that can't run as built or keep failing."""
+        wanted: set[str] = set()
+        for pid, program in self.programs.items():
+            if not program.get("enabled"):
+                continue
+            status = program.get("status") or {}
+            name = program.get("name") or pid
+            problems = [e.get("message", "") for e in status.get("errors") or []]
+            if status.get("state") == "error" and not problems and status.get("last_error"):
+                problems = [status["last_error"]]
+            if problems:
+                wanted.add(f"program_invalid_{pid}")
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    f"program_invalid_{pid}",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.ERROR,
+                    translation_key="program_invalid",
+                    translation_placeholders={"name": name, "problems": "; ".join(problems)},
+                )
+            failures = program.get("failures") or 0
+            if failures >= FAILING_RUNS:
+                wanted.add(f"program_failing_{pid}")
+                ir.async_create_issue(
+                    self.hass,
+                    DOMAIN,
+                    f"program_failing_{pid}",
+                    is_fixable=False,
+                    severity=ir.IssueSeverity.WARNING,
+                    translation_key="program_failing",
+                    translation_placeholders={
+                        "name": name,
+                        "count": str(failures),
+                        "error": status.get("last_error") or "unknown error",
+                    },
+                )
+        self._clear_program_issues(wanted)
+
+    @callback
+    def _clear_program_issues(self, keep: set[str]) -> None:
+        reg = ir.async_get(self.hass)
+        for domain, issue_id in list(reg.issues):
+            if domain == DOMAIN and issue_id.startswith(PROGRAM_ISSUES) and issue_id not in keep:
+                ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+
+    @callback
     def _set_connected(self, value: bool) -> None:
         if self.connected != value:
             self.connected = value
@@ -172,6 +225,7 @@ class BridgeClient:
             return
         if kind == "programs":
             self.programs = {p["id"]: p for p in msg.get("programs", [])}
+            self._update_program_issues()
             async_dispatcher_send(self.hass, SIGNAL_PROGRAMS)
         elif kind == "variables":
             self.variables = dict(msg.get("variables") or {})

@@ -13,6 +13,7 @@ use puzzlebox_ha_client::{ConnectionState, HaClient};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tower_http::compression::CompressionLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::bridge::Bridge;
@@ -108,13 +109,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/plugins", get(plugins_info))
         .route("/api/plugins/reload", post(plugins_reload))
         .route("/api/settings", get(settings))
-        .route("/api/variables", get(variables).put(set_variable))
+        .route("/api/variables", get(variables).put(set_variable).delete(delete_variable))
         .route("/api/editor/{key}", get(editor_data).put(set_editor_data))
         .route("/api/bridge", get(bridge::upgrade))
         .route("/api/webhook/{id}", axum::routing::any(webhooks::receive))
         .route("/api/registry/reload", post(registry_reload))
         .fallback(static_file)
         .layer(middleware::from_fn_with_state(state.clone(), peer_guard))
+        // Home Assistant's ingress asks for uncompressed responses and compresses them itself;
+        // this is for opening the app on its own port.
+        .layer(CompressionLayer::new().gzip(true).br(true))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
@@ -197,15 +201,29 @@ struct StatesQuery {
     since: Option<u64>,
 }
 
+/// A state as the editor needs it: without `context`, `last_updated` and `last_reported`,
+/// which are about a third of each state and never shown.
+fn slim_state(s: Value) -> Value {
+    let Value::Object(mut m) = s else { return s };
+    for k in ["context", "last_updated", "last_reported"] {
+        m.remove(k);
+    }
+    Value::Object(m)
+}
+
+fn slim_states(states: Vec<Value>) -> Value {
+    Value::Array(states.into_iter().map(slim_state).collect())
+}
+
 /// A plain list of states, or with `?since=` only what changed after that version (or
 /// everything with `"full": true` when the cache was reloaded in between).
 async fn ha_states(State(st): State<AppState>, Query(q): Query<StatesQuery>) -> Json<Value> {
-    let Some(since) = q.since else { return Json(Value::Array(st.live.all_states())) };
+    let Some(since) = q.since else { return Json(slim_states(st.live.all_states())) };
     if let Some(d) = st.live.states_since(since) {
-        return Json(json!({"version": d.version, "changed": d.changed, "removed": d.removed}));
+        return Json(json!({"version": d.version, "changed": slim_states(d.changed), "removed": d.removed}));
     }
     let (version, all) = st.live.all_states_versioned();
-    Json(json!({"version": version, "full": true, "changed": all, "removed": []}))
+    Json(json!({"version": version, "full": true, "changed": slim_states(all), "removed": []}))
 }
 
 async fn registry_blocks(State(st): State<AppState>) -> Json<Value> {
@@ -369,6 +387,20 @@ async fn set_variable(
     Json(v): Json<SetVariable>,
 ) -> Result<Json<Value>, ApiError> {
     st.engine.set_variable(v.program_id.as_deref(), &v.name, v.value).await?;
+    Ok(Json(json!({"ok": true})))
+}
+
+#[derive(serde::Deserialize)]
+struct DeleteVariable {
+    program_id: Option<String>,
+    name: String,
+}
+
+async fn delete_variable(
+    State(st): State<AppState>,
+    Json(v): Json<DeleteVariable>,
+) -> Result<Json<Value>, ApiError> {
+    st.engine.delete_variable(v.program_id.as_deref(), &v.name).await?;
     Ok(Json(json!({"ok": true})))
 }
 

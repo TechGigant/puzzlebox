@@ -15,7 +15,7 @@ PROTOCOL = 2
 MIN_PEER_PROTOCOL = 1
 
 FEATURES: dict[str, int] = {
-    "programs": 1,  # program list, enable/disable, run, set_variable
+    "programs": 2,  # program list, enable/disable, run, set_variable; 2: activity, failures
     "run_events": 1,  # run_started / run_finished events
     "webhooks": 1,  # webhooks registered on the app's behalf
     "packs": 1,  # blocks and handlers from other integrations
@@ -72,6 +72,12 @@ class AppInfo:
 
     def has(self, feature: str) -> bool:
         return feature in FEATURES and feature in self.features
+
+    def feature_version(self, feature: str) -> int:
+        """Version of a feature both sides support (the lower one), 0 if not shared."""
+        if not self.has(feature):
+            return 0
+        return min(FEATURES[feature], self.features[feature])
 
     def compatible(self) -> bool:
         return self.protocol >= MIN_PEER_PROTOCOL and self.min_protocol <= PROTOCOL

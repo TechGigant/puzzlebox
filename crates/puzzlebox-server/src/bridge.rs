@@ -28,6 +28,8 @@ use crate::routes::AppState;
 use crate::webhooks::Webhooks;
 
 const INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Runs looked at for "failed N times in a row" (the integration raises a repair at 3).
+const FAILURES_COUNTED: usize = 5;
 
 pub struct Bridge {
     engine: Engine,
@@ -163,15 +165,32 @@ impl Bridge {
 
     async fn programs_snapshot(&self) -> Value {
         let programs = self.engine.store().list_programs().await.unwrap_or_default();
-        let list: Vec<Value> = programs
-            .iter()
-            .map(|p| {
-                json!({
-                    "id": p.id, "name": p.name, "enabled": p.enabled, "mode": p.mode,
-                    "status": self.engine.status(&p.id),
-                })
-            })
-            .collect();
+        let paused: Vec<String> =
+            self.engine.debugger().paused_runs().into_iter().map(|(run, _)| run).collect();
+        let mut list = Vec::with_capacity(programs.len());
+        for p in &programs {
+            let active = self.engine.active_runs(&p.id);
+            let activity = if active.iter().any(|r| paused.contains(&r.run_id)) {
+                Some("paused")
+            } else if active.iter().any(|r| r.waiting.is_some()) {
+                Some("waiting")
+            } else {
+                None
+            };
+            let failures = self
+                .engine
+                .store()
+                .list_runs(&p.id, FAILURES_COUNTED)
+                .await
+                .map(|runs| runs.iter().take_while(|r| r.status == "error").count())
+                .unwrap_or(0);
+            list.push(json!({
+                "id": p.id, "name": p.name, "enabled": p.enabled, "mode": p.mode,
+                "status": self.engine.status(&p.id),
+                "activity": activity,
+                "failures": failures,
+            }));
+        }
         json!({"type": "programs", "programs": list})
     }
 
@@ -411,11 +430,21 @@ async fn session(mut socket: WebSocket, bridge: Arc<Bridge>) {
             ev = events.recv() => {
                 let Ok(ev) = ev else { continue };
                 match &ev {
-                    EngineEvent::Status { .. } | EngineEvent::Removed { .. } if programs => {
+                    EngineEvent::Status { .. }
+                    | EngineEvent::Removed { .. }
+                    | EngineEvent::Waiting { .. }
+                    | EngineEvent::Paused { .. }
+                    | EngineEvent::Resumed { .. }
+                        if programs =>
+                    {
                         let _ = tx.send(bridge.programs_snapshot().await);
                     }
                     EngineEvent::RunStarted { .. } | EngineEvent::RunFinished { .. } if run_events => {
                         let _ = tx.send(serde_json::to_value(&ev).unwrap_or_default());
+                    }
+                    // Null = deleted: the full list drops its sensor instead of showing "unknown".
+                    EngineEvent::GlobalChanged { value: Value::Null, .. } if variables => {
+                        let _ = tx.send(json!({"type": "variables", "variables": bridge.engine.globals()}));
                     }
                     EngineEvent::GlobalChanged { name, value } if variables => {
                         let _ = tx.send(json!({"type": "variable", "name": name, "value": value}));

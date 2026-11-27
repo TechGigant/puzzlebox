@@ -70,6 +70,9 @@ CREATE TABLE program_log (
 );
 CREATE INDEX log_by_program ON program_log(program_id, id DESC);
 "#,
+    r#"
+ALTER TABLE program_versions ADD COLUMN mode TEXT;
+"#,
 ];
 
 /// Days a deleted program stays in the recycle bin.
@@ -102,6 +105,9 @@ pub struct ProgramVersion {
     pub id: i64,
     pub saved_at: i64,
     pub name: String,
+    /// Run mode when it was saved; `None` for versions saved before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     /// Blocks in this version, not counting shadows.
     #[serde(default)]
     pub blocks: usize,
@@ -263,19 +269,22 @@ impl Store {
                     p.folder
                 ],
             )?;
-            // A restore point for every save that changed the blocks.
+            // A restore point for every save that changed the blocks, the name or the run mode.
             let ws = p.workspace.to_string();
-            let last: Option<String> = c
+            let last: Option<(String, String, Option<String>)> = c
                 .query_row(
-                    "SELECT workspace FROM program_versions WHERE program_id = ?1 ORDER BY id DESC LIMIT 1",
+                    "SELECT workspace, name, mode FROM program_versions WHERE program_id = ?1 ORDER BY id DESC LIMIT 1",
                     [&p.id],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
                 .optional()?;
-            if last.as_deref() != Some(ws.as_str()) {
+            let unchanged = last.as_ref().is_some_and(|(w, name, mode)| {
+                *w == ws && *name == p.name && mode.as_deref().is_none_or(|m| m == p.mode)
+            });
+            if !unchanged {
                 c.execute(
-                    "INSERT INTO program_versions (program_id, saved_at, name, workspace) VALUES (?1, ?2, ?3, ?4)",
-                    params![p.id, p.updated_at, p.name, ws],
+                    "INSERT INTO program_versions (program_id, saved_at, name, workspace, mode) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![p.id, p.updated_at, p.name, ws, p.mode],
                 )?;
                 c.execute(
                     "DELETE FROM program_versions WHERE program_id = ?1 AND id NOT IN
@@ -293,29 +302,44 @@ impl Store {
         let id = program_id.to_owned();
         self.with(move |c| {
             let mut st = c.prepare(
-                "SELECT id, saved_at, name, workspace FROM program_versions WHERE program_id = ?1 ORDER BY id",
+                "SELECT id, saved_at, name, workspace, mode FROM program_versions WHERE program_id = ?1 ORDER BY id",
             )?;
             let rows = st.query_map([id], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
             })?;
             let mut out = Vec::new();
-            let mut prev: Option<(BTreeMap<String, Value>, String)> = None;
+            let mut prev: Option<(BTreeMap<String, Value>, String, Option<String>)> = None;
             for row in rows {
-                let (id, saved_at, name, ws) = row?;
+                let (id, saved_at, name, ws, mode) = row?;
                 let blocks = block_map(&from_str_deep(&ws).unwrap_or(Value::Null));
                 let changes = match &prev {
                     None => "first save".to_owned(),
-                    Some((before, before_name)) => describe_changes(before, &blocks, before_name, &name),
+                    Some((before, before_name, before_mode)) => {
+                        let text = describe_changes(before, &blocks, before_name, &name);
+                        let mode_changed = before_mode.is_some() && mode.is_some() && *before_mode != mode;
+                        match (mode_changed, *before == blocks && before_name == &name) {
+                            (false, _) => text,
+                            (true, true) => "run mode changed".to_owned(),
+                            (true, false) => format!("{text}, run mode changed"),
+                        }
+                    }
                 };
                 out.push(ProgramVersion {
                     id,
                     saved_at,
                     name: name.clone(),
+                    mode: mode.clone(),
                     blocks: blocks.len(),
                     changes,
                     workspace: None,
                 });
-                prev = Some((blocks, name));
+                prev = Some((blocks, name, mode.clone()));
             }
             out.reverse();
             Ok(out)
@@ -327,7 +351,7 @@ impl Store {
         let id = program_id.to_owned();
         self.with(move |c| {
             Ok(c.query_row(
-                "SELECT id, saved_at, name, workspace FROM program_versions WHERE program_id = ?1 AND id = ?2",
+                "SELECT id, saved_at, name, workspace, mode FROM program_versions WHERE program_id = ?1 AND id = ?2",
                 params![id, version],
                 |r| {
                     let ws: String = r.get(3)?;
@@ -336,6 +360,7 @@ impl Store {
                         id: r.get(0)?,
                         saved_at: r.get(1)?,
                         name: r.get(2)?,
+                        mode: r.get(4)?,
                         blocks: workspace.as_ref().map(|w| block_map(w).len()).unwrap_or_default(),
                         changes: String::new(),
                         workspace,
@@ -917,6 +942,17 @@ mod tests {
         let first = s.get_version("v1", versions[2].id).await.unwrap().unwrap();
         assert_eq!(first.workspace, Some(serde_json::json!({"n": 0})));
         assert_eq!(versions[2].changes, "first save");
+        assert_eq!(first.mode.as_deref(), Some("single"));
+        // A new run mode or name is a restore point too, so restoring brings them back.
+        p.mode = "queued".into();
+        s.save_program(p.clone()).await.unwrap();
+        p.name = "Renamed".into();
+        s.save_program(p.clone()).await.unwrap();
+        let versions = s.list_versions("v1").await.unwrap();
+        assert_eq!(versions.len(), 5);
+        assert_eq!(versions[1].changes, "run mode changed");
+        assert_eq!(versions[1].mode.as_deref(), Some("queued"));
+        assert!(versions[0].changes.contains("renamed from"), "{}", versions[0].changes);
         s.delete_program("v1").await.unwrap();
         s.purge_program("v1").await.unwrap();
         assert!(s.list_versions("v1").await.unwrap().is_empty());

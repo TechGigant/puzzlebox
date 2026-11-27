@@ -365,6 +365,21 @@ pub fn builtin(name: &str, args: &[Value]) -> VResult {
             l.insert(at, a(2).clone());
             Value::Array(l)
         }
+        // "add/remove … to/from list …" and "list … contains …": an empty value is an empty
+        // list, and items compare like "find" does ("5" equals 5).
+        "list_append" => {
+            let mut l = if a(0).is_null() { vec![] } else { list(a(0))?.clone() };
+            l.push(a(1).clone());
+            Value::Array(l)
+        }
+        "list_remove_value" => match a(0) {
+            Value::Null => json!([]),
+            v => Value::Array(list(v)?.iter().filter(|x| !loose_eq(x, a(1))).cloned().collect()),
+        },
+        "list_contains" => match a(0) {
+            Value::Null => json!(false),
+            v => json!(list(v)?.iter().any(|x| loose_eq(x, a(1)))),
+        },
         "list_remove" => {
             let mut l = list(a(0))?.clone();
             let i = list_position(l.len(), a(1))?;

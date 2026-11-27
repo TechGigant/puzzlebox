@@ -5,12 +5,12 @@ Enable with `puzzlebox_example:` in configuration.yaml.
 
 from __future__ import annotations
 
-from datetime import datetime
 import random
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.typing import ConfigType
+from homeassistant.util import dt as dt_util
 
 DOMAIN = "puzzlebox_example"
 
@@ -31,7 +31,7 @@ PACK = {
         {
             "id": "notify",
             "kind": "action",
-            "title": "Show notification",
+            "title": "show notification",
             "tooltip": "Creates a persistent notification in Home Assistant.",
             "params": [
                 {"name": "message", "label": "message", "required": True, "input": "text"},
@@ -61,7 +61,7 @@ async def notify(hass: HomeAssistant, args: dict[str, Any], context: dict[str, A
 
 
 def is_weekend(hass: HomeAssistant, args: dict[str, Any], context: dict[str, Any]) -> bool:
-    return datetime.now().weekday() >= 5
+    return dt_util.now().weekday() >= 5
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:

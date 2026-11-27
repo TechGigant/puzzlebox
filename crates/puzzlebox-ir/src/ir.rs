@@ -232,6 +232,19 @@ pub enum StmtKind {
     ContinueOnError {
         body: Vec<Stmt>,
     },
+    /// Starts another program (by id) like its Run button; with `wait`, until that run ends.
+    RunProgram {
+        program: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        wait: bool,
+    },
+    /// Changes the brightness of `target` from `from` to `to` % in small steps over `seconds`.
+    Fade {
+        target: Expr,
+        from: Expr,
+        to: Expr,
+        seconds: Expr,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

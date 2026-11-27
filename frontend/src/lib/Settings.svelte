@@ -4,20 +4,27 @@
   import { loadRegistry, registry } from './registry.svelte';
   import { loadPrefs, savePrefs } from './editor/appearance';
   import { z2mStatusText } from './z2m_status';
+  import StoredVariables from './StoredVariables.svelte';
+
+  const FEATURE_NAMES: Record<string, string> = {
+    programs: 'program status sensors and Repairs',
+    run_events: 'program started/finished events',
+    webhooks: 'webhook triggers',
+    packs: 'blocks from other integrations',
+    variables: 'global variables as sensors',
+  };
 
   let prefs = $state(loadPrefs());
   $effect(() => savePrefs({ ...prefs }));
 
   let settings = $state<Settings | null>(null);
   let plugins = $state<PluginsInfo | null>(null);
-  let vars = $state<{ global: Record<string, unknown>; programs: Record<string, Record<string, unknown>> } | null>(null);
   let pluginErrors = $state<{ path: string; error: string }[]>([]);
   let showToken = $state(false);
   let message = $state<string | null>(null);
-  let newVar = $state({ name: '', value: '' });
 
   async function refresh() {
-    [settings, plugins, vars] = await Promise.all([api.settings(), api.plugins(), api.variables()]);
+    [settings, plugins] = await Promise.all([api.settings(), api.plugins()]);
   }
 
   async function reload() {
@@ -28,18 +35,10 @@
     message = 'Plugins and block packs reloaded';
   }
 
-  function parseValue(text: string): unknown {
-    try {
-      return JSON.parse(text);
-    } catch {
-      return text;
-    }
-  }
-
-  async function saveVar(name: string, text: string, programId?: string) {
-    await api.setVariable(name, parseValue(text), programId);
-    await refresh();
-  }
+  /** Where the app's /config folder is from the user's side (Home Assistant OS). */
+  const whereFrom =
+    "Where to find /config: it is the app's own folder, addon_configs/e46cc951_puzzlebox (a folder ending in _puzzlebox), " +
+    'which you reach with the Samba share app (the addon_configs share) or the Studio Code Server app. After copying files there, press Reload.';
 
   async function copy(text: string) {
     await navigator.clipboard?.writeText(text);
@@ -76,13 +75,13 @@
         {/if}
       </p>
       {#if settings.bridge.connected && settings.bridge.missing?.length}
-        <p class="muted">Not available until the integration is updated: {settings.bridge.missing.join(', ')}.</p>
+        <p class="muted">Not available until the integration is updated: {settings.bridge.missing.map((f) => FEATURE_NAMES[f] ?? f).join(', ')}.</p>
       {/if}
       {#if !settings.bridge_connected}
         <div class="warn">
           <p>Programs run without it, but until the integration connects these don't work:</p>
           <ul>
-            <li>a switch and a “run” button for each program in Home Assistant, and its status sensor</li>
+            <li>a switch, a “run” button and a status sensor for each program in Home Assistant, and Repairs when a program breaks</li>
             <li>the <code>puzzlebox.run_program</code> and <code>puzzlebox.set_variable</code> actions, and the <code>puzzlebox_program_started</code>/<code>_finished</code> events</li>
             <li>webhook triggers (their URLs are served by Home Assistant)</li>
             <li>blocks added by other integrations</li>
@@ -156,44 +155,17 @@
       {#each [...pluginErrors, ...registry.packErrors] as e (e.path)}
         <p class="bad">{e.path}: {e.error}</p>
       {/each}
+      {#if settings?.supervised}<p class="muted">{whereFrom}</p>{/if}
     {/if}
   </section>
 
   <section>
     <h2>Stored variables</h2>
-    {#if vars}
-      <h3>Global</h3>
-      <table>
-        <tbody>
-          {#each Object.entries(vars.global) as [k, v] (k)}
-            <tr>
-              <td>{k}</td>
-              <td><input value={JSON.stringify(v)} onchange={(e) => saveVar(k, (e.target as HTMLInputElement).value)} /></td>
-            </tr>
-          {/each}
-          <tr>
-            <td><input placeholder="name" bind:value={newVar.name} /></td>
-            <td class="row">
-              <input placeholder="value (JSON or text)" bind:value={newVar.value} />
-              <button class="btn" disabled={!newVar.name} onclick={() => saveVar(newVar.name, newVar.value).then(() => (newVar = { name: '', value: '' }))}>Add</button>
-            </td>
-          </tr>
-        </tbody>
-      </table>
-      {#each Object.entries(vars.programs) as [pid, pv] (pid)}
-        <h3>Program <a href={`#/p/${pid}`}>{pid}</a></h3>
-        <table>
-          <tbody>
-            {#each Object.entries(pv) as [k, v] (k)}
-              <tr>
-                <td>{k}</td>
-                <td><input value={JSON.stringify(v)} onchange={(e) => saveVar(k, (e.target as HTMLInputElement).value, pid)} /></td>
-              </tr>
-            {/each}
-          </tbody>
-        </table>
-      {/each}
-    {/if}
+    <p class="muted">
+      Values programs keep between runs. Global variables are also sensors in Home Assistant. Change a value and press
+      Save; the kind says how it is read (text, number, yes/no, list or dictionary).
+    </p>
+    <StoredVariables />
   </section>
 
   <section>
@@ -299,21 +271,6 @@
   }
   .message {
     color: var(--pb-primary);
-  }
-  table {
-    width: 100%;
-    border-collapse: collapse;
-  }
-  td {
-    padding: 4px;
-  }
-  td:first-child {
-    width: 30%;
-    font-weight: 500;
-  }
-  td input {
-    width: 100%;
-    box-sizing: border-box;
   }
   .link {
     background: none;

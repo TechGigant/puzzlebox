@@ -5,6 +5,7 @@
   import SidePanel from './SidePanel.svelte';
   import { api, events, type CompileError, type Program, type ProgramVersion, type RunMode } from './api';
   import { registry } from './registry.svelte';
+  import { setLeaveGuard } from './leave';
 
   let { id, onclose }: { id: string; onclose: () => void } = $props();
 
@@ -16,6 +17,7 @@
   let saving = $state(false);
   let message = $state<string | null>(null);
   let errors = $state<CompileError[]>([]);
+  let hints = $state<CompileError[]>([]);
   let paused = $state<{ run_id: string; block_id: string; variables: Record<string, unknown> } | null>(null);
   // Phones have no room for the panel next to the blocks; there it opens over them.
   const narrow = () => window.matchMedia?.('(max-width: 700px)').matches ?? false;
@@ -77,6 +79,7 @@
 
   function onchange(state: object) {
     current = state;
+    hints = ws?.hints() ?? [];
     blockCount = countBlocks((state as { blocks?: unknown }).blocks ?? null) + ((state as { blocks?: { blocks?: unknown[] } }).blocks?.blocks?.length ?? 0);
     if (!baseline) return;
     refreshDirty();
@@ -136,6 +139,7 @@
   async function remove() {
     if (!confirm(`Delete "${name}"? This cannot be undone.`)) return;
     await api.remove(id);
+    dirty = false;
     onclose();
   }
 
@@ -166,10 +170,8 @@
     if (dirty) e.preventDefault();
   }
 
-  function close() {
-    if (dirty && !confirm('Discard unsaved changes?')) return;
-    onclose();
-  }
+  // The app asks this before any navigation away (header links, Back, the ← button).
+  const mayDiscard = () => !dirty || confirm('Discard unsaved changes?');
 
   onMount(() => {
     load().then(() => {
@@ -216,7 +218,9 @@
     });
     window.addEventListener('keydown', onkey);
     window.addEventListener('beforeunload', guardLeave);
+    const stopGuard = setLeaveGuard(mayDiscard);
     return () => {
+      stopGuard();
       off();
       events.send({ type: 'unwatch', program_id: id });
       events.unstick(`watch:${id}`);
@@ -229,7 +233,7 @@
 
 <div class="editor">
   <div class="bar">
-    <button class="icon" onclick={close} aria-label="Back" title="Back to programs">←</button>
+    <button class="icon" onclick={onclose} aria-label="Back" title="Back to programs">←</button>
     <input class="name" bind:value={name} oninput={refreshDirty} aria-label="Program name" />
     <select bind:value={mode} onchange={refreshDirty} title="What happens when a trigger fires while the program is already running">
       <option value="single">if already running: ignore</option>
@@ -244,7 +248,7 @@
     <StatusChip status={program?.status} />
     <span class="spacer"></span>
     {#if message}<span class="message">{message}</span>{/if}
-    <span class="count" title="Blocks in this program">{blockCount} blocks</span>
+    <span class="count" title="Blocks in this program">{blockCount === 1 ? '1 block' : `${blockCount} blocks`}</span>
     <button class="btn" onclick={openHistory} title="Earlier saved versions of this program">History</button>
     <button class="btn" onclick={run} title="Run the program's first entry block now">Run</button>
     <button class="btn" onclick={() => api.cancel(id)} title="Cancel active runs">Stop</button>
@@ -269,7 +273,7 @@
     {#if panelOpen}
       <SidePanel
         programId={id}
-        errors={ws?.friendlyErrors(errors) ?? errors}
+        errors={[...(ws?.friendlyErrors(errors) ?? errors), ...hints]}
         {paused}
         onresume={resume}
         onreveal={(b) => ws?.reveal(b)}

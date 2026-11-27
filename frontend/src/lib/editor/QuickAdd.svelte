@@ -1,20 +1,30 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { search, type Entry } from './quickadd';
+  import { search, type Entry, type Want } from './quickadd';
 
   let {
     entries,
     x,
     y,
+    want = null,
+    hint = 'Enter adds the block where you clicked.',
     onpick,
     onclose,
-  }: { entries: Entry[]; x: number; y: number; onpick: (e: Entry) => void; onclose: () => void } = $props();
+  }: {
+    entries: Entry[];
+    x: number;
+    y: number;
+    want?: Want | null;
+    hint?: string;
+    onpick: (e: Entry) => void;
+    onclose: () => void;
+  } = $props();
 
   let query = $state('');
   let active = $state(0);
   let input: HTMLInputElement;
   let list: HTMLUListElement | undefined = $state();
-  const results = $derived(search(entries, query));
+  const results = $derived(search(entries, query, 40, want));
 
   $effect(() => {
     void query;
@@ -64,7 +74,7 @@
       {/each}
     </ul>
   {:else}
-    <p class="hint">Enter adds the block after the selected one, or where you clicked.</p>
+    <p class="hint">{hint}</p>
   {/if}
 </div>
 
